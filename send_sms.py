@@ -126,7 +126,8 @@ def main():
         else:
             print("SMS sent successfully!")
             print(f"   ID: {result.get('id')}")
-            print(f"   Status: {result.get('status')}")
+            print(f"   Status: {result.get('message_status')}")
+            print(f"   From: {result.get('from_number')}")
             print(f"   To: {', '.join(result.get('to_numbers', []))}")
 
         sys.exit(0)

@@ -1,6 +1,9 @@
 #!/run/current-system/sw/bin/bash
 # Simple tunnel starter - run manually or via cron
 # This creates a new tunnel and prints the URL
+#
+# REQUIREMENT: cloudflared must be installed and authenticated
+# Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation
 
 LOGFILE="/tmp/dialpad-tunnel-$(date +%s).log"
 

@@ -158,7 +158,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
     def handle_store(self):
         """Handle /store endpoint - stores message in SQLite, called by OpenClaw plugin"""
-        content_length = int(self.headers.get("Content-Length", 0))
+        # Limit request body size to prevent memory exhaustion (1MB max)
+        MAX_BODY_SIZE = 1024 * 1024  # 1MB
+        content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
         body = self.rfile.read(content_length).decode("utf-8")
 
         try:
@@ -183,8 +185,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
     def handle_webhook(self):
         """Handle /webhook/dialpad endpoint - main Dialpad webhook"""
-        # Read and parse request body
-        content_length = int(self.headers.get("Content-Length", 0))
+        # Limit request body size to prevent memory exhaustion (1MB max)
+        MAX_BODY_SIZE = 1024 * 1024  # 1MB
+        content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
         body = self.rfile.read(content_length).decode("utf-8")
 
         try:

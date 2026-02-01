@@ -1,6 +1,9 @@
 #!/run/current-system/sw/bin/bash
 # Dialpad Webhook Tunnel Manager
 # Starts Cloudflare tunnel and auto-updates Dialpad webhook URL
+# 
+# REQUIREMENT: cloudflared must be installed and authenticated
+# Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation
 
 set -e
 

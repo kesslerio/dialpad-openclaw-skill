@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=%h/projects/skills/work/dialpad
 EnvironmentFile=%h/projects/skills/work/dialpad/.env
+# NOTE: Adjust Python path to your system (e.g., /usr/bin/python3, ~/.nix-profile/bin/python3)
 ExecStart=%h/.linuxbrew/bin/python3 %h/projects/skills/work/dialpad/webhook_server.py
 Restart=always
 RestartSec=5

@@ -52,9 +52,9 @@ def main() -> int:
             print(json.dumps(result, indent=2))
         else:
             print("SMS sent successfully!")
-            print(f"   ID: {result.get('id')}")
-            print(f"   Status: {result.get('message_status') or result.get('status')}")
-            print(f"   From: {result.get('from_number')}")
+            print(f"   ID: {result.get('id', 'N/A')}")
+            print(f"   Status: {result.get('message_status') or result.get('status', 'unknown')}")
+            print(f"   From: {result.get('from_number', 'N/A')}")
             to_numbers = result.get("to_numbers") or args.to
             print(f"   To: {', '.join(to_numbers)}")
 

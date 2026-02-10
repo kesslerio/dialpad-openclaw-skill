@@ -54,8 +54,8 @@ def to_days_ago(value: date) -> int:
 
 
 
-def build_payload(start_date: str | None, end_date: str | None, office_id: str | None) -> dict[str, object]:
-    payload: dict[str, object] = {
+def build_payload(start_date: str | None, end_date: str | None, office_id: str | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "export_type": "records",
         "stat_type": "texts",
     }

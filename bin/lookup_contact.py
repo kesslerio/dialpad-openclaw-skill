@@ -18,6 +18,7 @@ from _dialpad_compat import (
     WrapperError,
 )
 
+DEFAULT_MAX_PAGES = 20
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--query", help="Lookup query (overrides positional)")
     parser.add_argument("--owner-id", help="Filter by owner user ID")
     parser.add_argument("--include-local", action="store_true", help="Include local contacts")
-    parser.add_argument("--max-pages", type=int, default=20, help="Max pages to scan")
+    parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES, help="Max pages to scan")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     return parser
 

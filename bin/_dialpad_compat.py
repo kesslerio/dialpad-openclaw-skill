@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Shared helpers for Dialpad compatibility wrappers."""
+"""Shared helpers for Dialpad compatibility wrappers.
+
+Provides common utilities (auth, CLI invocation, error handling) used by
+the bin/ wrapper scripts that bridge legacy script interfaces to the
+generated OpenAPI CLI.
+"""
 
 from __future__ import annotations
 

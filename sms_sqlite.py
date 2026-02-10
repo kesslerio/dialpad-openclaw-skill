@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from sms_filter_compat import filter_messages, redact_preview
+
 # Database path
 DB_PATH = Path("/home/art/clawd/logs/sms.db")
 LEGACY_THREADS_DIR = Path("/home/art/clawd/logs/sms_threads")
@@ -186,22 +188,30 @@ def _update_contact_summary(conn: sqlite3.Connection, phone_number: str):
 def get_thread(conn: sqlite3.Connection, phone_number: str, limit: int = 100) -> List[dict]:
     """Get conversation history for a contact"""
     cursor = conn.execute(
-        """SELECT * FROM messages 
-           WHERE contact_number = ? 
-           ORDER BY timestamp ASC 
+        """SELECT * FROM messages
+           WHERE contact_number = ?
+           ORDER BY timestamp ASC
            LIMIT ?""",
         (phone_number, limit)
     )
-    return [dict(row) for row in cursor.fetchall()]
+    messages = [dict(row) for row in cursor.fetchall()]
+    return filter_messages(messages)
 
 
 def get_all_threads(conn: sqlite3.Connection) -> List[dict]:
     """Get summary of all conversations"""
     cursor = conn.execute(
-        """SELECT * FROM contacts 
+        """SELECT * FROM contacts
            ORDER BY last_message_at DESC NULLS LAST"""
     )
-    return [dict(row) for row in cursor.fetchall()]
+    threads = [dict(row) for row in cursor.fetchall()]
+    for t in threads:
+        t["last_message_preview"] = redact_preview(
+            t.get("last_message_preview", ""),
+            sender=t.get("name", ""),
+            contact_number=t.get("phone_number", ""),
+        )
+    return threads
 
 
 def search_messages(conn: sqlite3.Connection, query: str, limit: int = 20) -> List[dict]:
@@ -214,7 +224,8 @@ def search_messages(conn: sqlite3.Connection, query: str, limit: int = 20) -> Li
            LIMIT ?""",
         (query, limit)
     )
-    return [dict(row) for row in cursor.fetchall()]
+    messages = [dict(row) for row in cursor.fetchall()]
+    return filter_messages(messages)
 
 
 def mark_as_read(conn: sqlite3.Connection, phone_number: str) -> int:
@@ -233,7 +244,14 @@ def get_unread(conn: sqlite3.Connection) -> List[dict]:
     cursor = conn.execute(
         """SELECT * FROM contacts WHERE unread_count > 0 ORDER BY last_message_at DESC"""
     )
-    return [dict(row) for row in cursor.fetchall()]
+    threads = [dict(row) for row in cursor.fetchall()]
+    for t in threads:
+        t["last_message_preview"] = redact_preview(
+            t.get("last_message_preview", ""),
+            sender=t.get("name", ""),
+            contact_number=t.get("phone_number", ""),
+        )
+    return threads
 
 
 def migrate_from_json(conn: sqlite3.Connection):

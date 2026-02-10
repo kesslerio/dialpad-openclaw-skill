@@ -14,6 +14,8 @@ sys.path.insert(0, str(skill_dir))
 
 from sms_sqlite import init_db, store_message, get_all_threads, get_unread, mark_as_read
 
+from sms_filter_compat import redact_preview
+
 
 def handle_sms_webhook(data: dict) -> dict:
     """
@@ -57,16 +59,19 @@ def format_notification(response: dict) -> str:
     """Format a stored message for notification"""
     if response.get("status") != "success":
         return f"❌ Failed to store message: {response.get('error', 'Unknown error')}"
-    
+
     msg = response.get("message", {})
     direction_emoji = "📥" if msg.get("direction") == "inbound" else "📤"
     contact = msg.get("contact_name", "Unknown")
     number = msg.get("contact_number", "")
     preview = msg.get("preview", "")
     unread = msg.get("unread_count", 0)
-    
+
+    # Redact preview if message is sensitive
+    preview = redact_preview(preview, sender=contact, contact_number=number)
+
     unread_indicator = f" ({unread} unread)" if unread > 1 else ""
-    
+
     return f"{direction_emoji} **SMS from {contact}** ({number}){unread_indicator}\n> {preview}"
 
 

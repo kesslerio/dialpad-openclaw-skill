@@ -39,6 +39,8 @@ sys.path.insert(0, str(skill_dir))
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook, format_notification
 
+from sms_filter_compat import is_sensitive_message
+
 # Environment configuration (NO HARDCODED SECRETS)
 PORT = int(os.environ.get("PORT", "8081"))
 WEBHOOK_SECRET = os.environ.get("DIALPAD_WEBHOOK_SECRET", "")
@@ -218,30 +220,32 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             return
 
         # Send Telegram notification for inbound messages
+        # Suppress notification for sensitive messages (2FA codes, OTP, etc.)
         telegram_sent = False
+        sensitive_filtered = False
         if direction == "inbound":
-            # Try to enrich with contact name from Dialpad API
+            # Resolve contact name before filtering so sender check isn't "Unknown"
             contact_info = get_contact_name(from_num)
-
-            # If API lookup failed, try to get cached name from SQLite result
             if not contact_info and result.get("message"):
-                contact_name = result["message"].get("contact_name")
-                if contact_name and contact_name != "Unknown":
-                    contact_info = contact_name
+                cached = result["message"].get("contact_name", "")
+                if cached and cached != "Unknown":
+                    contact_info = cached
 
-            # Format notification
-            sender_display = f"*{contact_info}* (`{from_num}`)" if contact_info else f"`{from_num}`"
+            if is_sensitive_message(text=text, sender=contact_info or "", contact_number=from_num):
+                sensitive_filtered = True
+                print(f"   🔒 Sensitive message filtered (not forwarding to Telegram)")
+            else:
+                sender_display = f"*{contact_info}* (`{from_num}`)" if contact_info else f"`{from_num}`"
+                text_preview = text[:200] + "..." if len(text) > 200 else text
 
-            text_preview = text[:200] + "..." if len(text) > 200 else text
+                tg_text = (
+                    f"📱 *New SMS Received*\n"
+                    f"*From:* {sender_display}\n"
+                    f"*Message:* {text_preview}\n\n"
+                    f"_Reply via Dialpad or use /sms to respond._"
+                )
 
-            tg_text = (
-                f"📱 *New SMS Received*\n"
-                f"*From:* {sender_display}\n"
-                f"*Message:* {text_preview}\n\n"
-                f"_Reply via Dialpad or use /sms to respond._"
-            )
-
-            telegram_sent = send_to_telegram(tg_text)
+                telegram_sent = send_to_telegram(tg_text)
 
         # Console logging
         print(f"[{timestamp}]")
@@ -251,7 +255,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             print(f"   📄 \"{text_preview}\"")
         print(f"   💾 Stored: ✓")
         if direction == "inbound":
-            print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
+            if sensitive_filtered:
+                print(f"   📨 Telegram: ✗ (sensitive — filtered)")
+            else:
+                print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
         print()
 
         # Always return 200 OK (graceful degradation)

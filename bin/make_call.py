@@ -71,16 +71,15 @@ def main() -> int:
         if args.text_to_speak:
             payload["command"] = json.dumps({"actions": [{"say": args.text_to_speak}]})
 
-        # Build command with required args + custom-data for TTS
+        # Use --data to send the full payload including the 'command' field which is 
+        # missing from the generated CLI options but supported by the Dialpad API.
+        # We still provide required flags to satisfy Click validation.
         cmd = [
             "call", "call.call",
             "--phone-number", args.to,
             "--user-id", str(user_id),
+            "--data", json.dumps(payload),
         ]
-        if args.from_number:
-            cmd.extend(["--outbound-caller-id", args.from_number])
-        if args.text_to_speak:
-            cmd.extend(["--custom-data", json.dumps({"command": {"actions": [{"say": args.text_to_speak}]}})])
         result = run_generated_json(cmd)
 
         if args.json:

@@ -1,12 +1,16 @@
 ---
 name: dialpad
-description: Send SMS and make voice calls via Dialpad API. Supports single/batch SMS, voice calls with TTS, and caller ID selection.
+description: Send SMS and make voice calls via Dialpad API using an OpenAPI-generated CLI with compatibility wrappers.
 homepage: https://developers.dialpad.com/
 ---
 
 # Dialpad Skill
 
 Send SMS and make voice calls via the Dialpad API.
+
+Primary interface:
+- `generated/dialpad` (OpenAPI-generated CLI facade)
+- `bin/*.py` compatibility wrappers for legacy script behavior
 
 ## Available Phone Numbers
 
@@ -25,6 +29,8 @@ Use `--from <number>` to specify which number appears as caller ID.
 DIALPAD_API_KEY=your_api_key_here
 ```
 
+`generated/dialpad` and all `bin/*.py` wrappers map `DIALPAD_API_KEY` to bearer auth automatically.
+
 **Optional (for ElevenLabs TTS in calls):**
 ```
 ELEVENLABS_API_KEY=your_elevenlabs_api_key
@@ -38,41 +44,47 @@ Get your Dialpad API key from [Dialpad API Settings](https://dialpad.com/api/set
 
 ```bash
 # Basic SMS
-python3 send_sms.py --to "+14155551234" --message "Hello from Clawdbot!"
+bin/send_sms.py --to "+14155551234" --message "Hello from Clawdbot!"
 
 # From specific number (e.g., work phone)
-python3 send_sms.py --to "+14155551234" --message "Hello!" --from "+14153602954"
+bin/send_sms.py --to "+14155551234" --message "Hello!" --from "+14153602954"
 
 # Batch SMS (up to 10 recipients)
-python3 send_sms.py --to "+14155551234" "+14155555678" --message "Group update"
+bin/send_sms.py --to "+14155551234" "+14155555678" --message "Group update"
+
+# Direct generated CLI
+generated/dialpad sms send --data '{"to_numbers":["+14155551234"],"text":"Hello from generated CLI"}'
 ```
 
 ### Make Voice Calls
 
 ```bash
 # Basic call (ring recipient - they'll answer to speak with you)
-python3 make_call.py --to "+14155551234"
+bin/make_call.py --to "+14155551234"
 
 # Call with Text-to-Speech greeting (Dialpad's robotic TTS)
-python3 make_call.py --to "+14155551234" --text "Hello! This is a call from ShapeScale."
+bin/make_call.py --to "+14155551234" --text "Hello! This is a call from ShapeScale."
 
 # Call from specific number with TTS
-python3 make_call.py --to "+14155551234" --from "+14153602954" --text "Meeting reminder"
+bin/make_call.py --to "+14155551234" --from "+14153602954" --text "Meeting reminder"
 
 # With custom voice (requires ELEVENLABS_API_KEY)
-python3 make_call.py --to "+14155551234" --voice "Adam" --text "Premium voice test"
+bin/make_call.py --to "+14155551234" --voice "Adam" --text "Premium voice test"
+
+# Direct generated CLI
+generated/dialpad call make --data '{"phone_number":"+14155551234","user_id":"5765607478525952"}'
 ```
 
 ### From Agent Instructions
 
 **SMS:**
 ```bash
-python3 send_sms.py --to "+14155551234" --message "Your message here"
+bin/send_sms.py --to "+14155551234" --message "Your message here"
 ```
 
 **Voice Call:**
 ```bash
-python3 make_call.py --to "+14155551234" --text "Optional TTS message"
+bin/make_call.py --to "+14155551234" --text "Optional TTS message"
 ```
 
 ## Voice Options
@@ -215,8 +227,8 @@ python3 sms_storage.py [list|thread|search|unread]
 
 ## Requirements
 
-- Python 3.7+
-- No external dependencies (uses stdlib only)
+- Python 3.9+
+- `click` + `requests` available (required by generated CLI)
 - Valid `DIALPAD_API_KEY` environment variable
 - For ElevenLabs TTS: `ELEVENLABS_API_KEY` + webhook setup for audio playback
 
@@ -230,10 +242,10 @@ Receive SMS events in real-time when messages are sent/received.
 
 ```bash
 # Create a webhook subscription
-python3 create_sms_webhook.py create --url "https://your-server.com/webhook/dialpad" --direction "all"
+bin/create_sms_webhook.py create --url "https://your-server.com/webhook/dialpad" --direction "all"
 
 # List existing subscriptions
-python3 create_sms_webhook.py list
+bin/create_sms_webhook.py list
 ```
 
 **Webhook Events:**
@@ -248,13 +260,13 @@ Export past SMS messages as CSV.
 
 ```bash
 # Export all SMS
-python3 export_sms.py --output all_sms.csv
+bin/export_sms.py --output all_sms.csv
 
 # Export by date range
-python3 export_sms.py --start-date 2026-01-01 --end-date 2026-01-31 --output jan_sms.csv
+bin/export_sms.py --start-date 2026-01-01 --end-date 2026-01-31 --output jan_sms.csv
 
 # Export for specific office
-python3 export_sms.py --office-id 6194013244489728 --output office_sms.csv
+bin/export_sms.py --office-id 6194013244489728 --output office_sms.csv
 ```
 
 **Output:** CSV file with columns:
@@ -268,12 +280,32 @@ python3 export_sms.py --office-id 6194013244489728 --output office_sms.csv
 
 ```
 Dialpad SMS Skill
-├── send_sms.py           # Send SMS (working)
-├── make_call.py          # Make voice calls (working)
-├── create_sms_webhook.py # Create webhook subscriptions (new)
-├── export_sms.py         # Export historical SMS (new)
+├── generated/
+│   ├── dialpad           # Stable CLI facade (dialpad sms send, call make, etc.)
+│   └── dialpad.openapi   # OpenAPI-generated CLI from openapi2cli
+├── bin/
+│   ├── send_sms.py           # Legacy-compatible wrapper -> dialpad sms send
+│   ├── make_call.py          # Legacy-compatible wrapper -> dialpad call make
+│   ├── lookup_contact.py     # Legacy-compatible wrapper -> dialpad contact lookup
+│   ├── export_sms.py         # Legacy-compatible wrapper -> dialpad sms export
+│   └── create_sms_webhook.py # Legacy-compatible wrapper -> dialpad webhook create
 ├── sms_sqlite.py         # SQLite storage with FTS5 (RECOMMENDED)
 ├── webhook_sqlite.py     # Webhook handler for SQLite
+├── send_sms.py           # Legacy fallback script
+├── make_call.py          # Legacy fallback script
+├── lookup_contact.py     # Legacy fallback script
+├── export_sms.py         # Legacy fallback script
+├── create_sms_webhook.py # Legacy fallback script
 ├── sms_storage.py        # Legacy JSON storage (deprecated)
 └── webhook_receiver.py   # Legacy webhook handler
+```
+
+## Regeneration
+
+```bash
+# 1) Fetch latest Dialpad OpenAPI
+curl -fsSL https://dash.readme.com/api/v1/api-registry/58a089fmkn6y1s3 -o openapi.json
+
+# 2) Generate CLI from pinned openapi2cli commit
+uvx --from /tmp/openapi2cli openapi2cli generate /tmp/openapi.normalized.json --name dialpad --output generated/dialpad.openapi
 ```

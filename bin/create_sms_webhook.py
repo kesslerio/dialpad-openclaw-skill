@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 from _dialpad_compat import (
     generated_cli_available,
@@ -55,8 +56,9 @@ def validate_events(events: str | None) -> None:
 
 
 
-def create_subscription(url: str, direction: str, office_id: str | None) -> dict:
-    webhook = run_generated_json(["webhook", "create", "--hook-url", url])
+def handle_create(args: argparse.Namespace) -> int:
+    validate_events(args.events)
+    webhook = run_generated_json(["webhook", "create", "--hook-url", args.url])
     webhook_id = webhook.get("id")
     if not webhook_id:
         raise WrapperError(f"Webhook create did not return id: {webhook}")
@@ -67,17 +69,57 @@ def create_subscription(url: str, direction: str, office_id: str | None) -> dict
         "--endpoint-id",
         str(webhook_id),
         "--direction",
-        direction,
+        args.direction,
     ]
 
-    if office_id:
-        cmd.extend(["--target-type", "office", "--target-id", office_id])
+    if args.office_id:
+        cmd.extend(["--target-type", "office", "--target-id", args.office_id])
 
     subscription = run_generated_json(cmd)
-    return {
-        "subscription": subscription,
-        "webhook": webhook,
-    }
+    result = {"subscription": subscription, "webhook": webhook}
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("Webhook subscription created!")
+        print(f"   Subscription ID: {subscription.get('id')}")
+        print(f"   Webhook ID: {webhook.get('id')}")
+        print(f"   Webhook URL: {webhook.get('hook_url')}")
+        print(f"   Direction: {subscription.get('direction')}")
+        print(f"   Enabled: {subscription.get('enabled')}")
+    return 0
+
+
+
+def handle_list() -> int:
+    result = run_generated_json(["subscriptions", "webhook_sms_event_subscription.list"])
+    items = result.get("items", [])
+    print(f"SMS Webhook Subscriptions: {len(items)}")
+    for sub in items:
+        print(f"   ID: {sub.get('id')}")
+        print(f"   Direction: {sub.get('direction')}")
+        print(f"   Enabled: {sub.get('enabled')}")
+        print()
+    return 0
+
+
+
+def handle_webhooks(args: argparse.Namespace) -> int:
+    if args.webhook_command == "list":
+        result = run_generated_json(["webhooks", "webhooks.list"])
+        items = result.get("items", [])
+        print(f"Webhooks: {len(items)}")
+        for hook in items:
+            print(f"   ID: {hook.get('id')}")
+            print(f"   URL: {hook.get('hook_url')}")
+            print()
+        return 0
+
+    if args.webhook_command == "delete":
+        run_generated_json(["webhooks", "webhooks.delete", "--id", args.id])
+        print(f"Successfully deleted webhook {args.id}")
+        return 0
+    return 1
 
 
 
@@ -91,52 +133,15 @@ def main() -> int:
         require_api_key()
 
         if args.command == "create":
-            validate_events(args.events)
-            result = create_subscription(args.url, args.direction, args.office_id)
-            sub = result["subscription"]
-            hook = result["webhook"]
-
-            if args.json:
-                print(json.dumps(result, indent=2))
-            else:
-                print("Webhook subscription created!")
-                print(f"   Subscription ID: {sub.get('id')}")
-                print(f"   Webhook ID: {hook.get('id')}")
-                print(f"   Webhook URL: {hook.get('hook_url')}")
-                print(f"   Direction: {sub.get('direction')}")
-                print(f"   Enabled: {sub.get('enabled')}")
-            return 0
-
+            return handle_create(args)
         if args.command == "list":
-            result = run_generated_json(["subscriptions", "webhook_sms_event_subscription.list"])
-            items = result.get("items", [])
-            print(f"SMS Webhook Subscriptions: {len(items)}")
-            for sub in items:
-                print(f"   ID: {sub.get('id')}")
-                print(f"   Direction: {sub.get('direction')}")
-                print(f"   Enabled: {sub.get('enabled')}")
-                print()
-            return 0
-
+            return handle_list()
         if args.command == "delete":
             run_generated_json(["subscriptions", "webhook_sms_event_subscription.delete", "--id", args.id])
             print(f"Successfully deleted subscription {args.id}")
             return 0
-
-        if args.command == "webhooks" and args.webhook_command == "list":
-            result = run_generated_json(["webhooks", "webhooks.list"])
-            items = result.get("items", [])
-            print(f"Webhooks: {len(items)}")
-            for hook in items:
-                print(f"   ID: {hook.get('id')}")
-                print(f"   URL: {hook.get('hook_url')}")
-                print()
-            return 0
-
-        if args.command == "webhooks" and args.webhook_command == "delete":
-            run_generated_json(["webhooks", "webhooks.delete", "--id", args.id])
-            print(f"Successfully deleted webhook {args.id}")
-            return 0
+        if args.command == "webhooks":
+            return handle_webhooks(args)
 
         raise WrapperError("Unsupported command")
     except WrapperError as err:

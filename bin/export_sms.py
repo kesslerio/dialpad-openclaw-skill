@@ -9,6 +9,7 @@ import sys
 import time
 import urllib.request
 from datetime import date, datetime
+from typing import Any
 
 from _dialpad_compat import (
     generated_cli_available,
@@ -87,6 +88,24 @@ def download_file(url: str, output_path: str) -> None:
 
 
 
+def poll_for_completion(request_id: str, timeout: int, interval: int) -> dict[str, Any]:
+    started = time.time()
+    while (time.time() - started) <= timeout:
+        status = run_generated_json(["stats", "stats.get", "--id", str(request_id)])
+        state = status.get("status")
+        print(f"   Status: {state}")
+
+        if state == "complete":
+            return status
+        if state == "failed":
+            raise WrapperError("Export failed")
+
+        time.sleep(max(1, interval))
+
+    raise WrapperError(f"Timed out after {timeout} seconds")
+
+
+
 def main() -> int:
     if not generated_cli_available():
         return run_legacy("export_sms.py", sys.argv[1:])
@@ -106,24 +125,7 @@ def main() -> int:
         print(f"Export job created: {request_id}")
         print("Polling for completion...")
 
-        started = time.time()
-        final_result = None
-
-        while (time.time() - started) <= args.timeout:
-            status = run_generated_json(["stats", "stats.get", "--id", str(request_id)])
-            state = status.get("status")
-            print(f"   Status: {state}")
-
-            if state == "complete":
-                final_result = status
-                break
-            if state == "failed":
-                raise WrapperError("Export failed")
-
-            time.sleep(max(1, args.poll_interval))
-
-        if not final_result:
-            raise WrapperError(f"Timed out after {args.timeout} seconds")
+        final_result = poll_for_completion(request_id, args.timeout, args.poll_interval)
 
         download_url = final_result.get("download_url")
         if args.output and download_url:

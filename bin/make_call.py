@@ -39,8 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_user_id(from_number: str | None, explicit_user_id: str | None) -> str:
     if explicit_user_id:
         return explicit_user_id
-    if from_number and from_number in KNOWN_USERS:
-        return KNOWN_USERS[from_number]
+    if from_number:
+        if from_number in KNOWN_USERS:
+            return KNOWN_USERS[from_number]
+        raise WrapperError(f"Unknown --from number: {from_number}. Map it in KNOWN_USERS or provide --user-id.")
+    # Default to first known user if nothing specified
     for user_id in KNOWN_USERS.values():
         return user_id
     raise WrapperError("user_id is required; provide --user-id or --from with a known number")

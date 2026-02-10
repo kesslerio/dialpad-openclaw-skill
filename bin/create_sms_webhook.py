@@ -63,19 +63,35 @@ def handle_create(args: argparse.Namespace) -> int:
     if not webhook_id:
         raise WrapperError(f"Webhook create did not return id: {webhook}")
 
-    cmd = [
+    # Map events to direction if provided
+    direction = args.direction
+    event_types = None
+    if args.events:
+        provided = {event.strip() for event in args.events.split(",") if event.strip()}
+        event_types = sorted(list(provided))
+        if "sms_sent" in provided and "sms_received" in provided:
+            direction = "all"
+        elif "sms_sent" in provided:
+            direction = "outbound"
+        elif "sms_received" in provided:
+            direction = "inbound"
+
+    payload = {
+        "endpoint_id": int(webhook_id),
+        "direction": direction,
+    }
+    if event_types:
+        payload["event_types"] = event_types
+    if args.office_id:
+        payload["target_type"] = "office"
+        payload["target_id"] = int(args.office_id)
+
+    subscription = run_generated_json([
         "subscriptions",
         "webhook_sms_event_subscription.create",
-        "--endpoint-id",
-        str(webhook_id),
-        "--direction",
-        args.direction,
-    ]
-
-    if args.office_id:
-        cmd.extend(["--target-type", "office", "--target-id", args.office_id])
-
-    subscription = run_generated_json(cmd)
+        "--data",
+        json.dumps(payload),
+    ])
     result = {"subscription": subscription, "webhook": webhook}
 
     if args.json:

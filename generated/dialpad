@@ -40,7 +40,7 @@ def _translate(argv: list[str]) -> list[str]:
     Handles cases like: dialpad --output json sms send
     """
     # Options that take values (need to skip the value too)
-    VALUE_OPTIONS = {"--output", "-o", "--base-url", "-b"}
+    VALUE_OPTIONS = {"--output", "-o", "--base-url", "-b", "--token", "--api-key"}
 
     # Find first command (non-option that's not a value for a previous option)
     cmd_start = 0

@@ -47,6 +47,89 @@ WEBHOOK_SECRET = os.environ.get("DIALPAD_WEBHOOK_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("DIALPAD_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("DIALPAD_TELEGRAM_CHAT_ID", "")
 DIALPAD_API_KEY = os.environ.get("DIALPAD_API_KEY", "")
+DIALPAD_LINE_NAMES = os.environ.get("DIALPAD_LINE_NAMES", "")
+
+DEFAULT_LINE_NAMES = {
+    "+14155201316": "Sales",
+    "+14153602954": "Work",
+    "+14159917155": "Support",
+}
+
+
+def normalize_phone_number(phone_number):
+    """
+    Normalize a phone number to last 10 digits for reliable comparisons.
+    Removes non-digits, optional leading country code 1, and keeps last 10 digits.
+    """
+    if not phone_number:
+        return None
+
+    digits = "".join(ch for ch in str(phone_number) if ch.isdigit())
+    if not digits:
+        return None
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) >= 10:
+        return digits[-10:]
+    return digits
+
+
+def format_phone_number(phone_number):
+    """Format normalized digits as (NXX) NXX-XXXX when possible."""
+    normalized = normalize_phone_number(phone_number)
+    if not normalized:
+        return None
+    if len(normalized) == 10:
+        return f"({normalized[:3]}) {normalized[3:6]}-{normalized[6:]}"
+    return normalized
+
+
+def load_line_names():
+    """
+    Load line-name mapping from env and merge with defaults.
+    Env values override defaults, defaults still act as fallback.
+    """
+    loaded = {}
+    for number, name in DEFAULT_LINE_NAMES.items():
+        normalized = normalize_phone_number(number)
+        if normalized:
+            loaded[normalized] = str(name)
+
+    if not DIALPAD_LINE_NAMES:
+        return loaded
+
+    try:
+        env_mapping = json.loads(DIALPAD_LINE_NAMES)
+        if not isinstance(env_mapping, dict):
+            raise ValueError("DIALPAD_LINE_NAMES must be a JSON object")
+        for number, name in env_mapping.items():
+            normalized = normalize_phone_number(number)
+            if normalized and name:
+                loaded[normalized] = str(name)
+    except Exception as e:
+        print(f"⚠️  Invalid DIALPAD_LINE_NAMES, using defaults: {e}")
+
+    return loaded
+
+
+LINE_NAMES = load_line_names()
+
+
+def get_line_name(to_number):
+    """
+    Resolve a Dialpad receiving line number to display text.
+    Returns "Friendly Name (NXX) NXX-XXXX" when mapped, "(NXX) NXX-XXXX"
+    when not mapped, and None when to_number is missing.
+    """
+    normalized = normalize_phone_number(to_number)
+    if not normalized:
+        return None
+
+    formatted = format_phone_number(normalized) or normalized
+    friendly = LINE_NAMES.get(normalized)
+    if friendly:
+        return f"{friendly} {formatted}"
+    return formatted
 
 
 def get_contact_name(phone_number):
@@ -202,6 +285,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         timestamp = datetime.now().isoformat()
         direction = data.get("direction", "unknown")
         from_num = data.get("from_number", "N/A")
+        to_num = data.get("to_number")
         text = data.get("text", data.get("text_content", ""))
 
         # Store message in SQLite
@@ -236,10 +320,13 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 print(f"   🔒 Sensitive message filtered (not forwarding to Telegram)")
             else:
                 sender_display = f"*{contact_info}* (`{from_num}`)" if contact_info else f"`{from_num}`"
+                line_display = get_line_name(to_num)
                 text_preview = text[:200] + "..." if len(text) > 200 else text
+                to_line = f"*To:* {line_display}\n" if line_display else ""
 
                 tg_text = (
                     f"📱 *New SMS Received*\n"
+                    f"{to_line}"
                     f"*From:* {sender_display}\n"
                     f"*Message:* {text_preview}\n\n"
                     f"_Reply via Dialpad or use /sms to respond._"
@@ -294,6 +381,10 @@ def main():
     print(f"  - Dialpad API: {'✓' if DIALPAD_API_KEY else '✗ (contact lookup disabled)'}")
     print(f"  - Telegram: {'✓' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else '✗ (notifications disabled)'}")
     print(f"  - JWT Verification: {'✓' if WEBHOOK_SECRET else '✗ (disabled)'}")
+    print(f"  - Line Names:")
+    for number in sorted(LINE_NAMES.keys()):
+        formatted = format_phone_number(number) or number
+        print(f"    - {LINE_NAMES[number]}: {formatted}")
     print("=" * 60)
     print("Press Ctrl+C to stop")
     print()

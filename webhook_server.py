@@ -239,6 +239,16 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             self.handle_webhook()
             return
 
+        # /webhook/dialpad-call - missed call notifications
+        if self.path == "/webhook/dialpad-call":
+            self.handle_call_webhook()
+            return
+
+        # /webhook/dialpad-voicemail - voicemail notifications
+        if self.path == "/webhook/dialpad-voicemail":
+            self.handle_voicemail_webhook()
+            return
+
         self.send_error(404, "Not Found")
 
     def handle_store(self):
@@ -360,6 +370,158 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         }
         self.wfile.write(json.dumps(response).encode())
 
+    def handle_call_webhook(self):
+        """Handle /webhook/dialpad-call endpoint - missed call notifications"""
+        # Limit request body size to prevent memory exhaustion (1MB max)
+        MAX_BODY_SIZE = 1024 * 1024  # 1MB
+        content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
+        body = self.rfile.read(content_length).decode("utf-8")
+
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError as e:
+            print(f"❌ Invalid JSON payload on /webhook/dialpad-call: {e}")
+            self.send_error(400, "Invalid JSON")
+            return
+
+        direction = data.get("call_direction", data.get("direction", "unknown"))
+        call_missed = data.get("call_missed", False)
+        raw_duration = data.get("duration", data.get("call_duration", 0))
+        try:
+            duration = int(float(raw_duration))
+        except (TypeError, ValueError):
+            duration = 0
+        call_state = str(data.get("call_state", "")).lower()
+
+        should_notify = (
+            direction == "inbound" and (
+                call_missed is True or
+                duration == 0 or
+                call_state == "missed"
+            )
+        )
+
+        telegram_sent = False
+        if should_notify:
+            from_num = data.get("from_number") or "Unknown"
+            to_num = data.get("to_number")
+            call_ts = (
+                data.get("date_started") or
+                data.get("date_start") or
+                data.get("start_time") or
+                data.get("timestamp")
+            )
+            contact_info = get_contact_name(from_num) if from_num != "Unknown" else None
+            line_display = get_line_name(to_num)
+            to_display = line_display if line_display else "Unknown"
+            if contact_info:
+                from_display = f"*{contact_info}* (`{from_num}`)"
+            elif from_num == "Unknown":
+                from_display = "Unknown"
+            else:
+                from_display = f"`{from_num}`"
+            time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
+
+            tg_text = (
+                f"📞 *Missed Call*\n"
+                f"*To:* {to_display}\n"
+                f"*From:* {from_display}\n"
+                f"*Time:* {time_display}"
+            )
+            telegram_sent = send_to_telegram(tg_text)
+
+            print(f"[{datetime.now().isoformat()}]")
+            print(f"   📞 MISSED CALL: {from_num} -> {to_display}")
+            if call_ts:
+                print(f"   🕒 Event time: {call_ts}")
+            print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
+            print()
+        else:
+            print(f"[{datetime.now().isoformat()}]")
+            print(f"   📞 CALL EVENT ignored (not inbound missed call)")
+            print()
+
+        # Always return 200 OK (graceful degradation)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        response = {
+            "status": "ok",
+            "missed_call": should_notify,
+            "telegram_sent": telegram_sent if should_notify else None
+        }
+        self.wfile.write(json.dumps(response).encode())
+
+    def handle_voicemail_webhook(self):
+        """Handle /webhook/dialpad-voicemail endpoint - voicemail notifications"""
+        # Limit request body size to prevent memory exhaustion (1MB max)
+        MAX_BODY_SIZE = 1024 * 1024  # 1MB
+        content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
+        body = self.rfile.read(content_length).decode("utf-8")
+
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError as e:
+            print(f"❌ Invalid JSON payload on /webhook/dialpad-voicemail: {e}")
+            self.send_error(400, "Invalid JSON")
+            return
+
+        from_num = data.get("from_number") or "Unknown"
+        to_num = data.get("to_number")
+        duration = data.get("duration", data.get("voicemail_duration", 0))
+        transcription = data.get("voicemail_transcription") or data.get("transcription")
+
+        contact_info = get_contact_name(from_num) if from_num != "Unknown" else None
+        line_display = get_line_name(to_num)
+        to_display = line_display if line_display else "Unknown"
+        if contact_info:
+            from_display = f"*{contact_info}* (`{from_num}`)"
+        elif from_num == "Unknown":
+            from_display = "Unknown"
+        else:
+            from_display = f"`{from_num}`"
+        try:
+            duration_seconds = int(float(duration))
+        except (TypeError, ValueError):
+            duration_seconds = 0
+        duration_display = f"{duration_seconds}s"
+
+        tg_text = (
+            f"📬 *New Voicemail*\n"
+            f"*To:* {to_display}\n"
+            f"*From:* {from_display}\n"
+            f"*Duration:* {duration_display}"
+        )
+
+        if transcription:
+            tg_text += (
+                f"\n\n"
+                f"*Transcription:*\n"
+                f"_\"{transcription}\"_"
+            )
+
+        telegram_sent = send_to_telegram(tg_text)
+
+        print(f"[{datetime.now().isoformat()}]")
+        print(f"   📬 VOICEMAIL: {from_num} -> {to_display}")
+        print(f"   ⏱️  Duration: {duration_display}")
+        if transcription:
+            trans_preview = transcription[:80] + "..." if len(transcription) > 80 else transcription
+            print(f"   📝 Transcription: \"{trans_preview}\"")
+        print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
+        print()
+
+        # Always return 200 OK (graceful degradation)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        response = {
+            "status": "ok",
+            "voicemail": True,
+            "telegram_sent": telegram_sent
+        }
+        self.wfile.write(json.dumps(response).encode())
+
     def log_message(self, format, *args):
         """Suppress default HTTP logging (we do our own)"""
         pass
@@ -375,11 +537,16 @@ def main():
     print(f"Port: {PORT}")
     print(f"Endpoints:")
     print(f"  - POST /webhook/dialpad (main webhook)")
+    print(f"  - POST /webhook/dialpad-call (missed call webhook)")
+    print(f"  - POST /webhook/dialpad-voicemail (voicemail webhook)")
     print(f"  - GET  /health (health check)")
     print(f"")
     print(f"Configuration:")
     print(f"  - Dialpad API: {'✓' if DIALPAD_API_KEY else '✗ (contact lookup disabled)'}")
     print(f"  - Telegram: {'✓' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else '✗ (notifications disabled)'}")
+    tg_ready = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    print(f"  - Call Notifications: {'✓' if tg_ready else '✗ (Telegram not fully configured)'}")
+    print(f"  - Voicemail Notifications: {'✓' if tg_ready else '✗ (Telegram not fully configured)'}")
     print(f"  - JWT Verification: {'✓' if WEBHOOK_SECRET else '✗ (disabled)'}")
     print(f"  - Line Names:")
     for number in sorted(LINE_NAMES.keys()):

@@ -93,6 +93,22 @@ python3 make_call.py --to "+14155551234" --from "+14159901234" --text "Meeting r
 python3 make_call.py --to "+14155551234" --voice "Adam" --text "Premium voice test"
 ```
 
+### Retrieve Call Transcript and AI Recap
+
+```bash
+# Transcript by call ID
+python3 get_transcript.py --call-id "6342343299702784"
+
+# Transcript from most recent call (optionally filtered)
+python3 get_transcript.py --last --with "+14155551234"
+
+# AI recap by call ID
+python3 get_ai_recap.py --call-id "6342343299702784"
+
+# AI recap from most recent matching call, raw API JSON
+python3 get_ai_recap.py --last --with "Acme" --raw-json
+```
+
 ## Available Voices
 
 ### Dialpad Built-in (Low Cost)
@@ -172,6 +188,8 @@ python3 create_sms_webhook.py list
 Webhook events:
 - `sms_sent` - Outgoing SMS
 - `sms_received` - Incoming SMS
+- Inbound SMS webhook payloads with empty/whitespace-only text are still stored, but not forwarded to Telegram as blank messages.
+- If an inbound SMS webhook payload is empty but includes reliable missed-call call-event hints, Telegram receives a missed call alert instead.
 
 Inbound SMS on `POST /webhook/dialpad` is stored in SQLite and then forwarded to OpenClaw hooks (unless filtered as sensitive OTP/2FA content).
 

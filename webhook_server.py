@@ -36,6 +36,7 @@ import hmac
 import hashlib
 import base64
 import binascii
+import re
 import urllib.request
 import urllib.parse
 from datetime import datetime
@@ -48,8 +49,6 @@ sys.path.insert(0, str(skill_dir))
 
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook
-
-from sms_filter_compat import is_sensitive_message
 
 # Environment configuration (NO HARDCODED SECRETS)
 PORT = int(os.environ.get("PORT", "8081"))
@@ -71,6 +70,50 @@ DEFAULT_LINE_NAMES = {
     "+14153602954": "Work",
     "+14159917155": "Support",
 }
+
+
+MISSED_CALL_STATES = {"missed", "no_answer", "unanswered"}
+MISSED_CALL_EVENT_HINTS = {"missed_call", "call.missed", "call_missed", "call missed"}
+CALL_CONTEXT_FIELDS = {
+    "call_id",
+    "call_missed",
+    "call_state",
+    "call_direction",
+    "call_duration",
+    "duration",
+}
+
+TELEGRAM_STATUS_SENT = "sent"
+TELEGRAM_STATUS_FILTERED = "filtered"
+TELEGRAM_STATUS_NOT_APPLICABLE = "not_applicable"
+TELEGRAM_STATUS_FAILED = "failed"
+
+SENSITIVE_KEYWORD_PATTERNS = (
+    re.compile(
+        r"\b("
+        r"otp|o\.t\.p|"
+        r"2fa|two[- ]?factor|multi[- ]?factor|mfa|"
+        r"verification code|security code|auth(?:entication)? code|"
+        r"one[- ]?time (?:pass(?:word)?|code)|passcode"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:google|g-?code|intuit|bank|chase|wells fargo|bank of america|"
+        r"citi|capital one|paypal|venmo)\b.{0,80}\b(?:code|otp|passcode|verification)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:code|otp|passcode|verification code)\b.{0,30}\b\d{4,8}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b\d{4,8}\b.{0,30}\b(?:code|otp|passcode|verification code)\b",
+        re.IGNORECASE,
+    ),
+)
+
+CODE_TOKEN_PATTERN = re.compile(r"\b(?:\d[\s-]?){4,8}\b")
 
 
 def normalize_phone_number(phone_number):
@@ -182,6 +225,109 @@ def get_contact_name(phone_number):
     except Exception as e:
         print(f"⚠️  Dialpad contact lookup failed: {e}")
     return None
+
+
+def extract_message_text(data):
+    """Extract text payload from webhook event as a string."""
+    text = data.get("text", "")
+    text_content = data.get("text_content", "")
+
+    if not is_blank_text(text):
+        return str(text)
+    if not is_blank_text(text_content):
+        return str(text_content)
+    return str(text or text_content or "")
+
+
+def is_blank_text(value):
+    """True when text is empty or whitespace-only."""
+    return not str(value or "").strip()
+
+
+def is_sensitive_message(text="", sender="", contact_number=""):
+    """
+    Return True for OTP/2FA/security verification messages.
+    These messages are stored, but must not be forwarded to Telegram.
+    """
+    body = str(text or "")
+    if not body.strip():
+        return False
+
+    combined = " ".join(
+        part for part in (str(sender or ""), str(contact_number or ""), body) if part
+    )
+
+    for pattern in SENSITIVE_KEYWORD_PATTERNS:
+        if pattern.search(combined):
+            return True
+
+    has_code = bool(CODE_TOKEN_PATTERN.search(body))
+    has_security_context = bool(
+        re.search(
+            r"\b(verify|verification|security|login|signin|sign in|auth|account|bank|google|intuit)\b",
+            combined,
+            re.IGNORECASE,
+        )
+    )
+    return has_code and has_security_context
+
+
+def first_value(value):
+    """Return first item for list-like values, otherwise passthrough."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
+def detect_reliable_missed_call_hint(data):
+    """
+    Detect missed-call events routed through the SMS webhook path.
+    Conservative by design: requires blank text plus explicit missed-call signal.
+    """
+    if not isinstance(data, dict):
+        return False
+
+    if str(data.get("direction", "")).lower() != "inbound":
+        return False
+
+    if not is_blank_text(extract_message_text(data)):
+        return False
+
+    event_fields = ("event_type", "event", "type", "subscription_type", "topic")
+    event_text = " ".join(str(data.get(k, "")).lower() for k in event_fields)
+    call_state = str(data.get("call_state", "")).lower()
+
+    has_missed_signal = (
+        data.get("call_missed") is True
+        or data.get("missed_call") is True
+        or data.get("is_missed_call") is True
+        or call_state in MISSED_CALL_STATES
+        or any(hint in event_text for hint in MISSED_CALL_EVENT_HINTS)
+        or ("call" in event_text and ("no_answer" in event_text or "unanswered" in event_text))
+    )
+    if not has_missed_signal:
+        return False
+
+    has_call_context = any(key in data for key in CALL_CONTEXT_FIELDS) or "call" in event_text
+    if not has_call_context:
+        return False
+
+    from_num = first_value(data.get("from_number"))
+    return bool(str(from_num or "").strip())
+
+
+def classify_inbound_notification(data):
+    """
+    Classify inbound webhook payload for Telegram behavior.
+    Returns one of: sms, missed_call, blank_sms, not_inbound.
+    """
+    if str(data.get("direction", "")).lower() != "inbound":
+        return "not_inbound"
+    if detect_reliable_missed_call_hint(data):
+        return "missed_call"
+    if is_blank_text(extract_message_text(data)):
+        return "blank_sms"
+    return "sms"
 
 
 def send_to_telegram(text):
@@ -549,10 +695,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             return
 
         timestamp = datetime.now().isoformat()
-        direction = data.get("direction", "unknown")
-        from_num = data.get("from_number", "N/A")
+        direction = str(data.get("direction", "unknown")).lower()
+        from_num = first_value(data.get("from_number")) or "N/A"
         to_num = data.get("to_number")
-        text = data.get("text", data.get("text_content", ""))
+        text = extract_message_text(data)
 
         # Store message in SQLite
         try:
@@ -581,7 +727,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 if cached and cached != "Unknown":
                     contact_info = cached
 
-            if is_sensitive_message(text=text, sender=contact_info or "", contact_number=from_num):
+            notification_type = classify_inbound_notification(data)
+            if notification_type == "missed_call":
+                hook_status = "filtered_missed_call"
+            elif notification_type == "blank_sms":
+                hook_status = "filtered_blank_sms"
+            elif is_sensitive_message(text=text, sender=contact_info or "", contact_number=from_num):
                 sensitive_filtered = True
                 hook_status = "filtered_sensitive"
                 print("   🔒 Sensitive message filtered (not forwarding to OpenClaw hooks)")
@@ -591,7 +742,6 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(
                     normalized_sms, line_display=line_display
                 )
-
         # Console logging
         print(f"[{timestamp}]")
         print(f"   📱 {direction.upper()}: {from_num}")

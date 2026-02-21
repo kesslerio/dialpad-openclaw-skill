@@ -88,7 +88,12 @@ def extract_items(response: Any) -> tuple[list[dict[str, Any]], str | None]:
     return [], None
 
 
-def fetch_calls(started_after: int, started_before: int, limit: int) -> list[dict[str, Any]]:
+def fetch_calls(
+    started_after: int,
+    started_before: int,
+    limit: int,
+    missed_only: bool = False,
+) -> list[dict[str, Any]]:
     headers = {
         "Authorization": f"Bearer {DIALPAD_API_KEY}",
         "Accept": "application/json",
@@ -133,9 +138,13 @@ def fetch_calls(started_after: int, started_before: int, limit: int) -> list[dic
         if not items:
             break
 
-        calls.extend(items)
-        if len(calls) >= limit:
-            break
+        for item in items:
+            if missed_only and infer_status(item) != "missed":
+                continue
+            calls.append(item)
+            if len(calls) >= limit:
+                return calls[:limit]
+
         if not cursor:
             break
 
@@ -305,14 +314,17 @@ def main() -> int:
     started_after, started_before = compute_window(args.hours, args.today)
 
     try:
-        raw_calls = fetch_calls(started_after, started_before, args.limit)
+        raw_calls = fetch_calls(
+            started_after,
+            started_before,
+            args.limit,
+            missed_only=args.missed,
+        )
     except RuntimeError as exc:
         print(f"API error: {exc}", file=sys.stderr)
         return 2
 
     rows = [to_row(call) for call in raw_calls]
-    if args.missed:
-        rows = [row for row in rows if row["status"] == "missed"]
 
     if args.output:
         write_csv(rows, args.output)

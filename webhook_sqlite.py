@@ -14,8 +14,16 @@ sys.path.insert(0, str(skill_dir))
 
 from sms_sqlite import init_db, store_message, get_all_threads, get_unread, mark_as_read
 
-def redact_preview(text, **_kwargs):
-    """No-op compatibility hook for preview redaction."""
+try:
+    from sms_security_filter import redact_preview as _security_redact_preview
+except ImportError:
+    _security_redact_preview = None
+
+
+def redact_preview(text, **kwargs):
+    """Optional redaction: use sms_security_filter when installed, else no-op."""
+    if _security_redact_preview:
+        return _security_redact_preview(text, **kwargs)
     return text
 
 

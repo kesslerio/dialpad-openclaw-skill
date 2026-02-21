@@ -76,6 +76,22 @@ python3 make_call.py --to "+14155551234" --from "+14159901234" --text "Meeting r
 python3 make_call.py --to "+14155551234" --voice "Adam" --text "Premium voice test"
 ```
 
+### Retrieve Call Transcript and AI Recap
+
+```bash
+# Transcript by call ID
+python3 get_transcript.py --call-id "6342343299702784"
+
+# Transcript from most recent call (optionally filtered)
+python3 get_transcript.py --last --with "+14155551234"
+
+# AI recap by call ID
+python3 get_ai_recap.py --call-id "6342343299702784"
+
+# AI recap from most recent matching call, raw API JSON
+python3 get_ai_recap.py --last --with "Acme" --raw-json
+```
+
 ## Available Voices
 
 ### Dialpad Built-in (Low Cost)

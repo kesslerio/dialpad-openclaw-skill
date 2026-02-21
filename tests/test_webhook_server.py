@@ -1,4 +1,8 @@
+from pathlib import Path
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from webhook_server import classify_inbound_notification, detect_reliable_missed_call_hint
 

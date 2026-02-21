@@ -67,6 +67,11 @@ CALL_CONTEXT_FIELDS = {
     "duration",
 }
 
+TELEGRAM_STATUS_SENT = "sent"
+TELEGRAM_STATUS_FILTERED = "filtered"
+TELEGRAM_STATUS_NOT_APPLICABLE = "not_applicable"
+TELEGRAM_STATUS_FAILED = "failed"
+
 
 def normalize_phone_number(phone_number):
     """
@@ -395,8 +400,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
         # Send Telegram notification for inbound messages
         # Suppress notification for sensitive messages (2FA codes, OTP, etc.)
-        telegram_sent = False
-        sensitive_filtered = False
+        telegram_sent = None
+        telegram_status = TELEGRAM_STATUS_NOT_APPLICABLE
         telegram_note = ""
         if direction == "inbound":
             # Resolve contact name before filtering so sender check isn't "Unknown"
@@ -422,11 +427,15 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"*Time:* {time_display}"
                 )
                 telegram_sent = send_to_telegram(tg_text)
+                telegram_status = TELEGRAM_STATUS_SENT if telegram_sent else TELEGRAM_STATUS_FAILED
                 telegram_note = "missed call alert"
             elif notification_type == "blank_sms":
+                telegram_sent = False
+                telegram_status = TELEGRAM_STATUS_FILTERED
                 telegram_note = "blank inbound SMS filtered"
             elif is_sensitive_message(text=text, sender=contact_info or "", contact_number=from_num):
-                sensitive_filtered = True
+                telegram_sent = False
+                telegram_status = TELEGRAM_STATUS_FILTERED
                 telegram_note = "sensitive - filtered"
                 print(f"   🔒 Sensitive message filtered (not forwarding to Telegram)")
             else:
@@ -444,6 +453,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 )
 
                 telegram_sent = send_to_telegram(tg_text)
+                telegram_status = TELEGRAM_STATUS_SENT if telegram_sent else TELEGRAM_STATUS_FAILED
                 telegram_note = "sms notification"
 
         # Console logging
@@ -454,14 +464,14 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             print(f"   📄 \"{text_preview}\"")
         print(f"   💾 Stored: ✓")
         if direction == "inbound":
-            if sensitive_filtered:
-                print(f"   📨 Telegram: ✗ (sensitive — filtered)")
-            elif telegram_note and not telegram_sent:
+            if telegram_status == TELEGRAM_STATUS_FILTERED:
+                print(f"   📨 Telegram: ⏭ ({telegram_note})")
+            elif telegram_status == TELEGRAM_STATUS_SENT:
+                print(f"   📨 Telegram: ✓ ({telegram_note})")
+            elif telegram_status == TELEGRAM_STATUS_FAILED:
                 print(f"   📨 Telegram: ✗ ({telegram_note})")
-            elif telegram_note:
-                print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'} ({telegram_note})")
             else:
-                print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
+                print(f"   📨 Telegram: — ({telegram_status})")
         print()
 
         # Always return 200 OK (graceful degradation)
@@ -472,7 +482,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         response = {
             "status": "ok",
             "stored": True,
-            "telegram_sent": telegram_sent if direction == "inbound" else None
+            "telegram_sent": telegram_sent if direction == "inbound" else None,
+            "telegram_status": telegram_status if direction == "inbound" else TELEGRAM_STATUS_NOT_APPLICABLE
         }
         self.wfile.write(json.dumps(response).encode())
 

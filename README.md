@@ -8,7 +8,7 @@ Send SMS text messages and make voice calls via the Dialpad API with support for
 - **Voice Calls** - Outbound voice calls with optional Text-to-Speech
 - **Caller ID Selection** - Choose which Dialpad phone number appears as caller ID
 - **Message Storage** - SQLite database with full-text search for SMS history
-- **Webhooks** - Real-time SMS event notifications
+- **Webhooks** - Real-time SMS events with inbound SMS forwarding to OpenClaw hooks
 - **Multiple Voices** - Use Dialpad's TTS or premium ElevenLabs voices
 
 ## Installation
@@ -43,6 +43,23 @@ For premium voice quality using ElevenLabs TTS:
 
 ```bash
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
+```
+
+For webhook server SMS forwarding to OpenClaw hooks:
+
+```bash
+# Optional but recommended: enable inbound webhook auth validation
+export DIALPAD_WEBHOOK_SECRET="your-dialpad-webhook-secret"
+
+# OpenClaw hooks destination
+export OPENCLAW_GATEWAY_URL="http://127.0.0.1:8080"
+export OPENCLAW_HOOKS_TOKEN="your-openclaw-hooks-token"
+export OPENCLAW_HOOKS_PATH="/hooks/agent"
+export OPENCLAW_HOOKS_NAME="Dialpad SMS"
+# optional routing overrides
+export OPENCLAW_HOOKS_CHANNEL="telegram"
+export OPENCLAW_HOOKS_TO="-5102073225"
+export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 ```
 
 ## Usage
@@ -173,6 +190,29 @@ Webhook events:
 - `sms_received` - Incoming SMS
 - Inbound SMS webhook payloads with empty/whitespace-only text are still stored, but not forwarded to Telegram as blank messages.
 - If an inbound SMS webhook payload is empty but includes reliable missed-call call-event hints, Telegram receives a missed call alert instead.
+
+Inbound SMS on `POST /webhook/dialpad` is stored in SQLite and then forwarded to OpenClaw hooks (unless filtered as sensitive OTP/2FA content).
+
+Dialpad webhook validation behavior:
+- If `DIALPAD_WEBHOOK_SECRET` is set, `/webhook/dialpad` requires a valid `X-Dialpad-Signature` / `X-Dialpad-Signature-SHA256` HMAC SHA256 over raw body, or a valid Bearer JWT (HS256) signed with the same secret.
+- If `DIALPAD_WEBHOOK_SECRET` is not set, behavior remains permissive for compatibility.
+
+OpenClaw hooks payload concept (`POST /hooks/agent`):
+
+```bash
+curl -X POST "http://127.0.0.1:8080/hooks/agent" \
+  -H "Authorization: Bearer $OPENCLAW_HOOKS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Dialpad inbound SMS\nFrom: Jane (+14155550123)\n\nHello",
+    "name": "Dialpad SMS",
+    "agentId": "niemand-work",
+    "sessionKey": "hook:dialpad:sms:123456",
+    "deliver": true,
+    "channel": "telegram",
+    "to": "-5102073225"
+  }'
+```
 
 ## Export SMS History
 

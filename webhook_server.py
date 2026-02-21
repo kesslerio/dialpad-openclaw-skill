@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """
-Dialpad SMS Webhook Server with SQLite Storage and Telegram Integration
+Dialpad SMS Webhook Server with SQLite Storage and OpenClaw Hooks SMS Ingress
 
 Receives Dialpad SMS events, stores in SQLite with FTS5 search, and sends
-Telegram notifications for inbound messages.
+OpenClaw hook messages for inbound SMS.
 
 Features:
 - SQLite storage with FTS5 full-text search (via webhook_sqlite.py)
-- Telegram notifications with contact name resolution
+- OpenClaw hooks forwarding for inbound SMS with contact name resolution
+- Telegram notifications for missed calls and voicemails
 - Health check endpoint
-- Graceful error handling (Telegram failures don't break webhooks)
+- Graceful error handling (hook/Telegram failures don't break webhooks)
 - Zero external dependencies (stdlib only)
 - All secrets from environment variables
 
 Environment Variables:
 - PORT (default: 8081) - HTTP server port
-- DIALPAD_TELEGRAM_BOT_TOKEN - Telegram bot token (required for notifications)
-- DIALPAD_TELEGRAM_CHAT_ID - Telegram chat ID (required for notifications)
+- DIALPAD_TELEGRAM_BOT_TOKEN - Telegram bot token (required for call/voicemail notifications)
+- DIALPAD_TELEGRAM_CHAT_ID - Telegram chat ID (required for call/voicemail notifications)
 - DIALPAD_API_KEY - Dialpad API key (required for contact lookup)
-- DIALPAD_WEBHOOK_SECRET - JWT signature secret (optional)
+- DIALPAD_WEBHOOK_SECRET - webhook auth secret (optional, enables signature/JWT verification)
+- OPENCLAW_GATEWAY_URL (default: http://127.0.0.1:8080)
+- OPENCLAW_HOOKS_TOKEN (required for SMS hook forwarding)
+- OPENCLAW_HOOKS_PATH (default: /hooks/agent)
+- OPENCLAW_HOOKS_NAME (default: Dialpad SMS)
+- OPENCLAW_HOOKS_CHANNEL (optional)
+- OPENCLAW_HOOKS_TO (optional)
+- OPENCLAW_HOOKS_AGENT_ID (optional)
 """
 
 import json
@@ -26,6 +34,8 @@ import os
 import sys
 import hmac
 import hashlib
+import base64
+import binascii
 import re
 import urllib.request
 import urllib.parse
@@ -38,7 +48,7 @@ skill_dir = Path(__file__).parent
 sys.path.insert(0, str(skill_dir))
 
 # Import existing SQLite storage handler
-from webhook_sqlite import handle_sms_webhook, format_notification
+from webhook_sqlite import handle_sms_webhook
 
 # Environment configuration (NO HARDCODED SECRETS)
 PORT = int(os.environ.get("PORT", "8081"))
@@ -47,6 +57,13 @@ TELEGRAM_BOT_TOKEN = os.environ.get("DIALPAD_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("DIALPAD_TELEGRAM_CHAT_ID", "")
 DIALPAD_API_KEY = os.environ.get("DIALPAD_API_KEY", "")
 DIALPAD_LINE_NAMES = os.environ.get("DIALPAD_LINE_NAMES", "")
+OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:8080")
+OPENCLAW_HOOKS_TOKEN = os.environ.get("OPENCLAW_HOOKS_TOKEN", "")
+OPENCLAW_HOOKS_PATH = os.environ.get("OPENCLAW_HOOKS_PATH", "/hooks/agent")
+OPENCLAW_HOOKS_NAME = os.environ.get("OPENCLAW_HOOKS_NAME", "Dialpad SMS")
+OPENCLAW_HOOKS_CHANNEL = os.environ.get("OPENCLAW_HOOKS_CHANNEL", "")
+OPENCLAW_HOOKS_TO = os.environ.get("OPENCLAW_HOOKS_TO", "")
+OPENCLAW_HOOKS_AGENT_ID = os.environ.get("OPENCLAW_HOOKS_AGENT_ID", "")
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -343,21 +360,252 @@ def send_to_telegram(text):
         return False
 
 
-def verify_jwt(payload_b64, signature, secret):
+def _get_header(headers, name):
+    """Fetch header by name with case-insensitive fallback."""
+    value = headers.get(name) if hasattr(headers, "get") else None
+    if value:
+        return value
+
+    lowered = name.lower()
+    if isinstance(headers, dict):
+        for key, header_value in headers.items():
+            if str(key).lower() == lowered:
+                return header_value
+    return None
+
+
+def parse_signature_candidates(header_value):
     """
-    Verify JWT signature if secret is configured.
-    Returns True if valid or secret not configured (permissive).
+    Parse signature header into hex digest candidates.
+    Supports raw hex and prefixed forms like sha256=<hex>.
+    """
+    if not header_value:
+        return []
+
+    candidates = []
+    for part in str(header_value).split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        if "=" in piece:
+            piece = piece.split("=", 1)[1].strip()
+        elif ":" in piece:
+            piece = piece.split(":", 1)[1].strip()
+        piece = piece.lower()
+        if len(piece) == 64 and all(ch in "0123456789abcdef" for ch in piece):
+            candidates.append(piece)
+    return candidates
+
+
+def verify_hmac_signature(raw_body, headers, secret):
+    """Verify Dialpad HMAC SHA256 signature header against raw request body."""
+    if not secret:
+        return True
+
+    sig_values = [
+        _get_header(headers, "X-Dialpad-Signature"),
+        _get_header(headers, "X-Dialpad-Signature-SHA256"),
+    ]
+    provided = []
+    for sig_value in sig_values:
+        provided.extend(parse_signature_candidates(sig_value))
+
+    if not provided:
+        return False
+
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(candidate, expected) for candidate in provided)
+
+
+def _b64url_decode(segment):
+    """Decode a base64url segment with optional omitted padding."""
+    padded = segment + "=" * (-len(segment) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def extract_bearer_token(headers):
+    """Extract bearer token from Authorization header."""
+    auth = _get_header(headers, "Authorization")
+    if not auth:
+        return None
+    parts = auth.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+def verify_bearer_jwt(headers, secret):
+    """
+    Verify Authorization: Bearer <jwt> token using HS256 secret.
+    Signature validation only (best-effort stdlib verification).
     """
     if not secret:
         return True
 
-    expected = hmac.new(
-        secret.encode(),
-        payload_b64.encode(),
-        hashlib.sha256
-    ).hexdigest()
+    token = extract_bearer_token(headers)
+    if not token:
+        return False
 
-    return hmac.compare_digest(signature, expected)
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+
+    header_b64, payload_b64, signature_b64 = parts
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+
+    try:
+        header_obj = json.loads(_b64url_decode(header_b64).decode("utf-8"))
+        signature_bytes = _b64url_decode(signature_b64)
+    except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
+        return False
+
+    if header_obj.get("alg") != "HS256":
+        return False
+
+    expected = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return hmac.compare_digest(signature_bytes, expected)
+
+
+def verify_webhook_auth(headers, raw_body, secret):
+    """
+    Validate inbound webhook auth when a secret is configured.
+    Accepts either Dialpad HMAC signature headers or Bearer HS256 JWT.
+    """
+    if not secret:
+        return True, "disabled"
+    if verify_hmac_signature(raw_body, headers, secret):
+        return True, "hmac"
+    if verify_bearer_jwt(headers, secret):
+        return True, "jwt"
+    return False, "missing_or_invalid_signature_or_jwt"
+
+
+def _first_value(value):
+    """Return first item for list-like values, otherwise return value unchanged."""
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def normalize_sms_payload(data, contact_info=None):
+    """Normalize Dialpad webhook payload to a consistent SMS object for hooks."""
+    sender_number = data.get("from_number")
+    recipient_number = _first_value(data.get("to_number"))
+    text = data.get("text", data.get("text_content", "")) or ""
+    direction = data.get("direction", "unknown")
+    timestamp = (
+        data.get("timestamp")
+        or data.get("event_timestamp")
+        or data.get("created_date")
+        or data.get("date_created")
+    )
+    conversation_id = data.get("conversation_id")
+    message_id = data.get("message_id") or data.get("id")
+
+    contact_name = contact_info or (data.get("contact", {}) or {}).get("name")
+    sender = contact_name or sender_number or "Unknown"
+
+    return {
+        "sender": sender,
+        "sender_number": sender_number,
+        "recipient_number": recipient_number,
+        "text": text,
+        "timestamp": timestamp,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "direction": direction,
+    }
+
+
+def build_hook_session_key(normalized_sms):
+    """Build stable OpenClaw hook session key with fallbacks."""
+    candidate = (
+        normalized_sms.get("conversation_id")
+        or normalized_sms.get("message_id")
+        or normalize_phone_number(normalized_sms.get("sender_number"))
+        or "unknown"
+    )
+    return f"hook:dialpad:sms:{candidate}"
+
+
+def format_hook_message(normalized_sms, line_display=None):
+    """Build hook message text with short metadata and body."""
+    sender = normalized_sms.get("sender") or "Unknown"
+    sender_number = normalized_sms.get("sender_number") or "Unknown"
+    recipient_number = normalized_sms.get("recipient_number")
+    timestamp = normalized_sms.get("timestamp")
+    body = normalized_sms.get("text", "")
+    message_id = normalized_sms.get("message_id")
+
+    lines = ["Dialpad inbound SMS"]
+    if line_display:
+        lines.append(f"To Line: {line_display}")
+    elif recipient_number:
+        lines.append(f"To: {recipient_number}")
+    lines.append(f"From: {sender} ({sender_number})")
+    if timestamp is not None:
+        lines.append(f"Timestamp: {timestamp}")
+    if message_id is not None:
+        lines.append(f"Message ID: {message_id}")
+    lines.append("")
+    lines.append(body)
+    return "\n".join(lines)
+
+
+def get_openclaw_hooks_url():
+    """Build complete OpenClaw hooks URL from gateway + path env vars."""
+    return f"{OPENCLAW_GATEWAY_URL.rstrip('/')}/{OPENCLAW_HOOKS_PATH.lstrip('/')}"
+
+
+def build_openclaw_hook_payload(normalized_sms, line_display=None):
+    """Build /hooks/agent payload for a normalized inbound SMS."""
+    payload = {
+        "message": format_hook_message(normalized_sms, line_display=line_display),
+        "name": OPENCLAW_HOOKS_NAME,
+        "sessionKey": build_hook_session_key(normalized_sms),
+        "deliver": True,
+    }
+    if OPENCLAW_HOOKS_CHANNEL:
+        payload["channel"] = OPENCLAW_HOOKS_CHANNEL
+    if OPENCLAW_HOOKS_TO:
+        payload["to"] = OPENCLAW_HOOKS_TO
+    if OPENCLAW_HOOKS_AGENT_ID:
+        payload["agentId"] = OPENCLAW_HOOKS_AGENT_ID
+    return payload
+
+
+def send_sms_to_openclaw_hooks(normalized_sms, line_display=None):
+    """
+    Forward normalized SMS payload to OpenClaw hooks.
+    Returns (success: bool, status: str).
+    """
+    if not OPENCLAW_HOOKS_TOKEN:
+        print("⚠️  OPENCLAW_HOOKS_TOKEN is not configured (SMS hooks forwarding disabled)")
+        return False, "token_missing"
+
+    payload = build_openclaw_hook_payload(normalized_sms, line_display=line_display)
+
+    url = get_openclaw_hooks_url()
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENCLAW_HOOKS_TOKEN}",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            status_code = getattr(response, "status", 200)
+            if 200 <= status_code < 300:
+                return True, f"http_{status_code}"
+            return False, f"http_{status_code}"
+    except Exception as e:
+        print(f"❌ Error forwarding inbound SMS to OpenClaw hooks: {e}")
+        return False, "request_failed"
 
 
 class DialpadWebhookHandler(BaseHTTPRequestHandler):
@@ -429,7 +677,15 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         # Limit request body size to prevent memory exhaustion (1MB max)
         MAX_BODY_SIZE = 1024 * 1024  # 1MB
         content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
-        body = self.rfile.read(content_length).decode("utf-8")
+        raw_body = self.rfile.read(content_length)
+
+        auth_ok, auth_source = verify_webhook_auth(self.headers, raw_body, WEBHOOK_SECRET)
+        if not auth_ok:
+            print("❌ Unauthorized webhook request on /webhook/dialpad")
+            self.send_error(401, "Unauthorized")
+            return
+
+        body = raw_body.decode("utf-8")
 
         try:
             data = json.loads(body) if body else {}
@@ -459,11 +715,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             self.send_error(500, f"Storage error: {e}")
             return
 
-        # Send Telegram notification for inbound messages
-        # Suppress notification for sensitive messages (2FA codes, OTP, etc.)
-        telegram_sent = None
-        telegram_status = TELEGRAM_STATUS_NOT_APPLICABLE
-        telegram_note = ""
+        # Forward inbound SMS to OpenClaw hooks (non-sensitive only)
+        hook_sent = False
+        hook_status = None
+        sensitive_filtered = False
         if direction == "inbound":
             # Resolve contact name before filtering so sender check isn't "Unknown"
             contact_info = get_contact_name(from_num)
@@ -474,49 +729,19 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
             notification_type = classify_inbound_notification(data)
             if notification_type == "missed_call":
-                line_display = get_line_name(to_num) or "Unknown"
-                if contact_info:
-                    sender_display = f"*{contact_info}* (`{from_num}`)"
-                else:
-                    sender_display = f"`{from_num}`"
-                time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
-
-                tg_text = (
-                    f"📞 *Missed Call*\n"
-                    f"*To:* {line_display}\n"
-                    f"*From:* {sender_display}\n"
-                    f"*Time:* {time_display}"
-                )
-                telegram_sent = send_to_telegram(tg_text)
-                telegram_status = TELEGRAM_STATUS_SENT if telegram_sent else TELEGRAM_STATUS_FAILED
-                telegram_note = "missed call alert"
+                hook_status = "filtered_missed_call"
             elif notification_type == "blank_sms":
-                telegram_sent = False
-                telegram_status = TELEGRAM_STATUS_FILTERED
-                telegram_note = "blank inbound SMS filtered"
+                hook_status = "filtered_blank_sms"
             elif is_sensitive_message(text=text, sender=contact_info or "", contact_number=from_num):
-                telegram_sent = False
-                telegram_status = TELEGRAM_STATUS_FILTERED
-                telegram_note = "sensitive - filtered"
-                print(f"   🔒 Sensitive message filtered (not forwarding to Telegram)")
+                sensitive_filtered = True
+                hook_status = "filtered_sensitive"
+                print("   🔒 Sensitive message filtered (not forwarding to OpenClaw hooks)")
             else:
-                sender_display = f"*{contact_info}* (`{from_num}`)" if contact_info else f"`{from_num}`"
                 line_display = get_line_name(to_num)
-                text_preview = text[:200] + "..." if len(text) > 200 else text
-                to_line = f"*To:* {line_display}\n" if line_display else ""
-
-                tg_text = (
-                    f"📱 *New SMS Received*\n"
-                    f"{to_line}"
-                    f"*From:* {sender_display}\n"
-                    f"*Message:* {text_preview}\n\n"
-                    f"_Reply via Dialpad or use /sms to respond._"
+                normalized_sms = normalize_sms_payload(data, contact_info=contact_info)
+                hook_sent, hook_status = send_sms_to_openclaw_hooks(
+                    normalized_sms, line_display=line_display
                 )
-
-                telegram_sent = send_to_telegram(tg_text)
-                telegram_status = TELEGRAM_STATUS_SENT if telegram_sent else TELEGRAM_STATUS_FAILED
-                telegram_note = "sms notification"
-
         # Console logging
         print(f"[{timestamp}]")
         print(f"   📱 {direction.upper()}: {from_num}")
@@ -524,27 +749,25 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             text_preview = text[:60] + "..." if len(text) > 60 else text
             print(f"   📄 \"{text_preview}\"")
         print(f"   💾 Stored: ✓")
+        if WEBHOOK_SECRET:
+            print(f"   🔐 Auth: ✓ ({auth_source})")
         if direction == "inbound":
-            if telegram_status == TELEGRAM_STATUS_FILTERED:
-                print(f"   📨 Telegram: ⏭ ({telegram_note})")
-            elif telegram_status == TELEGRAM_STATUS_SENT:
-                print(f"   📨 Telegram: ✓ ({telegram_note})")
-            elif telegram_status == TELEGRAM_STATUS_FAILED:
-                print(f"   📨 Telegram: ✗ ({telegram_note})")
+            if sensitive_filtered:
+                print("   🪝 OpenClaw Hook: ✗ (sensitive — filtered)")
             else:
-                print(f"   📨 Telegram: — ({telegram_status})")
+                print(f"   🪝 OpenClaw Hook: {'✓' if hook_sent else '✗'} ({hook_status})")
         print()
 
         # Always return 200 OK (graceful degradation)
-        # Webhook succeeded even if Telegram notification failed
+        # Webhook succeeded even if hook forwarding failed
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         response = {
             "status": "ok",
             "stored": True,
-            "telegram_sent": telegram_sent if direction == "inbound" else None,
-            "telegram_status": telegram_status if direction == "inbound" else TELEGRAM_STATUS_NOT_APPLICABLE
+            "hook_forwarded": hook_sent if direction == "inbound" else None,
+            "hook_status": hook_status if direction == "inbound" else None,
         }
         self.wfile.write(json.dumps(response).encode())
 
@@ -710,7 +933,7 @@ def main():
     server = HTTPServer(("0.0.0.0", PORT), DialpadWebhookHandler)
 
     print("=" * 60)
-    print("🚀 Dialpad SMS Webhook Server")
+    print("🚀 Dialpad SMS Webhook Server (OpenClaw Hooks)")
     print("=" * 60)
     print(f"Port: {PORT}")
     print(f"Endpoints:")
@@ -721,11 +944,18 @@ def main():
     print(f"")
     print(f"Configuration:")
     print(f"  - Dialpad API: {'✓' if DIALPAD_API_KEY else '✗ (contact lookup disabled)'}")
-    print(f"  - Telegram: {'✓' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else '✗ (notifications disabled)'}")
+    print(f"  - OpenClaw Gateway URL: {OPENCLAW_GATEWAY_URL}")
+    print(f"  - OpenClaw Hooks Path: {OPENCLAW_HOOKS_PATH}")
+    print(f"  - OpenClaw Hooks Token: {'✓' if OPENCLAW_HOOKS_TOKEN else '✗ (SMS hook forwarding disabled)'}")
+    print(f"  - OpenClaw Hooks Name: {OPENCLAW_HOOKS_NAME}")
+    print(f"  - OpenClaw Hooks Channel: {OPENCLAW_HOOKS_CHANNEL or '(unset)'}")
+    print(f"  - OpenClaw Hooks To: {OPENCLAW_HOOKS_TO or '(unset)'}")
+    print(f"  - OpenClaw Hooks Agent ID: {OPENCLAW_HOOKS_AGENT_ID or '(default)'}")
+    print(f"  - Telegram: {'✓' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else '✗ (call/voicemail notifications disabled)'}")
     tg_ready = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
     print(f"  - Call Notifications: {'✓' if tg_ready else '✗ (Telegram not fully configured)'}")
     print(f"  - Voicemail Notifications: {'✓' if tg_ready else '✗ (Telegram not fully configured)'}")
-    print(f"  - JWT Verification: {'✓' if WEBHOOK_SECRET else '✗ (disabled)'}")
+    print(f"  - Webhook Verification: {'✓' if WEBHOOK_SECRET else '✗ (disabled)'}")
     print(f"  - Line Names:")
     for number in sorted(LINE_NAMES.keys()):
         formatted = format_phone_number(number) or number

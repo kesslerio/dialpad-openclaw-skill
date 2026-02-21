@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from webhook_server import (
     classify_inbound_notification,
     detect_reliable_missed_call_hint,
+    extract_message_text,
     is_sensitive_message,
 )
 
@@ -65,6 +66,15 @@ class WebhookNotificationClassificationTests(unittest.TestCase):
     def test_non_sensitive_message_not_detected(self):
         text = "See you at 6pm for dinner."
         self.assertFalse(is_sensitive_message(text=text, sender="Friend"))
+
+    def test_text_content_fallback_used_when_text_is_blank(self):
+        payload = {
+            "direction": "inbound",
+            "text": "   ",
+            "text_content": "Real body",
+        }
+        self.assertEqual(extract_message_text(payload), "Real body")
+        self.assertEqual(classify_inbound_notification(payload), "sms")
 
 
 if __name__ == "__main__":

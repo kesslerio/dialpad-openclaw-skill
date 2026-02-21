@@ -212,7 +212,14 @@ def get_contact_name(phone_number):
 
 def extract_message_text(data):
     """Extract text payload from webhook event as a string."""
-    return str(data.get("text", data.get("text_content", "")) or "")
+    text = data.get("text", "")
+    text_content = data.get("text_content", "")
+
+    if not is_blank_text(text):
+        return str(text)
+    if not is_blank_text(text_content):
+        return str(text_content)
+    return str(text or text_content or "")
 
 
 def is_blank_text(value):

@@ -8,6 +8,7 @@ from webhook_server import (
     classify_inbound_notification,
     detect_reliable_missed_call_hint,
     extract_message_text,
+    is_sensitive_message,
 )
 
 
@@ -53,6 +54,18 @@ class WebhookNotificationClassificationTests(unittest.TestCase):
         }
         self.assertFalse(detect_reliable_missed_call_hint(payload))
         self.assertEqual(classify_inbound_notification(payload), "blank_sms")
+
+    def test_sensitive_google_verification_message_detected(self):
+        text = "Google verification code: 482991. Do not share this code."
+        self.assertTrue(is_sensitive_message(text=text, sender="Google"))
+
+    def test_sensitive_bank_otp_message_detected(self):
+        text = "Your OTP is 773311 for login. If not you, contact your bank."
+        self.assertTrue(is_sensitive_message(text=text, sender="Capital One"))
+
+    def test_non_sensitive_message_not_detected(self):
+        text = "See you at 6pm for dinner."
+        self.assertFalse(is_sensitive_message(text=text, sender="Friend"))
 
     def test_text_content_fallback_used_when_text_is_blank(self):
         payload = {

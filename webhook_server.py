@@ -26,6 +26,7 @@ import os
 import sys
 import hmac
 import hashlib
+import re
 import urllib.request
 import urllib.parse
 from datetime import datetime
@@ -38,8 +39,6 @@ sys.path.insert(0, str(skill_dir))
 
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook, format_notification
-
-from sms_filter_compat import is_sensitive_message
 
 # Environment configuration (NO HARDCODED SECRETS)
 PORT = int(os.environ.get("PORT", "8081"))
@@ -71,6 +70,33 @@ TELEGRAM_STATUS_SENT = "sent"
 TELEGRAM_STATUS_FILTERED = "filtered"
 TELEGRAM_STATUS_NOT_APPLICABLE = "not_applicable"
 TELEGRAM_STATUS_FAILED = "failed"
+
+SENSITIVE_KEYWORD_PATTERNS = (
+    re.compile(
+        r"\b("
+        r"otp|o\.t\.p|"
+        r"2fa|two[- ]?factor|multi[- ]?factor|mfa|"
+        r"verification code|security code|auth(?:entication)? code|"
+        r"one[- ]?time (?:pass(?:word)?|code)|passcode"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:google|g-?code|intuit|bank|chase|wells fargo|bank of america|"
+        r"citi|capital one|paypal|venmo)\b.{0,80}\b(?:code|otp|passcode|verification)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:code|otp|passcode|verification code)\b.{0,30}\b\d{4,8}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b\d{4,8}\b.{0,30}\b(?:code|otp|passcode|verification code)\b",
+        re.IGNORECASE,
+    ),
+)
+
+CODE_TOKEN_PATTERN = re.compile(r"\b(?:\d[\s-]?){4,8}\b")
 
 
 def normalize_phone_number(phone_number):
@@ -199,6 +225,34 @@ def extract_message_text(data):
 def is_blank_text(value):
     """True when text is empty or whitespace-only."""
     return not str(value or "").strip()
+
+
+def is_sensitive_message(text="", sender="", contact_number=""):
+    """
+    Return True for OTP/2FA/security verification messages.
+    These messages are stored, but must not be forwarded to Telegram.
+    """
+    body = str(text or "")
+    if not body.strip():
+        return False
+
+    combined = " ".join(
+        part for part in (str(sender or ""), str(contact_number or ""), body) if part
+    )
+
+    for pattern in SENSITIVE_KEYWORD_PATTERNS:
+        if pattern.search(combined):
+            return True
+
+    has_code = bool(CODE_TOKEN_PATTERN.search(body))
+    has_security_context = bool(
+        re.search(
+            r"\b(verify|verification|security|login|signin|sign in|auth|account|bank|google|intuit)\b",
+            combined,
+            re.IGNORECASE,
+        )
+    )
+    return has_code and has_security_context
 
 
 def first_value(value):

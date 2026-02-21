@@ -155,6 +155,8 @@ python3 create_sms_webhook.py list
 Webhook events:
 - `sms_sent` - Outgoing SMS
 - `sms_received` - Incoming SMS
+- Inbound SMS webhook payloads with empty/whitespace-only text are still stored, but not forwarded to Telegram as blank messages.
+- If an inbound SMS webhook payload is empty but includes reliable missed-call call-event hints, Telegram receives a missed call alert instead.
 
 ## Export SMS History
 

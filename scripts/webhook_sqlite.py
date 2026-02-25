@@ -112,7 +112,7 @@ def get_inbox_summary() -> str:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 webhook_sqlite.py [test|inbox|mark-read <number>]")
+        print("Usage: python3 scripts/webhook_sqlite.py [test|inbox|mark-read <number>]")
         sys.exit(1)
     
     cmd = sys.argv[1]

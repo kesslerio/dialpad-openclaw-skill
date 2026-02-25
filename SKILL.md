@@ -53,7 +53,7 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 
 **Check SMS History:**
 ```bash
-python3 sms_sqlite.py list
+python3 scripts/sms_sqlite.py list
 ```
 
 ## Key Rules

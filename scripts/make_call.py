@@ -3,10 +3,10 @@
 Make voice calls via Dialpad API with optional ElevenLabs TTS.
 
 Usage:
-    python3 make_call.py --to "+14155551234"
-    python3 make_call.py --to "+14155551234" --from "+14153602954"
-    python3 make_call.py --to "+14155551234" --elevenlabs "Hello, this is a call from..."
-    python3 make_call.py --to "+14155551234" --user-id "5765607478525952" --text "Meeting reminder"
+    python3 scripts/make_call.py --to "+14155551234"
+    python3 scripts/make_call.py --to "+14155551234" --from "+14153602954"
+    python3 scripts/make_call.py --to "+14155551234" --elevenlabs "Hello, this is a call from..."
+    python3 scripts/make_call.py --to "+14155551234" --user-id "5765607478525952" --text "Meeting reminder"
 """
 
 import argparse

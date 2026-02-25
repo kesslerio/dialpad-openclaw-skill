@@ -1,52 +1,61 @@
 # Dialpad Architecture
 
-```
-Dialpad SMS Skill
-├── bin/                          # Backward-compatible wrappers
-│   ├── send_sms.py              # Send SMS (wrapper → dialpad sms send)
-│   ├── send_group_intro.py       # Mirrored intro fallback (prospect/reference one-to-one)
-│   ├── make_call.py             # Make voice calls (wrapper → dialpad call make)
-│   ├── lookup_contact.py        # Contact lookup (wrapper → dialpad contact lookup)
-│   ├── create_contact.py        # Contact create/upsert (wrapper → dialpad contacts create)
-│   ├── update_contact.py        # Contact update (wrapper → dialpad contacts update)
-│   ├── export_sms.py            # Export historical SMS (wrapper → dialpad sms export)
-│   ├── create_sms_webhook.py    # Webhook management (wrapper → dialpad webhook create)
-│   └── _dialpad_compat.py       # Shared helpers for wrappers
+```text
+Dialpad OpenClaw Skill
+├── SKILL.md                      # Skill trigger/instruction entrypoint
+├── README.md                     # Concise setup + navigation
+├── bin/                          # Preferred user-facing wrappers
+│   ├── send_sms.py
+│   ├── send_group_intro.py
+│   ├── make_call.py
+│   ├── lookup_contact.py
+│   ├── create_contact.py
+│   ├── update_contact.py
+│   ├── export_sms.py
+│   ├── create_sms_webhook.py
+│   └── _dialpad_compat.py
 ├── generated/                    # OpenAPI-generated CLI
-│   ├── dialpad                  # Facade with auth bridge + aliases
-│   └── dialpad.openapi          # Full 241-endpoint CLI
-├── scripts/
-│   └── parity-check.sh          # Verify wrapper/new CLI parity
-├── sms_sqlite.py                # SQLite storage with FTS5 (RECOMMENDED)
-├── webhook_sqlite.py            # Webhook handler for SQLite
-├── send_sms.py                  # Legacy fallback script
-├── make_call.py                 # Legacy fallback script
-├── lookup_contact.py            # Legacy fallback script
-├── export_sms.py                # Legacy fallback script
-├── create_sms_webhook.py        # Legacy fallback script
-├── sms_storage.py               # Legacy JSON storage (deprecated)
-└── webhook_receiver.py          # Legacy webhook handler
+│   ├── dialpad
+│   └── dialpad.openapi
+├── scripts/                      # Operational/legacy Python tooling
+│   ├── send_sms.py
+│   ├── make_call.py
+│   ├── list_calls.py
+│   ├── call_lookup.py
+│   ├── get_transcript.py
+│   ├── get_ai_recap.py
+│   ├── create_sms_webhook.py
+│   ├── export_sms.py
+│   ├── lookup_contact.py
+│   ├── sms_sqlite.py
+│   ├── sms_storage.py
+│   ├── webhook_sqlite.py
+│   ├── webhook_server.py
+│   ├── webhook_receiver.py
+│   ├── poll_voicemails.py
+│   └── parity-check.sh
+├── references/                   # Deeper documentation
+├── tests/
+└── openapi.json
 ```
 
-## Wrapper → Generated CLI Flow
+## Wrapper to Generated CLI Flow
 
-Legacy scripts in `bin/` provide backward compatibility while delegating to the generated CLI:
+1. Wrapper receives task-oriented arguments.
+2. Wrapper transforms arguments to Dialpad CLI payloads.
+3. Wrapper executes `generated/dialpad` with auth from env.
+4. Wrapper normalizes output for downstream workflows.
 
-1. **Wrapper receives** legacy-style arguments
-2. **Transforms** to generated CLI format (payload JSON)
-3. **Executes** `generated/dialpad` with proper auth
-4. **Returns** results in legacy format
+## Script Layer
 
-`send_group_intro.py` shares sender-resolution helpers with `send_sms.py` and intentionally falls back to mirrored one-to-one sends (`mirrored_fallback`) because true group thread support is not guaranteed by this wrapper.
-
-This allows gradual migration: old scripts keep working, new features accessible via `generated/dialpad` directly.
+Scripts in `scripts/` are retained for compatibility and operational workflows (webhooks, storage, exports, and call lookup utilities). They are no longer placed in repository root.
 
 ## Regeneration
 
 ```bash
-# 1) Fetch latest Dialpad OpenAPI
+# Fetch latest Dialpad OpenAPI
 curl -fsSL https://dash.readme.com/api/v1/api-registry/58a089fmkn6y1s3 -o openapi.json
 
-# 2) Generate CLI from pinned openapi2cli commit
+# Generate CLI from pinned openapi2cli commit
 uvx --from /tmp/openapi2cli openapi2cli generate /tmp/openapi.normalized.json --name dialpad --output generated/dialpad.openapi
 ```

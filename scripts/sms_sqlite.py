@@ -365,7 +365,7 @@ if __name__ == "__main__":
     conn = init_db()
     
     if len(sys.argv) < 2:
-        print("Usage: python3 sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats]")
+        print("Usage: python3 scripts/sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats]")
         sys.exit(1)
     
     cmd = sys.argv[1]
@@ -466,6 +466,6 @@ if __name__ == "__main__":
         print(f"Marked {count} messages from {number} as read")
     
     else:
-        print("Unknown command. Usage: python3 sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats|read <number>]")
+        print("Unknown command. Usage: python3 scripts/sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats|read <number>]")
     
     conn.close()

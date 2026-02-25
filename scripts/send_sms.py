@@ -3,9 +3,9 @@
 Send SMS via Dialpad API.
 
 Usage:
-    python3 send_sms.py --to "+14155551234" --message "Hello!"
-    python3 send_sms.py --to "+14155551234" "+14155555678" --message "Group message"
-    python3 send_sms.py --to "+14155551234" --message "Test" --from "+14155550000"
+    python3 scripts/send_sms.py --to "+14155551234" --message "Hello!"
+    python3 scripts/send_sms.py --to "+14155551234" "+14155555678" --message "Group message"
+    python3 scripts/send_sms.py --to "+14155551234" --message "Test" --from "+14155550000"
 """
 
 import argparse

@@ -3,9 +3,9 @@
 Export historical SMS via Dialpad Stats API.
 
 Usage:
-    python3 export_sms.py --output sms_export.csv
-    python3 export_sms.py --start-date 2026-01-01 --end-date 2026-01-31 --output jan_sms.csv
-    python3 export_sms.py --office-id 6194013244489728 --output office_sms.csv
+    python3 scripts/export_sms.py --output sms_export.csv
+    python3 scripts/export_sms.py --start-date 2026-01-01 --end-date 2026-01-31 --output jan_sms.csv
+    python3 scripts/export_sms.py --office-id 6194013244489728 --output office_sms.csv
 """
 
 import argparse

@@ -47,10 +47,17 @@ def _build_payload(args, sender_number: str) -> dict[str, object]:
 
 
 def main() -> int:
-    if not generated_cli_available():
-        return run_legacy("send_sms.py", sys.argv[1:])
-
     args = build_parser().parse_args()
+
+    if not generated_cli_available():
+        if args.profile or args.allow_profile_mismatch or args.dry_run:
+            print_wrapper_error(
+                WrapperError(
+                    "This command requires generated/dialpad for --profile, --allow-profile-mismatch, and --dry-run."
+                )
+            )
+            return 2
+        return run_legacy("send_sms.py", sys.argv[1:])
 
     try:
         sender_number, sender_source = resolve_sender(

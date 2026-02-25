@@ -75,7 +75,36 @@ python3 send_sms.py --to "+14155551234" "+14155555678" --message "Group message"
 
 # From specific caller ID
 python3 send_sms.py --to "+14155551234" --message "Hello!" --from "+14159901234"
+
+# Send using a named sender profile
+python3 send_sms.py --to "+14155551234" --message "Hello!" --profile work
+
+# Use default profile
+export DIALPAD_DEFAULT_PROFILE=work
+python3 send_sms.py --to "+14155551234" --message "Hello!"
 ```
+
+Sender resolution in `bin/send_sms.py`:
+- `--from` takes priority.
+- `--profile work|sales` reads configured numbers from:
+  - `DIALPAD_PROFILE_WORK_FROM`
+  - `DIALPAD_PROFILE_SALES_FROM`
+- `DIALPAD_DEFAULT_FROM_NUMBER` has priority over `DIALPAD_DEFAULT_PROFILE`.
+- `DIALPAD_DEFAULT_PROFILE` sets default profile when `--from`/`--profile` are omitted.
+- `--allow-profile-mismatch` allows `--from` and mapped profile number to differ.
+- `--dry-run` prints resolved sender and payload intent without calling API.
+
+### Group Intro (mirrored fallback)
+
+```bash
+python3 bin/send_group_intro.py \
+  --prospect "+14155550111" \
+  --reference "+14155550999" \
+  --confirm-share \
+  --from "+14153602954"
+```
+
+This wrapper does not create true multi-recipient Dialpad threads. It mirrors the intro by sending two separate one-to-one SMS messages and returns `mode: mirrored_fallback`.
 
 ### Make Voice Calls
 

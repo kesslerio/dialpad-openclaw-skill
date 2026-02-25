@@ -6,7 +6,8 @@ Dialpad SMS Skill
 │   ├── send_sms.py              # Send SMS (wrapper → dialpad sms send)
 │   ├── make_call.py             # Make voice calls (wrapper → dialpad call make)
 │   ├── lookup_contact.py        # Contact lookup (wrapper → dialpad contact lookup)
-│   ├── create_contact.py        # Contact create with duplicate pre-check (wrapper → dialpad contacts create)
+│   ├── create_contact.py        # Contact create/upsert (wrapper → dialpad contacts create)
+│   ├── update_contact.py        # Contact update (wrapper → dialpad contacts update)
 │   ├── export_sms.py            # Export historical SMS (wrapper → dialpad sms export)
 │   ├── create_sms_webhook.py    # Webhook management (wrapper → dialpad webhook create)
 │   └── _dialpad_compat.py       # Shared helpers for wrappers

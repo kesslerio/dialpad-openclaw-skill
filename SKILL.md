@@ -41,6 +41,11 @@ bin/make_call.py --to "+14155551234" --text "This is a call from the agent."
 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
 ```
 
+**Update Contact:**
+```bash
+bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
+```
+
 **Check SMS History:**
 ```bash
 python3 sms_sqlite.py list
@@ -52,7 +57,7 @@ python3 sms_sqlite.py list
 2. **Escaping:** Use single quotes for messages containing `$` to prevent shell expansion (e.g., `'Price is $10'`).
 3. **Environment:** `DIALPAD_API_KEY` must be set. `ELEVENLABS_API_KEY` is optional for premium voices.
 4. **Wrappers:** Use `bin/*.py` for simple tasks; use `generated/dialpad` for advanced API features.
-5. **Create Contact Idempotency:** `bin/create_contact.py` pre-checks for existing contacts by phone/email and blocks duplicate creation unless `--allow-duplicate` is set.
+5. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
 
 ## Reference Documentation
 

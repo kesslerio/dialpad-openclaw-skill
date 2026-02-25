@@ -79,19 +79,21 @@ dialpad accesscontrolpolicies accesscontrolpolicies.assign --id "policy_123" --u
 ```bash
 # Full contact CRUD (beyond just lookup)
 dialpad contacts contacts.create --first-name "John" --last-name "Doe" --phones '["+14155551234"]'
-dialpad contacts contacts.update --id "contact_123" --company-id "company_456"
+dialpad contacts contacts.update --id "contact_123" --first-name "John" --job-title "VP"
 dialpad contacts contacts.delete --id "contact_123"
 
 # Backward-compatible wrapper
 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
+bin/update_contact.py --id "contact_123" --job-title "VP"
 
 # Company management
 dialpad companies companies.list
 dialpad companies companies.create --name "Acme Corp"
 
-# Idempotency behavior
-# - Duplicate pre-check is performed by phone/email before create when either identifier is provided.
-# - Use --allow-duplicate to force creation despite matches.
+# Contact upsert behavior (wrapper)
+# - create_contact.py matches by phone/email for shared and/or local scope and updates on match.
+# - --scope controls targets: shared, local, both, auto (owner provided => both, else shared).
+# - --allow-duplicate bypasses matching and forces create.
 
 # Contact import/export
 dialpad contacts imports.create --file "contacts.csv"

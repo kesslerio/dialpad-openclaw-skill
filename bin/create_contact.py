@@ -34,7 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--job-title", help="Job title")
     parser.add_argument("--extension", help="Extension")
     parser.add_argument("--url", action="append", help="Associated URL. Repeatable.")
-    parser.add_argument("--owner-id", help="Create a local contact for this owner")
+    parser.add_argument(
+        "--scope",
+        choices=["auto", "shared", "local", "both"],
+        default="auto",
+        help="Target scope: shared, local, both, or auto (owner-id => both, else shared)",
+    )
+    parser.add_argument("--owner-id", action="append", default=[], help="Local owner ID targets. Repeatable.")
     parser.add_argument("--allow-duplicate", action="store_true", help="Create even if duplicate found")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES, help="Max pages to scan for duplicate checks")
@@ -59,6 +65,8 @@ def validate_args(
     emails: list[str],
     urls: list[str],
     max_pages: int,
+    owner_ids: list[str],
+    scope: str,
 ) -> None:
     for phone in phones:
         if not PHONE_RE.fullmatch(phone):
@@ -73,6 +81,29 @@ def validate_args(
             raise WrapperError("Empty --url value is not allowed.")
     if max_pages <= 0:
         raise WrapperError("Invalid --max-pages value. Use a positive integer.")
+    if scope in {"local", "both"} and not owner_ids:
+        raise WrapperError(f"--owner-id is required when --scope is '{scope}'.")
+
+
+def resolve_scope(scope: str, owner_ids: list[str]) -> str:
+    if scope == "auto":
+        return "both" if owner_ids else "shared"
+    return scope
+
+
+def unique_owner_ids(owner_ids: list[str]) -> list[str]:
+    if not owner_ids:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for owner_id in owner_ids:
+        value = (owner_id or "").strip()
+        if not value:
+            continue
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def build_payload(
@@ -135,13 +166,17 @@ def is_duplicate_contact(contact: dict[str, Any], phones: list[str], emails: lis
     return False
 
 
-def find_duplicates(phones: list[str], emails: list[str], owner_id: str | None, max_pages: int) -> list[dict[str, Any]]:
+def find_matching_contact(
+    phones: list[str],
+    emails: list[str],
+    owner_id: str | None,
+    max_pages: int,
+    include_local: bool,
+) -> dict[str, Any] | None:
     if not phones and not emails:
-        return []
+        return None
 
-    matches: list[dict[str, Any]] = []
     cursor: str | None = None
-    include_local = "true" if owner_id else None
 
     for _ in range(max_pages):
         args = ["contacts", "contacts.list"]
@@ -156,36 +191,70 @@ def find_duplicates(phones: list[str], emails: list[str], owner_id: str | None, 
         items = result.get("items") or []
         for contact in items:
             if isinstance(contact, dict) and is_duplicate_contact(contact, phones, emails):
-                matches.append(contact)
+                return contact
 
         cursor = result.get("cursor")
         if not cursor:
             break
-    return matches
+    return None
 
 
-def format_contact_name(contact: dict[str, Any]) -> str:
-    display = contact.get("display_name")
-    if display:
-        return str(display)
-    first = (contact.get("first_name") or "").strip()
-    last = (contact.get("last_name") or "").strip()
-    if first or last:
-        return f"{first} {last}".strip()
-    return "Unknown"
+def create_contact(payload: dict[str, Any]) -> dict[str, Any]:
+    return run_generated_json(["contacts", "contacts.create", "--data", json.dumps(payload)])
 
 
-def duplicate_error(phones: list[str], emails: list[str], matches: list[dict[str, Any]]) -> None:
-    preview = []
-    for contact in matches[:3]:
-        preview.append(f"{format_contact_name(contact)} (id={contact.get('id', 'unknown')})")
-    more = f", plus {len(matches)-3} more" if len(matches) > 3 else ""
-    raise WrapperError(
-        f"Duplicate contact detected for provided "
-        f"phone/email identifiers {phones + emails}. "
-        f"Existing matches: {', '.join(preview)}{more}. "
-        "Use --allow-duplicate to create anyway."
+def update_contact(contact_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return run_generated_json(
+        ["contacts", "contacts.update", "--id", contact_id, "--data", json.dumps(payload)]
     )
+
+
+def is_owner_not_found_error(message: str) -> bool:
+    lowered = message.lower()
+    return "404" in lowered and "owner" in lowered and "not found" in lowered
+
+
+def sync_shared_contact(
+    base_payload: dict[str, Any],
+    phones: list[str],
+    emails: list[str],
+    allow_duplicate: bool,
+    max_pages: int,
+) -> tuple[str, dict[str, Any]]:
+    if allow_duplicate:
+        result = create_contact(base_payload)
+        return "created", result
+
+    match = find_matching_contact(phones, emails, owner_id=None, max_pages=max_pages, include_local=False)
+    if not match:
+        return "created", create_contact(base_payload)
+    return "updated", update_contact(str(match.get("id")), base_payload)
+
+
+def sync_local_contact(
+    owner_id: str,
+    base_payload: dict[str, Any],
+    phones: list[str],
+    emails: list[str],
+    allow_duplicate: bool,
+    max_pages: int,
+) -> tuple[str, dict[str, Any]] | tuple[str, str]:
+    if allow_duplicate:
+        payload = {**base_payload, "owner_id": owner_id}
+        return "created", create_contact(payload)
+
+    match = find_matching_contact(
+        phones,
+        emails,
+        owner_id=owner_id,
+        max_pages=max_pages,
+        include_local="true",
+    )
+    if match:
+        return "updated", update_contact(str(match.get("id")), base_payload)
+
+    payload = {**base_payload, "owner_id": owner_id}
+    return "created", create_contact(payload)
 
 
 def main() -> int:
@@ -200,13 +269,13 @@ def main() -> int:
         phones = parse_repeated(args.phone)
         emails = parse_repeated(args.email)
         urls = parse_repeated(args.url)
-        validate_args(phones, emails, urls, args.max_pages)
+        owner_ids = unique_owner_ids(args.owner_id)
+        scope = resolve_scope(args.scope, owner_ids)
+        validate_args(phones, emails, urls, args.max_pages, owner_ids, scope)
+        if args.scope == "auto":
+            args.scope = scope
 
-        duplicates = find_duplicates(phones, emails, args.owner_id, args.max_pages)
-        if duplicates and not args.allow_duplicate:
-            duplicate_error(phones, emails, duplicates)
-
-        payload = build_payload(
+        base_payload = build_payload(
             first_name=args.first_name,
             last_name=args.last_name,
             phones=phones,
@@ -215,20 +284,78 @@ def main() -> int:
             company_name=args.company_name,
             job_title=args.job_title,
             extension=args.extension,
-            owner_id=args.owner_id,
+            owner_id=None,
         )
-        result = run_generated_json(["contacts", "contacts.create", "--data", json.dumps(payload)])
+
+        results: dict[str, Any] = {
+            "scope": args.scope,
+            "shared": None,
+            "locals": [],
+            "warnings": [],
+        }
+
+        if scope in {"shared", "both"}:
+            action, contact = sync_shared_contact(
+                base_payload,
+                phones,
+                emails,
+                args.allow_duplicate,
+                args.max_pages,
+            )
+            results["shared"] = {"owner_id": None, "action": action, "contact": contact}
+
+        if scope in {"local", "both"}:
+            for owner_id in owner_ids:
+                try:
+                    action, contact = sync_local_contact(
+                        owner_id,
+                        base_payload,
+                        phones,
+                        emails,
+                        args.allow_duplicate,
+                        args.max_pages,
+                    )
+                    results["locals"].append(
+                        {"owner_id": owner_id, "action": action, "contact": contact}
+                    )
+                except WrapperError as err:
+                    message = str(err)
+                    if is_owner_not_found_error(message):
+                        results["warnings"].append(
+                            {
+                                "owner_id": owner_id,
+                                "code": "owner_not_found",
+                                "message": (
+                                    f"Owner {owner_id} not found. Create was skipped for this owner. "
+                                    "Remove it, or retry with a valid owner ID."
+                                ),
+                            }
+                        )
+                        if args.scope != "local":
+                            continue
+                    raise
 
         if args.json:
-            print(json.dumps(result, indent=2))
+            print(json.dumps(results, indent=2))
         else:
-            print("Created contact:")
-            print(f"   ID: {result.get('id', 'N/A')}")
-            print(f"   Name: {args.first_name} {args.last_name}")
-            if phones:
-                print(f"   Primary phone: {phones[0]}")
-            if args.owner_id:
-                print(f"   Owner ID: {args.owner_id}")
+            if results["shared"]:
+                shared = results["shared"]
+                print(f"{shared['action'].title()} shared contact:")
+                contact = shared["contact"] or {}
+                print(f"   ID: {contact.get('id', 'N/A')}")
+                if phones:
+                    print(f"   Primary phone: {phones[0]}")
+            for item in results["locals"]:
+                action = item["action"].title()
+                print(f"{action} local contact for owner {item['owner_id']}:")
+                contact = item["contact"] or {}
+                print(f"   ID: {contact.get('id', 'N/A')}")
+            if not results["shared"] and not results["locals"]:
+                print("No contact sync targets were configured.")
+            if results["warnings"]:
+                print("\nWarnings:")
+                for warning in results["warnings"]:
+                    print(f" - {warning['message']}")
         return 0
     except WrapperError as err:
         print_wrapper_error(err)

@@ -3,10 +3,10 @@
 List recent calls via Dialpad API.
 
 Usage:
-    python3 list_calls.py
-    python3 list_calls.py --hours 6 --limit 25
-    python3 list_calls.py --today --missed
-    python3 list_calls.py --today --output recent_calls.csv
+    python3 scripts/list_calls.py
+    python3 scripts/list_calls.py --hours 6 --limit 25
+    python3 scripts/list_calls.py --today --missed
+    python3 scripts/list_calls.py --today --output recent_calls.csv
 """
 
 import argparse

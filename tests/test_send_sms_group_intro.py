@@ -6,12 +6,14 @@ import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import send_sms
 from _dialpad_compat import WrapperError
+from _dialpad_compat import run_legacy
 import send_group_intro
 
 
@@ -168,6 +170,15 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertEqual(run_legacy.call_count, 0)
         self.assertIn("requires generated/dialpad", err)
+
+    def test_run_legacy_resolves_scripts_directory_first(self):
+        with patch("_dialpad_compat.subprocess.run", return_value=SimpleNamespace(returncode=0)) as mocked:
+            code = run_legacy("send_sms.py", ["--help"])
+
+        self.assertEqual(code, 0)
+        invoked = mocked.call_args.args[0]
+        self.assertEqual(Path(invoked[1]).parent.name, "scripts")
+        self.assertEqual(Path(invoked[1]).name, "send_sms.py")
 
 
 class SendGroupIntroTests(unittest.TestCase):

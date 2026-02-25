@@ -12,25 +12,25 @@ Messages are stored in a single SQLite database with full-text search.
 
 ```bash
 # List all SMS conversations
-python3 sms_sqlite.py list
+python3 scripts/sms_sqlite.py list
 
 # View specific conversation thread
-python3 sms_sqlite.py thread "+14155551234"
+python3 scripts/sms_sqlite.py thread "+14155551234"
 
 # Full-text search across all messages
-python3 sms_sqlite.py search "demo"
+python3 scripts/sms_sqlite.py search "demo"
 
 # Show unread message summary
-python3 sms_sqlite.py unread
+python3 scripts/sms_sqlite.py unread
 
 # Statistics
-python3 sms_sqlite.py stats
+python3 scripts/sms_sqlite.py stats
 
 # Mark messages as read
-python3 sms_sqlite.py read "+14155551234"
+python3 scripts/sms_sqlite.py read "+14155551234"
 
 # Migrate from legacy storage
-python3 sms_sqlite.py migrate
+python3 scripts/sms_sqlite.py migrate
 ```
 
 ## Features
@@ -59,7 +59,7 @@ summary = get_inbox_summary()
 The original JSON-based storage is still available but not recommended:
 
 ```bash
-python3 sms_storage.py [list|thread|search|unread]
+python3 scripts/sms_storage.py [list|thread|search|unread]
 ```
 
 ## Historical Export

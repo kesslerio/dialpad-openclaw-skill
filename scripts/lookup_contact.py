@@ -3,8 +3,8 @@
 Dialpad Contact Lookup - Resolves phone numbers to contact names.
 
 Usage:
-    python3 lookup_contact.py "+14155551234"
-    DIALPAD_API_KEY=xxx python3 lookup_contact.py "+14155551234"
+    python3 scripts/lookup_contact.py "+14155551234"
+    DIALPAD_API_KEY=xxx python3 scripts/lookup_contact.py "+14155551234"
 """
 import os
 import sys
@@ -52,8 +52,8 @@ def get_contact_name(phone_number):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 lookup_contact.py \u003cphone_number\u003e")
-        print("Example: python3 lookup_contact.py +14155551234")
+        print("Usage: python3 scripts/lookup_contact.py \u003cphone_number\u003e")
+        print("Example: python3 scripts/lookup_contact.py +14155551234")
         sys.exit(1)
     
     test_num = sys.argv[1]

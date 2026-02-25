@@ -275,7 +275,7 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python3 sms_storage.py [migrate|list|thread <number>|search <query>|unread]")
+        print("Usage: python3 scripts/sms_storage.py [migrate|list|thread <number>|search <query>|unread]")
         sys.exit(1)
     
     cmd = sys.argv[1]
@@ -318,4 +318,4 @@ if __name__ == "__main__":
             print(f"  {t['phone_number']} ({t.get('contact_name', 'Unknown')}): {t['unread_count']} unread")
     
     else:
-        print("Unknown command. Usage: python3 sms_storage.py [migrate|list|thread <number>|search <query>|unread]")
+        print("Unknown command. Usage: python3 scripts/sms_storage.py [migrate|list|thread <number>|search <query>|unread]")

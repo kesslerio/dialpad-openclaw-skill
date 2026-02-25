@@ -74,7 +74,7 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python3 webhook_receiver.py [test|threads]")
+        print("Usage: python3 scripts/webhook_receiver.py [test|threads]")
         sys.exit(1)
     
     cmd = sys.argv[1]

@@ -149,9 +149,14 @@ def run_generated_json(args: list[str]) -> Any:
 
 
 def run_legacy(script_name: str, forwarded_args: list[str]) -> int:
-    legacy = ROOT / script_name
+    scripts_legacy = ROOT / "scripts" / script_name
+    root_legacy = ROOT / script_name
+    legacy = scripts_legacy if scripts_legacy.exists() else root_legacy
     if not legacy.exists():
-        print(f"Error: fallback script not found: {legacy}", file=sys.stderr)
+        print(
+            f"Error: fallback script not found: {scripts_legacy} (or {root_legacy})",
+            file=sys.stderr,
+        )
         return 2
 
     proc = subprocess.run([sys.executable, str(legacy), *forwarded_args])

@@ -1,414 +1,96 @@
-# Dialpad Moltbot Skill
+# Dialpad OpenClaw Skill
 
-Send SMS text messages and make voice calls via the Dialpad API with support for TTS, caller ID selection, and message storage.
+Dialpad messaging and calling skill for OpenClaw with lightweight wrappers, webhook handling, and local SMS history storage.
 
-## Features
+## What This Repo Contains
 
-- **Send SMS** - Single or batch SMS messages (up to 10 recipients)
-- **Voice Calls** - Outbound voice calls with optional Text-to-Speech
-- **Caller ID Selection** - Choose which Dialpad phone number appears as caller ID
-- **Message Storage** - SQLite database with full-text search for SMS history
-- **Webhooks** - Real-time SMS events with inbound SMS forwarding to OpenClaw hooks
-- **Multiple Voices** - Use Dialpad's TTS or premium ElevenLabs voices
+- `SKILL.md` for skill loading and usage guidance.
+- `bin/` wrappers for stable task-focused commands.
+- `generated/` OpenAPI-generated Dialpad CLI surface.
+- `scripts/` operational Python scripts (legacy entrypoints + webhook/storage tooling).
+- `references/` deeper API/architecture/storage/voice docs.
 
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/kesslerio/dialpad-moltbot-skill.git
-cd dialpad-moltbot-skill
-```
-
-## Configuration
-
-### Required
-
-Set your Dialpad API key:
+## Quick Start
 
 ```bash
-export DIALPAD_API_KEY="your-api-key-here"
-```
+# Clone
+git clone https://github.com/kesslerio/dialpad-openclaw-skill.git
+cd dialpad-openclaw-skill
 
-Or add to `~/.moltbot/.env` or `~/.clawdbot/.env`:
+# Required auth
+export DIALPAD_API_KEY="your-api-key"
 
-```
-DIALPAD_API_KEY=your-api-key-here
-```
-
-Get your API key from: https://dialpad.com/api/settings
-
-### Optional
-
-For premium voice quality using ElevenLabs TTS:
-
-```bash
+# Optional premium TTS
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
 ```
 
-For webhook server SMS forwarding to OpenClaw hooks:
+## Common Commands
+
+Prefer wrappers in `bin/` for day-to-day usage.
 
 ```bash
-# Optional but recommended: enable inbound webhook auth validation
+# Send SMS
+bin/send_sms.py --to "+14155551234" --message "Hello from OpenClaw"
+
+# Send SMS with sender profile
+bin/send_sms.py --to "+14155551234" --message "Hello" --profile work
+
+# Make a call with TTS
+bin/make_call.py --to "+14155551234" --text "This is a test call."
+
+# Group intro (mirrored fallback)
+bin/send_group_intro.py --prospect "+14155550111" --reference "+14155550999" --confirm-share --from "+14153602954"
+
+# Create/update contacts
+bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
+bin/update_contact.py --id "contact_123" --job-title "Director"
+
+# SMS SQLite history (script moved under scripts/)
+python3 scripts/sms_sqlite.py list
+```
+
+## Webhooks to OpenClaw
+
+```bash
+# Optional webhook auth validation
 export DIALPAD_WEBHOOK_SECRET="your-dialpad-webhook-secret"
 
-# OpenClaw hooks destination
+# OpenClaw hook destination
 export OPENCLAW_GATEWAY_URL="http://127.0.0.1:8080"
 export OPENCLAW_HOOKS_TOKEN="your-openclaw-hooks-token"
 export OPENCLAW_HOOKS_PATH="/hooks/agent"
 export OPENCLAW_HOOKS_NAME="Dialpad SMS"
-# optional routing overrides
-export OPENCLAW_HOOKS_CHANNEL="telegram"
-export OPENCLAW_HOOKS_TO="-5102073225"
-export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 ```
 
-## Usage
-
-### Send SMS
+Create/list webhook subscriptions:
 
 ```bash
-# Basic SMS
-python3 send_sms.py --to "+14155551234" --message "Hello from Dialpad!"
-
-# Batch SMS (multiple recipients)
-python3 send_sms.py --to "+14155551234" "+14155555678" --message "Group message"
-
-# From specific caller ID
-python3 send_sms.py --to "+14155551234" --message "Hello!" --from "+14159901234"
-
-# Send using a named sender profile (wrapper)
-python3 bin/send_sms.py --to "+14155551234" --message "Hello!" --profile work
-
-# Use default profile (wrapper)
-export DIALPAD_DEFAULT_PROFILE=work
-python3 bin/send_sms.py --to "+14155551234" --message "Hello!"
+python3 scripts/create_sms_webhook.py create --url "https://your-server.com/webhook/dialpad" --direction "all"
+python3 scripts/create_sms_webhook.py list
 ```
 
-Sender resolution in `bin/send_sms.py`:
-- `--from` takes priority.
-- `--profile work|sales` reads configured numbers from:
-  - `DIALPAD_PROFILE_WORK_FROM`
-  - `DIALPAD_PROFILE_SALES_FROM`
-- `DIALPAD_DEFAULT_FROM_NUMBER` has priority over `DIALPAD_DEFAULT_PROFILE`.
-- `DIALPAD_DEFAULT_PROFILE` sets default profile when `--from`/`--profile` are omitted.
-- `--allow-profile-mismatch` allows `--from` and mapped profile number to differ.
-- `--dry-run` prints resolved sender and payload intent without calling API.
+## Repository Layout
 
-### Group Intro (mirrored fallback)
-
-```bash
-python3 bin/send_group_intro.py \
-  --prospect "+14155550111" \
-  --reference "+14155550999" \
-  --confirm-share \
-  --from "+14153602954"
+```text
+dialpad-openclaw-skill/
+├── SKILL.md
+├── README.md
+├── bin/
+├── generated/
+├── scripts/
+├── references/
+├── tests/
+└── LICENSE
 ```
 
-This wrapper does not create true multi-recipient Dialpad threads. It mirrors the intro by sending two separate one-to-one SMS messages and returns `mode: mirrored_fallback`.
+## Reference Docs
 
-### Make Voice Calls
+- `references/api-reference.md`
+- `references/architecture.md`
+- `references/sms-storage.md`
+- `references/voice-options.md`
 
-```bash
-# Basic outbound call
-python3 make_call.py --to "+14155551234"
+## Notes
 
-# Call with TTS greeting
-python3 make_call.py --to "+14155551234" --text "Hello! This is a message."
-
-# Call from specific number with TTS
-python3 make_call.py --to "+14155551234" --from "+14159901234" --text "Meeting reminder"
-
-# With premium voice (requires ELEVENLABS_API_KEY)
-python3 make_call.py --to "+14155551234" --voice "Adam" --text "Premium voice test"
-```
-
-### Create Contacts
-
-```bash
-# Create a shared contact
-python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
-
-# Create a local contact for a specific owner
-python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --owner-id "12345"
-
-# Auto scope: owner-id implies both shared+local
-python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --owner-id "12345" --scope auto
-
-# Optional fields: company, title, extension, additional phone/email/url values
-python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --phone "+14155559999" --email "jane@example.com" --company-name "Acme" --job-title "Ops"
-```
-
-### Update Contacts
-
-```bash
-python3 bin/update_contact.py --id "contact_123" --first-name "Jane" --job-title "Director" --phone "+14155551234" --url "https://example.com"
-```
-
-Idempotency note:
-- Wrapper behavior is now upsert-by-match:
-  - `--scope shared` updates shared matches and creates when none match.
-  - `--scope local` updates/creates per `--owner-id` targets.
-  - `--scope both` does both scopes.
-  - `--scope auto` resolves to `both` if owners are provided, otherwise `shared`.
-- Use `--allow-duplicate` to force create (skip match checks).
-
-### Retrieve Call Transcript and AI Recap
-
-```bash
-# Transcript by call ID
-python3 get_transcript.py --call-id "6342343299702784"
-
-# Transcript from most recent call (optionally filtered)
-python3 get_transcript.py --last --with "+14155551234"
-
-# AI recap by call ID
-python3 get_ai_recap.py --call-id "6342343299702784"
-
-# AI recap from most recent matching call, raw API JSON
-python3 get_ai_recap.py --last --with "Acme" --raw-json
-```
-
-## Available Voices
-
-### Dialpad Built-in (Low Cost)
-
-| Voice | Type | Notes |
-|-------|------|-------|
-| Eric | Male, smooth | Recommended for budget |
-| Daniel | Male, British | Professional |
-| Sarah | Female, mature | Clear |
-| River | Male, neutral | Friendly |
-| Alice | Female, clear | Accessible |
-| Brian | Male, deep | Authoritative |
-| Bill | Male, wise | Experienced |
-
-### ElevenLabs Premium (Higher Quality)
-
-| Voice | Type | Notes |
-|-------|------|-------|
-| Adam | Male, deep | Best for professional calls |
-| Antoni | Male, warm | Friendly tone |
-| Bella | Female, soft | Warm, engaging |
-
-Use premium voices by setting `ELEVENLABS_API_KEY` and specifying `--voice "VoiceName"`.
-
-## SMS Storage & History
-
-Messages are stored in SQLite with full-text search capabilities.
-
-### List Conversations
-
-```bash
-python3 sms_sqlite.py list
-```
-
-### View Specific Thread
-
-```bash
-python3 sms_sqlite.py thread "+14155551234"
-```
-
-### Full-Text Search
-
-```bash
-python3 sms_sqlite.py search "urgent"
-```
-
-### Unread Messages
-
-```bash
-python3 sms_sqlite.py unread
-```
-
-### Statistics
-
-```bash
-python3 sms_sqlite.py stats
-```
-
-### Mark as Read
-
-```bash
-python3 sms_sqlite.py read "+14155551234"
-```
-
-## Webhook Integration
-
-Receive SMS events in real-time:
-
-```bash
-# Create webhook subscription
-python3 create_sms_webhook.py create --url "https://your-server.com/webhook/dialpad" --direction "all"
-
-# List subscriptions
-python3 create_sms_webhook.py list
-```
-
-Webhook events:
-- `sms_sent` - Outgoing SMS
-- `sms_received` - Incoming SMS
-- Inbound SMS webhook payloads with empty/whitespace-only text are still stored, but not forwarded to Telegram as blank messages.
-- If an inbound SMS webhook payload is empty but includes reliable missed-call call-event hints, Telegram receives a missed call alert instead.
-
-Inbound SMS on `POST /webhook/dialpad` is stored in SQLite and then forwarded to OpenClaw hooks (unless filtered as sensitive OTP/2FA content).
-
-Dialpad webhook validation behavior:
-- If `DIALPAD_WEBHOOK_SECRET` is set, `/webhook/dialpad` requires a valid `X-Dialpad-Signature` / `X-Dialpad-Signature-SHA256` HMAC SHA256 over raw body, or a valid Bearer JWT (HS256) signed with the same secret.
-- If `DIALPAD_WEBHOOK_SECRET` is not set, behavior remains permissive for compatibility.
-
-OpenClaw hooks payload concept (`POST /hooks/agent`):
-
-```bash
-curl -X POST "http://127.0.0.1:8080/hooks/agent" \
-  -H "Authorization: Bearer $OPENCLAW_HOOKS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Dialpad inbound SMS\nFrom: Jane (+14155550123)\n\nHello",
-    "name": "Dialpad SMS",
-    "agentId": "niemand-work",
-    "sessionKey": "hook:dialpad:sms:123456",
-    "deliver": true,
-    "channel": "telegram",
-    "to": "-5102073225"
-  }'
-```
-
-## Export SMS History
-
-Export past messages as CSV:
-
-```bash
-# Export all SMS
-python3 export_sms.py --output all_sms.csv
-
-# Export by date range
-python3 export_sms.py --start-date 2026-01-01 --end-date 2026-01-31 --output jan_sms.csv
-```
-
-## Integration with Moltbot
-
-Add to your Moltbot configuration:
-
-```json
-{
-  "skills": [
-    {
-      "name": "dialpad",
-      "path": "/path/to/dialpad-moltbot-skill",
-      "env": {
-        "DIALPAD_API_KEY": "${DIALPAD_API_KEY}"
-      }
-    }
-  ]
-}
-```
-
-Then reference in workflows:
-- "Send a text to..."
-- "Call..."
-- "What SMS did I get?"
-- "Search my messages for..."
-
-## API Reference
-
-### SMS Endpoint
-
-- **URL:** `POST https://dialpad.com/api/v2/sms`
-- **Max recipients:** 10 per request
-- **Max message length:** 1600 characters
-- **Rate limits:** 100-800 requests/minute (varies by plan)
-
-### Voice Call Endpoint
-
-- **URL:** `POST https://dialpad.com/api/v2/call`
-- **Requires:** Phone number + User ID
-- **Features:** Outbound calling, TTS, Caller ID
-
-### Response Examples
-
-**SMS Response:**
-```json
-{
-  "id": "4612924117884928",
-  "status": "pending",
-  "message_delivery_result": "pending",
-  "to_numbers": ["+14158235304"],
-  "from_number": "+14155201316",
-  "direction": "outbound"
-}
-```
-
-**Call Response:**
-```json
-{
-  "call_id": "6342343299702784",
-  "status": "ringing"
-}
-```
-
-## Error Handling
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `invalid_destination` | Invalid phone number | Verify E.164 format (e.g., +14155551234) |
-| `invalid_source` | Caller ID not available | Ensure number is assigned to your account |
-| `no_route` | Cannot deliver | Check recipient carrier and number validity |
-| `unauthorized` | Invalid API key | Verify `DIALPAD_API_KEY` is set correctly |
-
-## Requirements
-
-- Python 3.7+
-- No external dependencies (uses Python stdlib)
-- Valid Dialpad API key
-- For premium voices: ElevenLabs API key
-
-## Project Structure
-
-```
-dialpad-moltbot-skill/
-├── send_sms.py           # Send SMS messages
-├── make_call.py          # Make voice calls
-├── sms_sqlite.py         # SQLite storage and search
-├── webhook_sqlite.py     # Handle incoming webhooks
-├── create_sms_webhook.py # Manage webhook subscriptions
-├── export_sms.py         # Export SMS history
-├── SKILL.md              # Moltbot manifest
-├── README.md             # This file
-└── LICENSE               # MIT License
-```
-
-## Troubleshooting
-
-### SMS Not Sending
-
-- Verify `DIALPAD_API_KEY` is set: `echo $DIALPAD_API_KEY`
-- Check phone number format (must be E.164: +1 country code + number)
-- Verify caller ID (--from) is assigned to your Dialpad account
-
-### Calls Not Connecting
-
-- Ensure phone number includes country code
-- Verify the Dialpad account has outbound calling enabled
-- Check API rate limits haven't been exceeded
-
-### Voice Quality Issues
-
-- Switch to ElevenLabs voices for better quality: `--voice "Adam"`
-- Ensure `ELEVENLABS_API_KEY` is set
-- Try different voices to find the best fit
-
-### SMS Not Storing
-
-- Check SQLite database permissions at `~/.dialpad/sms.db`
-- Run migrate to convert from legacy storage: `python3 sms_sqlite.py migrate`
-
-## License
-
-MIT
-
-## Support
-
-- Dialpad Developer Docs: https://developers.dialpad.com/
-- Dialpad API Settings: https://dialpad.com/api/settings
-- ElevenLabs Docs: https://elevenlabs.io/docs
-- Moltbot: https://moltbot.io/
+- Root Python entrypoints were consolidated into `scripts/`.
+- If you previously used `python3 <root-script>.py`, switch to `python3 scripts/<script>.py`.

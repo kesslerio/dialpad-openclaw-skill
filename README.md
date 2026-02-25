@@ -76,12 +76,12 @@ python3 send_sms.py --to "+14155551234" "+14155555678" --message "Group message"
 # From specific caller ID
 python3 send_sms.py --to "+14155551234" --message "Hello!" --from "+14159901234"
 
-# Send using a named sender profile
-python3 send_sms.py --to "+14155551234" --message "Hello!" --profile work
+# Send using a named sender profile (wrapper)
+python3 bin/send_sms.py --to "+14155551234" --message "Hello!" --profile work
 
-# Use default profile
+# Use default profile (wrapper)
 export DIALPAD_DEFAULT_PROFILE=work
-python3 send_sms.py --to "+14155551234" --message "Hello!"
+python3 bin/send_sms.py --to "+14155551234" --message "Hello!"
 ```
 
 Sender resolution in `bin/send_sms.py`:

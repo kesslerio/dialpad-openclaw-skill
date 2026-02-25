@@ -155,6 +155,20 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertIn("Dry run: SMS not sent", out)
         self.assertIn("Selected sender: +14155201316", out)
 
+    def test_send_sms_rejects_new_flags_when_generated_cli_unavailable(self):
+        with patch("send_sms.generated_cli_available", return_value=False), \
+                patch("send_sms.run_legacy") as run_legacy:
+            code, out, err = self._run_main(send_sms, [
+                "--to", "+14155550111",
+                "--message", "Hello",
+                "--profile", "work",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertEqual(run_legacy.call_count, 0)
+        self.assertIn("requires generated/dialpad", err)
+
 
 class SendGroupIntroTests(unittest.TestCase):
     def _run_main(self, args):

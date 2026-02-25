@@ -93,6 +93,24 @@ python3 make_call.py --to "+14155551234" --from "+14159901234" --text "Meeting r
 python3 make_call.py --to "+14155551234" --voice "Adam" --text "Premium voice test"
 ```
 
+### Create Contacts
+
+```bash
+# Create a shared contact
+python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
+
+# Create a local contact for a specific owner
+python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --owner-id "12345"
+
+# Optional fields: company, title, extension, additional phone/email/url values
+python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --phone "+14155559999" --email "jane@example.com" --company-name "Acme" --job-title "Ops"
+```
+
+Idempotency note:
+- The wrapper pre-checks existing contacts by phone and email before creating when either value is provided.
+- If matches are found, create is blocked and returns guidance to confirm intent.
+- Use `--allow-duplicate` to create intentionally duplicated contacts.
+
 ### Retrieve Call Transcript and AI Recap
 
 ```bash

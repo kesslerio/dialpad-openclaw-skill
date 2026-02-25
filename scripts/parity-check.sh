@@ -15,6 +15,7 @@ declare -a legacy_scripts=(
   "lookup_contact.py"
   "export_sms.py"
   "create_sms_webhook.py"
+  "create_contact.py"
 )
 
 declare -A wrapper_map=(
@@ -23,6 +24,7 @@ declare -A wrapper_map=(
   [lookup_contact.py]="bin/lookup_contact.py"
   [export_sms.py]="bin/export_sms.py"
   [create_sms_webhook.py]="bin/create_sms_webhook.py"
+  [create_contact.py]="bin/create_contact.py"
 )
 
 declare -A new_command_map=(
@@ -31,6 +33,7 @@ declare -A new_command_map=(
   [lookup_contact.py]="contact lookup"
   [export_sms.py]="sms export"
   [create_sms_webhook.py]="webhook create"
+  [create_contact.py]="contacts contacts.create"
 )
 
 failures=0
@@ -43,7 +46,11 @@ for script in "${legacy_scripts[@]}"; do
   wrapper_ok="ok"
   cmd_ok="ok"
 
-  [[ -f "$script" ]] || legacy_ok="missing"
+  if [[ "$script" == "create_contact.py" ]]; then
+    legacy_ok="n/a"
+  elif [[ ! -f "$script" ]]; then
+    legacy_ok="missing"
+  fi
 
   wrapper="${wrapper_map[$script]}"
   if [[ ! -x "$wrapper" ]]; then
@@ -55,7 +62,7 @@ for script in "${legacy_scripts[@]}"; do
     cmd_ok="missing"
   fi
 
-  if [[ "$legacy_ok" != "ok" || "$wrapper_ok" != "ok" || "$cmd_ok" != "ok" ]]; then
+  if [[ "$legacy_ok" != "ok" && "$legacy_ok" != "n/a" || "$wrapper_ok" != "ok" || "$cmd_ok" != "ok" ]]; then
     failures=$((failures + 1))
   fi
 

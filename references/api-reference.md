@@ -78,13 +78,20 @@ dialpad accesscontrolpolicies accesscontrolpolicies.assign --id "policy_123" --u
 ### Contact & CRM
 ```bash
 # Full contact CRUD (beyond just lookup)
-dialpad contacts contacts.create --first-name "John" --last-name "Doe" --phones '[{"number":"+14155551234"}]'
+dialpad contacts contacts.create --first-name "John" --last-name "Doe" --phones '["+14155551234"]'
 dialpad contacts contacts.update --id "contact_123" --company-id "company_456"
 dialpad contacts contacts.delete --id "contact_123"
+
+# Backward-compatible wrapper
+bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
 
 # Company management
 dialpad companies companies.list
 dialpad companies companies.create --name "Acme Corp"
+
+# Idempotency behavior
+# - Duplicate pre-check is performed by phone/email before create when either identifier is provided.
+# - Use --allow-duplicate to force creation despite matches.
 
 # Contact import/export
 dialpad contacts imports.create --file "contacts.csv"

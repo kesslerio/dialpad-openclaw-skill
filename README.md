@@ -102,14 +102,26 @@ python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14
 # Create a local contact for a specific owner
 python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --owner-id "12345"
 
+# Auto scope: owner-id implies both shared+local
+python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --owner-id "12345" --scope auto
+
 # Optional fields: company, title, extension, additional phone/email/url values
 python3 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --phone "+14155559999" --email "jane@example.com" --company-name "Acme" --job-title "Ops"
 ```
 
+### Update Contacts
+
+```bash
+python3 bin/update_contact.py --id "contact_123" --first-name "Jane" --job-title "Director" --phone "+14155551234" --url "https://example.com"
+```
+
 Idempotency note:
-- The wrapper pre-checks existing contacts by phone and email before creating when either value is provided.
-- If matches are found, create is blocked and returns guidance to confirm intent.
-- Use `--allow-duplicate` to create intentionally duplicated contacts.
+- Wrapper behavior is now upsert-by-match:
+  - `--scope shared` updates shared matches and creates when none match.
+  - `--scope local` updates/creates per `--owner-id` targets.
+  - `--scope both` does both scopes.
+  - `--scope auto` resolves to `both` if owners are provided, otherwise `shared`.
+- Use `--allow-duplicate` to force create (skip match checks).
 
 ### Retrieve Call Transcript and AI Recap
 

@@ -99,6 +99,36 @@ class CreateContactTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("Duplicate contact detected", err)
 
+    def test_create_contact_rejects_zero_max_pages(self):
+        with patch("create_contact.generated_cli_available", return_value=True), \
+                patch("create_contact.require_api_key"), \
+                patch("create_contact.run_generated_json"):
+            code, out, err = self._run_main([
+                "--first-name", "Invalid",
+                "--last-name", "Pages",
+                "--phone", "+14155550123",
+                "--max-pages", "0",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Invalid --max-pages value. Use a positive integer.", err)
+
+    def test_create_contact_rejects_negative_max_pages(self):
+        with patch("create_contact.generated_cli_available", return_value=True), \
+                patch("create_contact.require_api_key"), \
+                patch("create_contact.run_generated_json"):
+            code, out, err = self._run_main([
+                "--first-name", "Invalid",
+                "--last-name", "Pages",
+                "--phone", "+14155550123",
+                "--max-pages", "-1",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Invalid --max-pages value. Use a positive integer.", err)
+
 
 if __name__ == "__main__":
     unittest.main()

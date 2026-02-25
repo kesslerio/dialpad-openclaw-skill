@@ -58,6 +58,7 @@ def validate_args(
     phones: list[str],
     emails: list[str],
     urls: list[str],
+    max_pages: int,
 ) -> None:
     for phone in phones:
         if not PHONE_RE.fullmatch(phone):
@@ -70,6 +71,8 @@ def validate_args(
     for url in urls:
         if not url.strip():
             raise WrapperError("Empty --url value is not allowed.")
+    if max_pages <= 0:
+        raise WrapperError("Invalid --max-pages value. Use a positive integer.")
 
 
 def build_payload(
@@ -197,7 +200,7 @@ def main() -> int:
         phones = parse_repeated(args.phone)
         emails = parse_repeated(args.email)
         urls = parse_repeated(args.url)
-        validate_args(phones, emails, urls)
+        validate_args(phones, emails, urls, args.max_pages)
 
         duplicates = find_duplicates(phones, emails, args.owner_id, args.max_pages)
         if duplicates and not args.allow_duplicate:

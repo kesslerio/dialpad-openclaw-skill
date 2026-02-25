@@ -18,6 +18,25 @@
 
 The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints.
 
+### Wrapper Behavior Notes
+
+- `bin/send_sms.py` resolves sender with precedence:
+  - `--from`
+  - `--profile work|sales`
+  - `DIALPAD_DEFAULT_FROM_NUMBER`
+  - `DIALPAD_DEFAULT_PROFILE`
+- `--profile` maps to configured env vars:
+  - `DIALPAD_PROFILE_WORK_FROM`
+  - `DIALPAD_PROFILE_SALES_FROM`
+- `--allow-profile-mismatch` bypasses strict profile/number binding.
+- `--dry-run` shows resolved sender and intended payload without sending.
+- `bin/send_group_intro.py` performs a mirrored fallback (`mode: mirrored_fallback`) by sending two separate one-to-one SMS messages because the wrapper does not guarantee a true group thread.
+
+```bash
+bin/send_sms.py --to "+14155550111" --message "Hello" --profile work
+bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
+```
+
 ### Campaign & Automation
 ```bash
 # Bulk SMS campaigns

@@ -4,6 +4,7 @@
 Dialpad SMS Skill
 ├── bin/                          # Backward-compatible wrappers
 │   ├── send_sms.py              # Send SMS (wrapper → dialpad sms send)
+│   ├── send_group_intro.py       # Mirrored intro fallback (prospect/reference one-to-one)
 │   ├── make_call.py             # Make voice calls (wrapper → dialpad call make)
 │   ├── lookup_contact.py        # Contact lookup (wrapper → dialpad contact lookup)
 │   ├── create_contact.py        # Contact create/upsert (wrapper → dialpad contacts create)
@@ -35,6 +36,8 @@ Legacy scripts in `bin/` provide backward compatibility while delegating to the 
 2. **Transforms** to generated CLI format (payload JSON)
 3. **Executes** `generated/dialpad` with proper auth
 4. **Returns** results in legacy format
+
+`send_group_intro.py` shares sender-resolution helpers with `send_sms.py` and intentionally falls back to mirrored one-to-one sends (`mirrored_fallback`) because true group thread support is not guaranteed by this wrapper.
 
 This allows gradual migration: old scripts keep working, new features accessible via `generated/dialpad` directly.
 

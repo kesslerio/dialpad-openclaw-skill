@@ -166,6 +166,16 @@ def is_duplicate_contact(contact: dict[str, Any], phones: list[str], emails: lis
     return False
 
 
+def _contact_ref(contact: dict[str, Any]) -> str:
+    contact_id = str(contact.get("id") or "unknown")
+    name = str(contact.get("display_name") or "").strip()
+    if not name:
+        first = str(contact.get("first_name") or "").strip()
+        last = str(contact.get("last_name") or "").strip()
+        name = f"{first} {last}".strip() or "Unknown"
+    return f"{name} (id={contact_id})"
+
+
 def find_matching_contact(
     phones: list[str],
     emails: list[str],
@@ -177,6 +187,7 @@ def find_matching_contact(
         return None
 
     cursor: str | None = None
+    matches: list[dict[str, Any]] = []
 
     for _ in range(max_pages):
         args = ["contacts", "contacts.list"]
@@ -191,12 +202,22 @@ def find_matching_contact(
         items = result.get("items") or []
         for contact in items:
             if isinstance(contact, dict) and is_duplicate_contact(contact, phones, emails):
-                return contact
+                matches.append(contact)
+                if len(matches) > 1:
+                    scope = f"owner {owner_id}" if owner_id else "shared"
+                    refs = ", ".join(_contact_ref(m) for m in matches[:3])
+                    raise WrapperError(
+                        "Ambiguous contact match for "
+                        f"{phones + emails} in {scope} scope. "
+                        f"Matched {len(matches)} contacts: {refs}. "
+                        "Refine identifiers or use explicit contact update by ID."
+                    )
 
         cursor = result.get("cursor")
         if not cursor:
             break
-    return None
+
+    return matches[0] if matches else None
 
 
 def create_contact(payload: dict[str, Any]) -> dict[str, Any]:

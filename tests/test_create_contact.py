@@ -216,6 +216,56 @@ class CreateContactTests(unittest.TestCase):
         self.assertEqual(calls[2][:2], ["contacts", "contacts.list"])
         self.assertEqual(calls[3][:2], ["contacts", "contacts.create"])
 
+    def test_create_contact_rejects_ambiguous_shared_match(self):
+        def fake_run_generated(cmd: list[str]):
+            if cmd[:2] == ["contacts", "contacts.list"]:
+                return {
+                    "items": [
+                        {"id": "a1", "display_name": "Alice One", "phones": ["+14155550123"]},
+                        {"id": "a2", "display_name": "Alice Two", "phones": ["+14155550123"]},
+                    ]
+                }
+            raise AssertionError(f"Unexpected command: {cmd}")
+
+        with patch("create_contact.generated_cli_available", return_value=True), \
+                patch("create_contact.require_api_key"), \
+                patch("create_contact.run_generated_json", side_effect=fake_run_generated):
+            code, out, err = self._run_main([
+                "--first-name", "Alice",
+                "--last-name", "User",
+                "--phone", "+14155550123",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Ambiguous contact match", err)
+
+    def test_create_contact_rejects_ambiguous_local_match(self):
+        def fake_run_generated(cmd: list[str]):
+            if cmd[:2] == ["contacts", "contacts.list"]:
+                return {
+                    "items": [
+                        {"id": "l1", "display_name": "Local One", "phones": ["+14155550123"]},
+                        {"id": "l2", "display_name": "Local Two", "phones": ["+14155550123"]},
+                    ]
+                }
+            raise AssertionError(f"Unexpected command: {cmd}")
+
+        with patch("create_contact.generated_cli_available", return_value=True), \
+                patch("create_contact.require_api_key"), \
+                patch("create_contact.run_generated_json", side_effect=fake_run_generated):
+            code, out, err = self._run_main([
+                "--first-name", "Local",
+                "--last-name", "User",
+                "--phone", "+14155550123",
+                "--scope", "local",
+                "--owner-id", "owner-11",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Ambiguous contact match", err)
+
     def test_create_contact_rejects_zero_max_pages(self):
         with patch("create_contact.generated_cli_available", return_value=True), \
                 patch("create_contact.require_api_key"), \

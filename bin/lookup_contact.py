@@ -11,6 +11,7 @@ from typing import Any
 
 from _dialpad_compat import (
     COMMAND_IDS,
+    WrapperArgumentParser,
     emit_success,
     handle_wrapper_exception,
     print_wrapper_error,
@@ -24,7 +25,7 @@ DEFAULT_MAX_PAGES = 20
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Lookup contact by phone/email/name")
+    parser = WrapperArgumentParser(description="Lookup contact by phone/email/name")
     parser.add_argument("query_pos", nargs="?", help="Lookup query (phone, email, or name)")
     parser.add_argument("--query", help="Lookup query (overrides positional)")
     parser.add_argument("--owner-id", help="Filter by owner user ID")
@@ -97,24 +98,24 @@ def find_contact(query: str, owner_id: str | None, include_local: bool, max_page
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    json_mode = args.json
+    json_mode = "--json" in sys.argv
     command = COMMAND_IDS["lookup_contact.lookup"]
     wrapper = "lookup_contact.py"
 
-    query = args.query or args.query_pos
-    if not query:
-        err = WrapperError(
-            "provide a query via --query or positional argument",
-            code="invalid_argument",
-            retryable=False,
-        )
-        if json_mode:
-            return handle_wrapper_exception(command, wrapper, err, True)
-        print("Error: provide a query via --query or positional argument", file=sys.stderr)
-        return 2
-
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
+        query = args.query or args.query_pos
+        if not query:
+            err = WrapperError(
+                "provide a query via --query or positional argument",
+                code="invalid_argument",
+                retryable=False,
+            )
+            if json_mode:
+                return handle_wrapper_exception(command, wrapper, err, True)
+            print("Error: provide a query via --query or positional argument", file=sys.stderr)
+            return 2
         require_generated_cli()
         require_api_key()
         match = find_contact(query, args.owner_id, args.include_local, args.max_pages)

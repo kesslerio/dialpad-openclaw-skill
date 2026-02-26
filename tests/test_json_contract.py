@@ -73,6 +73,14 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(err, "")
         self._assert_error(self._parse(out), "send_sms.send")
 
+    def test_send_sms_argparse_failure_is_json_envelope(self):
+        code, out, err = self._run(send_sms, ["bin/send_sms.py", "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "send_sms.send")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
     def test_lookup_contact_invalid_argument_in_json_mode(self):
         code, out, err = self._run(lookup_contact, ["bin/lookup_contact.py", "--json"])
         self.assertEqual(code, 2)
@@ -136,6 +144,14 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(err, "")
         self._assert_success(self._parse(out), "create_sms_webhook.list")
 
+    def test_create_sms_webhook_missing_subcommand_is_json_envelope(self):
+        code, out, err = self._run(create_sms_webhook, ["bin/create_sms_webhook.py", "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "create_sms_webhook.create")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
     def test_create_sms_webhook_subcommand_delete_json(self):
         with patch("create_sms_webhook.require_generated_cli"), \
                 patch("create_sms_webhook.require_api_key"), \
@@ -186,6 +202,14 @@ class JsonContractTests(unittest.TestCase):
         parsed = self._parse(out)
         self._assert_error(parsed, "export_sms.export")
         self.assertEqual(parsed["error"]["code"], "timeout")
+
+    def test_update_contact_argparse_failure_is_json_envelope(self):
+        code, out, err = self._run(update_contact, ["bin/update_contact.py", "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "update_contact.update")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
 
 
 if __name__ == "__main__":

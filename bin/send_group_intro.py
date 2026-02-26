@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from _dialpad_compat import (
     COMMAND_IDS,
+    WrapperArgumentParser,
     emit_success,
     handle_wrapper_exception,
     print_wrapper_error,
@@ -20,7 +22,7 @@ from _dialpad_compat import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Send a mirrored one-to-one group intro")
+    parser = WrapperArgumentParser(description="Send a mirrored one-to-one group intro")
     parser.add_argument("--prospect", required=True, help="Prospect phone number (E.164)")
     parser.add_argument("--reference", required=True, help="Reference phone number (E.164)")
     parser.add_argument("--from", dest="from_number", help="Sender number")
@@ -84,7 +86,7 @@ def _send_single_sms(sender: str, to_number: str, message: str) -> dict[str, obj
 def main() -> int:
     command = COMMAND_IDS["send_group_intro.send"]
     wrapper = "send_group_intro.py"
-    json_mode = False
+    json_mode = "--json" in sys.argv
     try:
         require_generated_cli()
         args = build_parser().parse_args()

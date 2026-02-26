@@ -8,6 +8,7 @@ generated OpenAPI CLI.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -69,6 +70,19 @@ class WrapperError(Exception):
         self.code = code
         self.retryable = retryable
         self.meta = meta or {}
+
+
+class WrapperArgumentParser(argparse.ArgumentParser):
+    """Argparse parser that raises WrapperError instead of exiting."""
+
+    def error(self, message: str) -> None:
+        raise WrapperError(message, code="invalid_argument", retryable=False)
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if status == 0:
+            raise SystemExit(0)
+        detail = (message or "").strip() or "invalid arguments"
+        raise WrapperError(detail, code="invalid_argument", retryable=False)
 
 
 def _normalize_profile(profile: str | None) -> str | None:

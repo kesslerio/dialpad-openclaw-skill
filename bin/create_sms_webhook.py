@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any
 
 from _dialpad_compat import (
     COMMAND_IDS,
+    WrapperArgumentParser,
     emit_success,
     handle_wrapper_exception,
     print_wrapper_error,
@@ -21,7 +23,7 @@ from _dialpad_compat import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Create SMS webhook subscriptions via Dialpad API")
+    parser = WrapperArgumentParser(description="Create SMS webhook subscriptions via Dialpad API")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create_parser = subparsers.add_parser("create", help="Create a webhook + SMS subscription")
@@ -168,22 +170,23 @@ def handle_webhooks(args: argparse.Namespace, json_mode: bool) -> tuple[str, dic
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    json_mode = bool(getattr(args, "json", False))
+    json_mode = "--json" in sys.argv
     wrapper = "create_sms_webhook.py"
     command_key = "create_sms_webhook.create"
-    if args.command == "list":
-        command_key = "create_sms_webhook.list"
-    elif args.command == "delete":
-        command_key = "create_sms_webhook.delete"
-    elif args.command == "webhooks":
-        command_key = (
-            "create_sms_webhook.webhooks_delete"
-            if getattr(args, "webhook_command", "") == "delete"
-            else "create_sms_webhook.webhooks_list"
-        )
 
     try:
+        args = build_parser().parse_args()
+        json_mode = bool(getattr(args, "json", False))
+        if args.command == "list":
+            command_key = "create_sms_webhook.list"
+        elif args.command == "delete":
+            command_key = "create_sms_webhook.delete"
+        elif args.command == "webhooks":
+            command_key = (
+                "create_sms_webhook.webhooks_delete"
+                if getattr(args, "webhook_command", "") == "delete"
+                else "create_sms_webhook.webhooks_list"
+            )
         require_generated_cli()
         require_api_key()
 

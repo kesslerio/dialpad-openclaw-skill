@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from typing import Any
 
 from _dialpad_compat import (
     COMMAND_IDS,
+    WrapperArgumentParser,
     emit_success,
     handle_wrapper_exception,
     print_wrapper_error,
@@ -25,7 +27,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Update contacts via Dialpad API")
+    parser = WrapperArgumentParser(description="Update contacts via Dialpad API")
     parser.add_argument("--id", required=True, help="Contact ID")
     parser.add_argument("--first-name", help="Contact first name")
     parser.add_argument("--last-name", help="Contact last name")
@@ -119,12 +121,13 @@ def clear_not_found_error(contact_id: str, message: str) -> None:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    json_mode = args.json
+    json_mode = "--json" in sys.argv
     command = COMMAND_IDS["update_contact.update"]
     wrapper = "update_contact.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         require_api_key()
 

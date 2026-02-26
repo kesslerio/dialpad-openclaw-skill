@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +14,7 @@ from typing import Any
 
 from _dialpad_compat import (
     COMMAND_IDS,
+    WrapperArgumentParser,
     emit_success,
     handle_wrapper_exception,
     print_wrapper_error,
@@ -25,7 +27,7 @@ from _dialpad_compat import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export historical SMS via Dialpad stats API")
+    parser = WrapperArgumentParser(description="Export historical SMS via Dialpad stats API")
     parser.add_argument("--start-date", dest="start_date", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", dest="end_date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--office-id", dest="office_id", help="Office ID filter")
@@ -119,12 +121,13 @@ def poll_for_completion(
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    json_mode = args.json
+    json_mode = "--json" in sys.argv
     command = COMMAND_IDS["export_sms.export"]
     wrapper = "export_sms.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         require_api_key()
 

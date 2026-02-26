@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from _dialpad_compat import (
     COMMAND_IDS,
+    WrapperArgumentParser,
     emit_success,
     handle_wrapper_exception,
     print_wrapper_error,
@@ -21,7 +23,7 @@ from _dialpad_compat import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Send SMS via Dialpad API")
+    parser = WrapperArgumentParser(description="Send SMS via Dialpad API")
     parser.add_argument("--to", nargs="+", required=True, help="Recipient E.164 numbers")
     parser.add_argument("--message", required=True, help="SMS text content")
     parser.add_argument("--from", dest="from_number", help="Sender number")
@@ -48,12 +50,13 @@ def _build_payload(args, sender_number: str) -> dict[str, object]:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    json_mode = args.json
+    json_mode = "--json" in sys.argv
     command = COMMAND_IDS["send_sms.send"]
     wrapper = "send_sms.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         sender_number, sender_source = resolve_sender(
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch

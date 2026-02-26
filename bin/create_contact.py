@@ -9,6 +9,9 @@ import re
 from typing import Any
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -278,6 +281,9 @@ def sync_local_contact(
 
 def main() -> int:
     args = build_parser().parse_args()
+    json_mode = args.json
+    command = COMMAND_IDS["create_contact.upsert"]
+    wrapper = "create_contact.py"
 
     try:
         require_generated_cli()
@@ -352,8 +358,8 @@ def main() -> int:
                             continue
                     raise
 
-        if args.json:
-            print(json.dumps(results, indent=2))
+        if json_mode:
+            emit_success(command, wrapper, results)
         else:
             if results["shared"]:
                 shared = results["shared"]
@@ -375,6 +381,8 @@ def main() -> int:
                     print(f" - {warning['message']}")
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

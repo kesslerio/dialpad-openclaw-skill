@@ -9,6 +9,9 @@ import re
 from typing import Any
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -117,6 +120,9 @@ def clear_not_found_error(contact_id: str, message: str) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    json_mode = args.json
+    command = COMMAND_IDS["update_contact.update"]
+    wrapper = "update_contact.py"
 
     try:
         require_generated_cli()
@@ -155,13 +161,15 @@ def main() -> int:
         except WrapperError as err:
             clear_not_found_error(args.id, str(err))
 
-        if args.json:
-            print(json.dumps(result, indent=2))
+        if json_mode:
+            emit_success(command, wrapper, result if isinstance(result, dict) else {"result": result})
         else:
             print(f"Updated contact {args.id}:")
             print(f"   ID: {result.get('id', 'N/A')}")
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

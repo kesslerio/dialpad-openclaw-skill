@@ -10,6 +10,9 @@ import sys
 from typing import Any
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -95,9 +98,19 @@ def find_contact(query: str, owner_id: str | None, include_local: bool, max_page
 
 def main() -> int:
     args = build_parser().parse_args()
+    json_mode = args.json
+    command = COMMAND_IDS["lookup_contact.lookup"]
+    wrapper = "lookup_contact.py"
 
     query = args.query or args.query_pos
     if not query:
+        err = WrapperError(
+            "provide a query via --query or positional argument",
+            code="invalid_argument",
+            retryable=False,
+        )
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print("Error: provide a query via --query or positional argument", file=sys.stderr)
         return 2
 
@@ -106,8 +119,8 @@ def main() -> int:
         require_api_key()
         match = find_contact(query, args.owner_id, args.include_local, args.max_pages)
 
-        if args.json:
-            print(json.dumps(match, indent=2))
+        if json_mode:
+            emit_success(command, wrapper, {"match": match})
         else:
             if not match:
                 print(f"Lookup for {query}: None")
@@ -119,6 +132,8 @@ def main() -> int:
 
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

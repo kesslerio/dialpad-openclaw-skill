@@ -212,10 +212,12 @@ class SendGroupIntroTests(unittest.TestCase):
         self.assertEqual(require_key.call_count, 0)
         self.assertEqual(run_json.call_count, 0)
         parsed = json.loads(out)
-        self.assertEqual(parsed["mode"], "mirrored_fallback")
-        self.assertTrue(parsed["dry_run"])
-        self.assertEqual(parsed["prospect"]["to"], "+14155550111")
-        self.assertEqual(parsed["reference"]["to"], "+14155559999")
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["command"], "send_group_intro.send")
+        self.assertEqual(parsed["data"]["mode"], "mirrored_fallback")
+        self.assertTrue(parsed["data"]["dry_run"])
+        self.assertEqual(parsed["data"]["prospect"]["to"], "+14155550111")
+        self.assertEqual(parsed["data"]["reference"]["to"], "+14155559999")
 
     def test_send_group_intro_success_sends_two_messages(self):
         calls: list[list[str]] = []
@@ -249,9 +251,11 @@ class SendGroupIntroTests(unittest.TestCase):
         self.assertEqual(payload_a["from_number"], "+14155201316")
         self.assertEqual(payload_b["from_number"], "+14155201316")
         parsed = json.loads(out)
-        self.assertEqual(parsed["mode"], "mirrored_fallback")
-        self.assertEqual(parsed["prospect"]["id"], "prospect-msg")
-        self.assertEqual(parsed["reference"]["id"], "reference-msg")
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["command"], "send_group_intro.send")
+        self.assertEqual(parsed["data"]["mode"], "mirrored_fallback")
+        self.assertEqual(parsed["data"]["prospect"]["id"], "prospect-msg")
+        self.assertEqual(parsed["data"]["reference"]["id"], "reference-msg")
 
     def test_send_group_intro_partial_failure_returns_first_message_id(self):
         calls: list[list[str]] = []

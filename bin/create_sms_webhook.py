@@ -8,6 +8,9 @@ import json
 from typing import Any
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -28,16 +31,20 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--direction", default="all", choices=["all", "inbound", "outbound"])
     create_parser.add_argument("--json", action="store_true", help="Output JSON")
 
-    subparsers.add_parser("list", help="List SMS event subscriptions")
+    list_parser = subparsers.add_parser("list", help="List SMS event subscriptions")
+    list_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     delete_parser = subparsers.add_parser("delete", help="Delete SMS event subscription")
     delete_parser.add_argument("id", help="Subscription ID")
+    delete_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     webhook_parser = subparsers.add_parser("webhooks", help="Manage raw webhooks")
     webhook_sub = webhook_parser.add_subparsers(dest="webhook_command", required=True)
-    webhook_sub.add_parser("list", help="List webhooks")
+    webhook_list = webhook_sub.add_parser("list", help="List webhooks")
+    webhook_list.add_argument("--json", action="store_true", help="Output JSON")
     webhook_delete = webhook_sub.add_parser("delete", help="Delete webhook")
     webhook_delete.add_argument("id", help="Webhook ID")
+    webhook_delete.add_argument("--json", action="store_true", help="Output JSON")
 
     return parser
 
@@ -54,7 +61,7 @@ def validate_events(events: str | None) -> None:
 
 
 
-def handle_create(args: argparse.Namespace) -> int:
+def handle_create(args: argparse.Namespace) -> dict[str, object]:
     validate_events(args.events)
     webhook = run_generated_json(["webhook", "create", "--hook-url", args.url])
     webhook_id = webhook.get("id")
@@ -114,71 +121,108 @@ def handle_create(args: argparse.Namespace) -> int:
         raise
     result = {"subscription": subscription, "webhook": webhook}
 
-    if args.json:
-        print(json.dumps(result, indent=2))
-    else:
+    if not args.json:
         print("Webhook subscription created!")
         print(f"   Subscription ID: {subscription.get('id')}")
         print(f"   Webhook ID: {webhook.get('id')}")
         print(f"   Webhook URL: {webhook.get('hook_url')}")
         print(f"   Direction: {subscription.get('direction')}")
         print(f"   Enabled: {subscription.get('enabled')}")
-    return 0
+    return result
 
 
 
-def handle_list() -> int:
+def handle_list(json_mode: bool) -> dict[str, object]:
     result = run_generated_json(["subscriptions", "webhook_sms_event_subscription.list"])
     items = result.get("items", [])
-    print(f"SMS Webhook Subscriptions: {len(items)}")
-    for sub in items:
-        print(f"   ID: {sub.get('id')}")
-        print(f"   Direction: {sub.get('direction')}")
-        print(f"   Enabled: {sub.get('enabled')}")
-        print()
-    return 0
+    if not json_mode:
+        print(f"SMS Webhook Subscriptions: {len(items)}")
+        for sub in items:
+            print(f"   ID: {sub.get('id')}")
+            print(f"   Direction: {sub.get('direction')}")
+            print(f"   Enabled: {sub.get('enabled')}")
+            print()
+    return {"items": items, "count": len(items)}
 
 
 
-def handle_webhooks(args: argparse.Namespace) -> int:
+def handle_webhooks(args: argparse.Namespace, json_mode: bool) -> tuple[str, dict[str, object]]:
     if args.webhook_command == "list":
         result = run_generated_json(["webhooks", "webhooks.list"])
         items = result.get("items", [])
-        print(f"Webhooks: {len(items)}")
-        for hook in items:
-            print(f"   ID: {hook.get('id')}")
-            print(f"   URL: {hook.get('hook_url')}")
-            print()
-        return 0
+        if not json_mode:
+            print(f"Webhooks: {len(items)}")
+            for hook in items:
+                print(f"   ID: {hook.get('id')}")
+                print(f"   URL: {hook.get('hook_url')}")
+                print()
+        return "create_sms_webhook.webhooks_list", {"items": items, "count": len(items)}
 
     if args.webhook_command == "delete":
         run_generated_json(["webhooks", "webhooks.delete", "--id", args.id])
-        print(f"Successfully deleted webhook {args.id}")
-        return 0
-    return 1
+        if not json_mode:
+            print(f"Successfully deleted webhook {args.id}")
+        return "create_sms_webhook.webhooks_delete", {"id": args.id, "deleted": True}
+    raise WrapperError("Unsupported webhook command", code="invalid_argument", retryable=False)
 
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    json_mode = bool(getattr(args, "json", False))
+    wrapper = "create_sms_webhook.py"
+    command_key = "create_sms_webhook.create"
+    if args.command == "list":
+        command_key = "create_sms_webhook.list"
+    elif args.command == "delete":
+        command_key = "create_sms_webhook.delete"
+    elif args.command == "webhooks":
+        command_key = (
+            "create_sms_webhook.webhooks_delete"
+            if getattr(args, "webhook_command", "") == "delete"
+            else "create_sms_webhook.webhooks_list"
+        )
 
     try:
         require_generated_cli()
         require_api_key()
 
         if args.command == "create":
-            return handle_create(args)
+            result = handle_create(args)
+            if json_mode:
+                emit_success(COMMAND_IDS["create_sms_webhook.create"], wrapper, result)
+            return 0
         if args.command == "list":
-            return handle_list()
+            result = handle_list(json_mode)
+            if json_mode:
+                emit_success(COMMAND_IDS["create_sms_webhook.list"], wrapper, result)
+            return 0
         if args.command == "delete":
             run_generated_json(["subscriptions", "webhook_sms_event_subscription.delete", "--id", args.id])
-            print(f"Successfully deleted subscription {args.id}")
+            if json_mode:
+                emit_success(
+                    COMMAND_IDS["create_sms_webhook.delete"],
+                    wrapper,
+                    {"id": args.id, "deleted": True},
+                )
+            else:
+                print(f"Successfully deleted subscription {args.id}")
             return 0
         if args.command == "webhooks":
-            return handle_webhooks(args)
+            command_key, result = handle_webhooks(args, json_mode)
+            if json_mode:
+                emit_success(COMMAND_IDS[command_key], wrapper, result)
+            return 0
 
         raise WrapperError("Unsupported command")
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(
+                COMMAND_IDS[command_key],
+                wrapper,
+                err,
+                True,
+            )
         print_wrapper_error(err)
         return 2
 

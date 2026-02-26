@@ -5,15 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 
 from _dialpad_compat import (
-    generated_cli_available,
     print_wrapper_error,
+    require_generated_cli,
     require_api_key,
     resolve_sender,
     run_generated_json,
-    run_legacy,
     WrapperError,
 )
 
@@ -49,17 +47,8 @@ def _build_payload(args, sender_number: str) -> dict[str, object]:
 def main() -> int:
     args = build_parser().parse_args()
 
-    if not generated_cli_available():
-        if args.profile or args.allow_profile_mismatch or args.dry_run:
-            print_wrapper_error(
-                WrapperError(
-                    "This command requires generated/dialpad for --profile, --allow-profile-mismatch, and --dry-run."
-                )
-            )
-            return 2
-        return run_legacy("send_sms.py", sys.argv[1:])
-
     try:
+        require_generated_cli()
         sender_number, sender_source = resolve_sender(
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch
         )

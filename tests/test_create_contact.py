@@ -32,7 +32,7 @@ class CreateContactTests(unittest.TestCase):
                 return {"id": "contact-123"}
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -59,7 +59,7 @@ class CreateContactTests(unittest.TestCase):
         self.assertEqual(payload["emails"], ["alice@example.com"])
 
     def test_create_contact_api_error_propagates(self):
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=WrapperError("permission denied")):
             code, out, err = self._run_main([
@@ -91,7 +91,7 @@ class CreateContactTests(unittest.TestCase):
                 return {"id": "contact-555"}
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -123,7 +123,7 @@ class CreateContactTests(unittest.TestCase):
                 return {"id": "shared-1"}
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -163,7 +163,7 @@ class CreateContactTests(unittest.TestCase):
                 return {"id": "contact-777"}
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -195,7 +195,7 @@ class CreateContactTests(unittest.TestCase):
                 return {"id": "shared-1"}
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -227,7 +227,7 @@ class CreateContactTests(unittest.TestCase):
                 }
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -251,7 +251,7 @@ class CreateContactTests(unittest.TestCase):
                 }
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -267,7 +267,7 @@ class CreateContactTests(unittest.TestCase):
         self.assertIn("Ambiguous contact match", err)
 
     def test_create_contact_rejects_zero_max_pages(self):
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json"):
             code, out, err = self._run_main([
@@ -282,7 +282,7 @@ class CreateContactTests(unittest.TestCase):
         self.assertIn("Invalid --max-pages value. Use a positive integer.", err)
 
     def test_create_contact_rejects_negative_max_pages(self):
-        with patch("create_contact.generated_cli_available", return_value=True), \
+        with patch("create_contact.require_generated_cli"), \
                 patch("create_contact.require_api_key"), \
                 patch("create_contact.run_generated_json"):
             code, out, err = self._run_main([
@@ -295,6 +295,20 @@ class CreateContactTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("Invalid --max-pages value. Use a positive integer.", err)
+
+    def test_create_contact_fails_when_generated_cli_unavailable(self):
+        with patch(
+            "create_contact.require_generated_cli",
+            side_effect=WrapperError("Generated CLI not found at /tmp/generated/dialpad"),
+        ):
+            code, out, err = self._run_main([
+                "--first-name", "Alice",
+                "--last-name", "Miller",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Generated CLI not found", err)
 
 
 if __name__ == "__main__":

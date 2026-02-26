@@ -6,14 +6,12 @@ import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import send_sms
 from _dialpad_compat import WrapperError
-from _dialpad_compat import run_legacy
 import send_group_intro
 
 
@@ -27,7 +25,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_send_sms_requires_sender_without_flags_or_env(self):
-        with patch("send_sms.generated_cli_available", return_value=True), \
+        with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
                 patch.dict("os.environ", {
                     "DIALPAD_DEFAULT_PROFILE": "",
@@ -53,7 +51,7 @@ class SendSmsWrapperTests(unittest.TestCase):
             calls.append(cmd)
             return {"id": "msg-1", "status": "pending"}
 
-        with patch("send_sms.generated_cli_available", return_value=True), \
+        with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
                 patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14153602954"}, clear=False), \
                 patch("send_sms.run_generated_json", side_effect=fake_run_generated):
@@ -70,7 +68,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(payload["from_number"], "+14153602954")
 
     def test_send_sms_profile_requires_configured_sender(self):
-        with patch("send_sms.generated_cli_available", return_value=True), \
+        with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
                 patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": ""}, clear=False), \
                 patch("send_sms.run_generated_json"):
@@ -85,7 +83,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertIn("Profile 'work' is not configured", err)
 
     def test_send_sms_rejects_invalid_default_from_number(self):
-        with patch("send_sms.generated_cli_available", return_value=True), \
+        with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
                 patch.dict("os.environ", {"DIALPAD_DEFAULT_FROM_NUMBER": "not-a-number"}, clear=False), \
                 patch("send_sms.run_generated_json"):
@@ -99,7 +97,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertIn("Invalid sender number", err)
 
     def test_send_sms_conflict_between_from_and_profile(self):
-        with patch("send_sms.generated_cli_available", return_value=True), \
+        with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
                 patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14153602954"}, clear=False), \
                 patch("send_sms.run_generated_json"):
@@ -121,7 +119,7 @@ class SendSmsWrapperTests(unittest.TestCase):
             calls.append(cmd)
             return {"id": "msg-1", "message_status": "pending"}
 
-        with patch("send_sms.generated_cli_available", return_value=True), \
+        with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
                 patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14153602954"}, clear=False), \
                 patch("send_sms.run_generated_json", side_effect=fake_run_generated):
@@ -140,7 +138,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertIn("Selected sender: +14155201316", out)
 
     def test_send_sms_dry_run_does_not_call_api(self):
-        with patch("send_sms.generated_cli_available", return_value=True), \
+        with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key") as require_key, \
                 patch("send_sms.run_generated_json") as run_json:
             code, out, err = self._run_main(send_sms, [
@@ -157,9 +155,11 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertIn("Dry run: SMS not sent", out)
         self.assertIn("Selected sender: +14155201316", out)
 
-    def test_send_sms_rejects_new_flags_when_generated_cli_unavailable(self):
-        with patch("send_sms.generated_cli_available", return_value=False), \
-                patch("send_sms.run_legacy") as run_legacy:
+    def test_send_sms_fails_when_generated_cli_unavailable(self):
+        with patch(
+            "send_sms.require_generated_cli",
+            side_effect=WrapperError("Generated CLI not found at /tmp/generated/dialpad"),
+        ):
             code, out, err = self._run_main(send_sms, [
                 "--to", "+14155550111",
                 "--message", "Hello",
@@ -168,17 +168,7 @@ class SendSmsWrapperTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
-        self.assertEqual(run_legacy.call_count, 0)
-        self.assertIn("requires generated/dialpad", err)
-
-    def test_run_legacy_resolves_scripts_directory_first(self):
-        with patch("_dialpad_compat.subprocess.run", return_value=SimpleNamespace(returncode=0)) as mocked:
-            code = run_legacy("send_sms.py", ["--help"])
-
-        self.assertEqual(code, 0)
-        invoked = mocked.call_args.args[0]
-        self.assertEqual(Path(invoked[1]).parent.name, "scripts")
-        self.assertEqual(Path(invoked[1]).name, "send_sms.py")
+        self.assertIn("Generated CLI not found", err)
 
 
 class SendGroupIntroTests(unittest.TestCase):
@@ -191,7 +181,7 @@ class SendGroupIntroTests(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_send_group_intro_requires_confirm_share(self):
-        with patch("send_group_intro.generated_cli_available", return_value=True), \
+        with patch("send_group_intro.require_generated_cli"), \
                 patch("send_group_intro.require_api_key"):
             code, out, err = self._run_main([
                 "--prospect", "+14155550111",
@@ -205,7 +195,7 @@ class SendGroupIntroTests(unittest.TestCase):
         self.assertIn("without --confirm-share", err)
 
     def test_send_group_intro_dry_run_outputs_structure(self):
-        with patch("send_group_intro.generated_cli_available", return_value=True), \
+        with patch("send_group_intro.require_generated_cli"), \
                 patch("send_group_intro.require_api_key") as require_key, \
                 patch("send_group_intro.run_generated_json") as run_json:
             code, out, err = self._run_main([
@@ -236,7 +226,7 @@ class SendGroupIntroTests(unittest.TestCase):
                 return {"id": "prospect-msg", "message_status": "pending"}
             return {"id": "reference-msg", "message_status": "pending"}
 
-        with patch("send_group_intro.generated_cli_available", return_value=True), \
+        with patch("send_group_intro.require_generated_cli"), \
                 patch("send_group_intro.require_api_key"), \
                 patch("send_group_intro.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -272,7 +262,7 @@ class SendGroupIntroTests(unittest.TestCase):
                 return {"id": "prospect-msg", "message_status": "pending"}
             raise WrapperError("Boom")
 
-        with patch("send_group_intro.generated_cli_available", return_value=True), \
+        with patch("send_group_intro.require_generated_cli"), \
                 patch("send_group_intro.require_api_key"), \
                 patch("send_group_intro.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -287,6 +277,22 @@ class SendGroupIntroTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("first_message_id=prospect-msg", err)
         self.assertIn("partial success", err.lower())
+
+    def test_send_group_intro_fails_when_generated_cli_unavailable(self):
+        with patch(
+            "send_group_intro.require_generated_cli",
+            side_effect=WrapperError("Generated CLI not found at /tmp/generated/dialpad"),
+        ):
+            code, out, err = self._run_main([
+                "--prospect", "+14155550111",
+                "--reference", "+14155559999",
+                "--from", "+14155201316",
+                "--confirm-share",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Generated CLI not found", err)
 
 
 if __name__ == "__main__":

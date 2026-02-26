@@ -5,15 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 
 from _dialpad_compat import (
-    generated_cli_available,
     print_wrapper_error,
+    require_generated_cli,
     require_api_key,
     resolve_sender,
     run_generated_json,
-    run_legacy,
     WrapperError,
 )
 
@@ -81,10 +79,8 @@ def _send_single_sms(sender: str, to_number: str, message: str) -> dict[str, obj
 
 
 def main() -> int:
-    if not generated_cli_available():
-        return run_legacy("send_group_intro.py", sys.argv[1:])
-
     try:
+        require_generated_cli()
         args = build_parser().parse_args()
         if not args.confirm_share:
             raise WrapperError(

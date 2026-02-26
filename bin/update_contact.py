@@ -6,15 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 from typing import Any
 
 from _dialpad_compat import (
-    generated_cli_available,
     print_wrapper_error,
+    require_generated_cli,
     require_api_key,
     run_generated_json,
-    run_legacy,
     WrapperError,
 )
 
@@ -118,12 +116,10 @@ def clear_not_found_error(contact_id: str, message: str) -> None:
 
 
 def main() -> int:
-    if not generated_cli_available():
-        return run_legacy("update_contact.py", sys.argv[1:])
-
     args = build_parser().parse_args()
 
     try:
+        require_generated_cli()
         require_api_key()
 
         phones = parse_repeated(args.phone)

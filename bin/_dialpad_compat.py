@@ -100,6 +100,11 @@ def generated_cli_available() -> bool:
     return GENERATED_DIALPAD.exists()
 
 
+def require_generated_cli() -> None:
+    if generated_cli_available():
+        return
+    raise WrapperError(f"Generated CLI not found at {GENERATED_DIALPAD}")
+
 
 def require_api_key() -> None:
     if os.environ.get("DIALPAD_API_KEY") or os.environ.get("DIALPAD_TOKEN"):
@@ -118,8 +123,7 @@ def _env_with_auth() -> dict[str, str]:
 
 
 def run_generated(args: list[str], capture_output: bool = False) -> subprocess.CompletedProcess[str]:
-    if not generated_cli_available():
-        raise WrapperError(f"Generated CLI not found at {GENERATED_DIALPAD}")
+    require_generated_cli()
 
     cmd = [str(GENERATED_DIALPAD), *args]
     try:
@@ -145,22 +149,6 @@ def run_generated_json(args: list[str]) -> Any:
         return json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise WrapperError(f"Failed to parse JSON output: {exc}") from exc
-
-
-
-def run_legacy(script_name: str, forwarded_args: list[str]) -> int:
-    scripts_legacy = ROOT / "scripts" / script_name
-    root_legacy = ROOT / script_name
-    legacy = scripts_legacy if scripts_legacy.exists() else root_legacy
-    if not legacy.exists():
-        print(
-            f"Error: fallback script not found: {scripts_legacy} (or {root_legacy})",
-            file=sys.stderr,
-        )
-        return 2
-
-    proc = subprocess.run([sys.executable, str(legacy), *forwarded_args])
-    return proc.returncode
 
 
 

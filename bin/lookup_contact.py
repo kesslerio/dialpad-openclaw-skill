@@ -10,11 +10,10 @@ import sys
 from typing import Any
 
 from _dialpad_compat import (
-    generated_cli_available,
     print_wrapper_error,
+    require_generated_cli,
     require_api_key,
     run_generated_json,
-    run_legacy,
     WrapperError,
 )
 
@@ -95,9 +94,6 @@ def find_contact(query: str, owner_id: str | None, include_local: bool, max_page
 
 
 def main() -> int:
-    if not generated_cli_available():
-        return run_legacy("lookup_contact.py", sys.argv[1:])
-
     args = build_parser().parse_args()
 
     query = args.query or args.query_pos
@@ -106,6 +102,7 @@ def main() -> int:
         return 2
 
     try:
+        require_generated_cli()
         require_api_key()
         match = find_contact(query, args.owner_id, args.include_local, args.max_pages)
 

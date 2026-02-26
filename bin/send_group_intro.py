@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    WrapperArgumentParser,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -17,7 +22,7 @@ from _dialpad_compat import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Send a mirrored one-to-one group intro")
+    parser = WrapperArgumentParser(description="Send a mirrored one-to-one group intro")
     parser.add_argument("--prospect", required=True, help="Prospect phone number (E.164)")
     parser.add_argument("--reference", required=True, help="Reference phone number (E.164)")
     parser.add_argument("--from", dest="from_number", help="Sender number")
@@ -79,9 +84,13 @@ def _send_single_sms(sender: str, to_number: str, message: str) -> dict[str, obj
 
 
 def main() -> int:
+    command = COMMAND_IDS["send_group_intro.send"]
+    wrapper = "send_group_intro.py"
+    json_mode = "--json" in sys.argv
     try:
         require_generated_cli()
         args = build_parser().parse_args()
+        json_mode = args.json
         if not args.confirm_share:
             raise WrapperError(
                 "Refusing to send group intro without --confirm-share because it shares phone numbers."
@@ -127,8 +136,8 @@ def main() -> int:
                 },
                 "dry_run": True,
             }
-            if args.json:
-                print(json.dumps(summary, indent=2))
+            if json_mode:
+                emit_success(command, wrapper, summary)
             else:
                 print("Dry run: no messages sent")
                 print(f"Mode: {summary['mode']}")
@@ -147,29 +156,30 @@ def main() -> int:
             raise WrapperError(
                 "Prospect message sent successfully "
                 f"(first_message_id={prospect_id}). "
-                f"Reference message failed: {err}. This is a partial success state."
+                f"Reference message failed: {err}. This is a partial success state.",
+                code="partial_success",
+                retryable=False,
             ) from err
 
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "mode": "mirrored_fallback",
-                        "sender_number": sender_number,
-                        "sender_source": sender_source,
-                        "prospect": {
-                            "to": args.prospect,
-                            "id": prospect_result.get("id"),
-                            "status": prospect_result.get("message_status"),
-                        },
-                        "reference": {
-                            "to": args.reference,
-                            "id": reference_result.get("id"),
-                            "status": reference_result.get("message_status"),
-                        },
+        if json_mode:
+            emit_success(
+                command,
+                wrapper,
+                {
+                    "mode": "mirrored_fallback",
+                    "sender_number": sender_number,
+                    "sender_source": sender_source,
+                    "prospect": {
+                        "to": args.prospect,
+                        "id": prospect_result.get("id"),
+                        "status": prospect_result.get("message_status"),
                     },
-                    indent=2,
-                )
+                    "reference": {
+                        "to": args.reference,
+                        "id": reference_result.get("id"),
+                        "status": reference_result.get("message_status"),
+                    },
+                },
             )
         else:
             print("Mode: mirrored_fallback")
@@ -184,6 +194,8 @@ def main() -> int:
             )
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

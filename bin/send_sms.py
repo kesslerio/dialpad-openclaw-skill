@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    WrapperArgumentParser,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -18,7 +23,7 @@ from _dialpad_compat import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Send SMS via Dialpad API")
+    parser = WrapperArgumentParser(description="Send SMS via Dialpad API")
     parser.add_argument("--to", nargs="+", required=True, help="Recipient E.164 numbers")
     parser.add_argument("--message", required=True, help="SMS text content")
     parser.add_argument("--from", dest="from_number", help="Sender number")
@@ -45,9 +50,13 @@ def _build_payload(args, sender_number: str) -> dict[str, object]:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    json_mode = "--json" in sys.argv
+    command = COMMAND_IDS["send_sms.send"]
+    wrapper = "send_sms.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         sender_number, sender_source = resolve_sender(
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch
@@ -55,17 +64,17 @@ def main() -> int:
         payload = _build_payload(args, sender_number)
 
         if args.dry_run:
-            if args.json:
-                print(json.dumps(
+            if json_mode:
+                emit_success(
+                    command,
+                    wrapper,
                     {
                         "mode": "dry_run",
-                        "command": "sms send",
                         "sender_number": sender_number,
                         "sender_source": sender_source,
                         "payload": payload,
                     },
-                    indent=2,
-                ))
+                )
             else:
                 print("Dry run: SMS not sent")
                 print(f"Selected sender: {sender_number} ({sender_source})")
@@ -76,8 +85,8 @@ def main() -> int:
         require_api_key()
         result = run_generated_json(["sms", "send", "--data", json.dumps(payload)])
 
-        if args.json:
-            print(json.dumps(result, indent=2))
+        if json_mode:
+            emit_success(command, wrapper, result if isinstance(result, dict) else {"result": result})
         else:
             print(f"Selected sender: {sender_number} ({sender_source})")
             print("SMS sent successfully!")
@@ -89,6 +98,8 @@ def main() -> int:
 
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

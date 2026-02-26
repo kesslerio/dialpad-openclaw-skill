@@ -6,9 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from typing import Any
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    WrapperArgumentParser,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -23,7 +28,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Create contacts via Dialpad API")
+    parser = WrapperArgumentParser(description="Create contacts via Dialpad API")
     parser.add_argument("--first-name", required=True, help="Contact first name")
     parser.add_argument("--last-name", required=True, help="Contact last name")
     parser.add_argument("--phone", action="append", help="Phone number (E.164). Repeatable.")
@@ -277,9 +282,13 @@ def sync_local_contact(
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    json_mode = "--json" in sys.argv
+    command = COMMAND_IDS["create_contact.upsert"]
+    wrapper = "create_contact.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         require_api_key()
 
@@ -352,8 +361,8 @@ def main() -> int:
                             continue
                     raise
 
-        if args.json:
-            print(json.dumps(results, indent=2))
+        if json_mode:
+            emit_success(command, wrapper, results)
         else:
             if results["shared"]:
                 shared = results["shared"]
@@ -375,6 +384,8 @@ def main() -> int:
                     print(f" - {warning['message']}")
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

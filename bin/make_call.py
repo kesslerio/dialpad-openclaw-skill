@@ -6,8 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    WrapperArgumentParser,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -40,7 +45,7 @@ KNOWN_USERS = _load_user_map()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Make voice calls via Dialpad API")
+    parser = WrapperArgumentParser(description="Make voice calls via Dialpad API")
     parser.add_argument("--to", required=True, help="Recipient E.164 phone number")
     parser.add_argument("--from", dest="from_number", help="Caller ID number")
     parser.add_argument("--user-id", dest="user_id", help="Dialpad user ID")
@@ -66,9 +71,13 @@ def resolve_user_id(from_number: str | None, explicit_user_id: str | None) -> st
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    json_mode = "--json" in sys.argv
+    command = COMMAND_IDS["make_call.call"]
+    wrapper = "make_call.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         require_api_key()
         user_id = resolve_user_id(args.from_number, args.user_id)
@@ -92,8 +101,8 @@ def main() -> int:
         ]
         result = run_generated_json(cmd)
 
-        if args.json:
-            print(json.dumps(result, indent=2))
+        if json_mode:
+            emit_success(command, wrapper, result if isinstance(result, dict) else {"result": result})
         else:
             print("Call initiated successfully!")
             print(f"   ID: {result.get('call_id') or result.get('id')}")
@@ -101,6 +110,8 @@ def main() -> int:
 
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

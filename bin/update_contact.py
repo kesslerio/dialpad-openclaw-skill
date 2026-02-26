@@ -6,9 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from typing import Any
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    WrapperArgumentParser,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -22,7 +27,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Update contacts via Dialpad API")
+    parser = WrapperArgumentParser(description="Update contacts via Dialpad API")
     parser.add_argument("--id", required=True, help="Contact ID")
     parser.add_argument("--first-name", help="Contact first name")
     parser.add_argument("--last-name", help="Contact last name")
@@ -116,9 +121,13 @@ def clear_not_found_error(contact_id: str, message: str) -> None:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    json_mode = "--json" in sys.argv
+    command = COMMAND_IDS["update_contact.update"]
+    wrapper = "update_contact.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         require_api_key()
 
@@ -155,13 +164,15 @@ def main() -> int:
         except WrapperError as err:
             clear_not_found_error(args.id, str(err))
 
-        if args.json:
-            print(json.dumps(result, indent=2))
+        if json_mode:
+            emit_success(command, wrapper, result if isinstance(result, dict) else {"result": result})
         else:
             print(f"Updated contact {args.id}:")
             print(f"   ID: {result.get('id', 'N/A')}")
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

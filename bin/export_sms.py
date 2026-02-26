@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -12,6 +13,10 @@ from datetime import date, datetime
 from typing import Any
 
 from _dialpad_compat import (
+    COMMAND_IDS,
+    WrapperArgumentParser,
+    emit_success,
+    handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
     require_api_key,
@@ -22,7 +27,7 @@ from _dialpad_compat import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export historical SMS via Dialpad stats API")
+    parser = WrapperArgumentParser(description="Export historical SMS via Dialpad stats API")
     parser.add_argument("--start-date", dest="start_date", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", dest="end_date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--office-id", dest="office_id", help="Office ID filter")
@@ -87,12 +92,22 @@ def download_file(url: str, output_path: str) -> None:
 
 
 
-def poll_for_completion(request_id: str, timeout: int, interval: int) -> dict[str, Any]:
+def poll_for_completion(
+    request_id: str,
+    timeout: int,
+    interval: int,
+    *,
+    json_mode: bool = False,
+    progress: list[dict[str, object]] | None = None,
+) -> dict[str, Any]:
     started = time.time()
     while (time.time() - started) <= timeout:
         status = run_generated_json(["stats", "stats.get", "--id", str(request_id)])
         state = status.get("status")
-        print(f"   Status: {state}")
+        if progress is not None:
+            progress.append({"status": state, "timestamp": int(time.time())})
+        if not json_mode:
+            print(f"   Status: {state}")
 
         if state == "complete":
             return status
@@ -106,9 +121,13 @@ def poll_for_completion(request_id: str, timeout: int, interval: int) -> dict[st
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    json_mode = "--json" in sys.argv
+    command = COMMAND_IDS["export_sms.export"]
+    wrapper = "export_sms.py"
 
     try:
+        args = build_parser().parse_args()
+        json_mode = args.json
         require_generated_cli()
         require_api_key()
 
@@ -119,19 +138,38 @@ def main() -> int:
         if not request_id:
             raise WrapperError(f"Export request did not return request_id: {created}")
 
-        print(f"Export job created: {request_id}")
-        print("Polling for completion...")
+        progress: list[dict[str, object]] = []
+        if not json_mode:
+            print(f"Export job created: {request_id}")
+            print("Polling for completion...")
 
-        final_result = poll_for_completion(request_id, args.timeout, args.poll_interval)
+        final_result = poll_for_completion(
+            request_id,
+            args.timeout,
+            args.poll_interval,
+            json_mode=json_mode,
+            progress=progress,
+        )
 
         download_url = final_result.get("download_url")
         if args.output and download_url:
-            print(f"   Downloading to {args.output}...")
+            if not json_mode:
+                print(f"   Downloading to {args.output}...")
             download_file(download_url, args.output)
-            print(f"   Saved to {args.output}")
+            if not json_mode:
+                print(f"   Saved to {args.output}")
 
-        if args.json:
-            print(json.dumps(final_result, indent=2))
+        if json_mode:
+            emit_success(
+                command,
+                wrapper,
+                {
+                    "request_id": request_id,
+                    "result": final_result,
+                    "output_path": args.output,
+                },
+                meta_extra={"progress": progress},
+            )
         else:
             print("Export completed!")
             if args.output:
@@ -140,6 +178,8 @@ def main() -> int:
 
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
 

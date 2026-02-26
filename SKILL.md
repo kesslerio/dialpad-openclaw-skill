@@ -26,9 +26,14 @@ Use this skill to:
 
 ## Quick Start
 
-**Send SMS:**
+**Auth preflight (run first):**
 ```bash
-bin/send_sms.py --to "+14155551234" --message "Hello from OpenClaw!"
+generated/dialpad --api-key "$DIALPAD_API_KEY" company company.get >/dev/null
+```
+
+**Send SMS (explicit sender recommended):**
+```bash
+bin/send_sms.py --to "+14155551234" --from "+14155201316" --message "Hello from OpenClaw!"
 ```
 
 **Group Intro (mirrored fallback):**
@@ -60,15 +65,19 @@ python3 scripts/sms_sqlite.py list
 
 1. **Format:** Always use E.164 format for numbers (e.g., `+14155551234`).
 2. **Escaping:** Use single quotes for messages containing `$` to prevent shell expansion (e.g., `'Price is $10'`).
-3. **Environment:** `DIALPAD_API_KEY` must be set. `ELEVENLABS_API_KEY` is optional for premium voices.
-4. **SMS sender safety:** `--from` and `--profile work|sales` are supported. `--profile` maps to configured env vars:
-   - work: `DIALPAD_PROFILE_WORK_FROM`
-   - sales: `DIALPAD_PROFILE_SALES_FROM`
+3. **Auth canonical source:** `DIALPAD_API_KEY` is canonical. `DIALPAD_TOKEN` is optional/derived.
+   - Recommended: `export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"`
+4. **Execution modes:**
+   - `bin/*.py` wrappers: preferred for routine operations (auto auth bridging + safer UX)
+   - `generated/dialpad`: advanced/direct API control; always pass `--api-key` (or set `DIALPAD_TOKEN`)
+5. **SMS sender safety:** `--from` and `--profile work|sales` are supported. Prefer explicit `--from` for deterministic routing.
+   - `--profile` maps to configured env vars:
+     - work: `DIALPAD_PROFILE_WORK_FROM`
+     - sales: `DIALPAD_PROFILE_SALES_FROM`
    - default fallback order: `DIALPAD_DEFAULT_FROM_NUMBER`, then `DIALPAD_DEFAULT_PROFILE`
    - `--allow-profile-mismatch` permits explicit/profile mismatches when intentional
    - `--dry-run` prints sender resolution and request intent without API call
-5. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
-6. **Wrappers:** Use `bin/*.py` for simple tasks; use `generated/dialpad` for advanced API features.
+6. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
 7. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
 
 ## Reference Documentation
@@ -83,6 +92,11 @@ python3 scripts/sms_sqlite.py list
 **Required environment variable:**
 ```bash
 export DIALPAD_API_KEY="your_key"
+```
+
+**Recommended auth bridge for direct generated CLI usage:**
+```bash
+export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"
 ```
 
 **Optional:**

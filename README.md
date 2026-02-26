@@ -17,8 +17,11 @@ Dialpad messaging and calling skill for OpenClaw with lightweight wrappers, webh
 git clone https://github.com/kesslerio/dialpad-openclaw-skill.git
 cd dialpad-openclaw-skill
 
-# Required auth
+# Required auth (canonical)
 export DIALPAD_API_KEY="your-api-key"
+
+# Optional/derived auth bridge for direct generated CLI usage
+export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"
 
 # Optional premium TTS
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
@@ -29,8 +32,11 @@ export ELEVENLABS_API_KEY="your-elevenlabs-key"
 Prefer wrappers in `bin/` for day-to-day usage.
 
 ```bash
-# Send SMS
-bin/send_sms.py --to "+14155551234" --message "Hello from OpenClaw"
+# Auth preflight for direct generated CLI usage
+generated/dialpad --api-key "$DIALPAD_API_KEY" company company.get >/dev/null
+
+# Send SMS (recommended: explicit sender)
+bin/send_sms.py --to "+14155551234" --from "+14155201316" --message "Hello from OpenClaw"
 
 # Send SMS with sender profile
 bin/send_sms.py --to "+14155551234" --message "Hello" --profile work
@@ -94,3 +100,4 @@ dialpad-openclaw-skill/
 
 - Root Python entrypoints were consolidated into `scripts/`.
 - If you previously used `python3 <root-script>.py`, switch to `python3 scripts/<script>.py`.
+- For direct generated CLI calls, pass `--api-key "$DIALPAD_API_KEY"` (or ensure `DIALPAD_TOKEN` is exported). Wrappers in `bin/` handle auth bridging automatically.

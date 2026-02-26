@@ -30,7 +30,7 @@ class UpdateContactTests(unittest.TestCase):
                 return {"id": "contact-999"}
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("update_contact.generated_cli_available", return_value=True), \
+        with patch("update_contact.require_generated_cli"), \
                 patch("update_contact.require_api_key"), \
                 patch("update_contact.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main([
@@ -51,7 +51,7 @@ class UpdateContactTests(unittest.TestCase):
         self.assertEqual(payload["phones"], ["+14155550123"])
 
     def test_update_contact_not_found(self):
-        with patch("update_contact.generated_cli_available", return_value=True), \
+        with patch("update_contact.require_generated_cli"), \
                 patch("update_contact.require_api_key"), \
                 patch("update_contact.run_generated_json", side_effect=WrapperError("404 Not Found")):
             code, out, err = self._run_main([
@@ -64,7 +64,7 @@ class UpdateContactTests(unittest.TestCase):
         self.assertIn("Error: Contact not found: contact-missing", err)
 
     def test_update_contact_rejects_missing_fields(self):
-        with patch("update_contact.generated_cli_available", return_value=True), \
+        with patch("update_contact.require_generated_cli"), \
                 patch("update_contact.require_api_key"), \
                 patch("update_contact.run_generated_json"):
             code, out, err = self._run_main(["--id", "contact-1"])
@@ -73,7 +73,7 @@ class UpdateContactTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("No update fields provided", err)
 
-        with patch("update_contact.generated_cli_available", return_value=True), \
+        with patch("update_contact.require_generated_cli"), \
                 patch("update_contact.require_api_key"), \
                 patch("update_contact.run_generated_json"):
             code, out, err = self._run_main([
@@ -84,6 +84,20 @@ class UpdateContactTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("Invalid --phone", err)
+
+    def test_update_contact_fails_when_generated_cli_unavailable(self):
+        with patch(
+            "update_contact.require_generated_cli",
+            side_effect=WrapperError("Generated CLI not found at /tmp/generated/dialpad"),
+        ):
+            code, out, err = self._run_main([
+                "--id", "contact-1",
+                "--first-name", "Jane",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Generated CLI not found", err)
 
 
 if __name__ == "__main__":

@@ -109,10 +109,10 @@ def test_normalize_and_format_hook_message():
     assert normalized["direction"] == "inbound"
 
     message = format_hook_message(normalized, line_display="Support (415) 555-9876")
-    assert "Dialpad inbound SMS" in message
-    assert "To Line: Support (415) 555-9876" in message
+    assert "📩 Dialpad SMS" in message
+    assert "To: Support (415) 555-9876" in message
     assert "From: Jane Doe (+14155550123)" in message
-    assert "Need a callback" in message
+    assert "Message: Need a callback" in message
 
 
 def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):

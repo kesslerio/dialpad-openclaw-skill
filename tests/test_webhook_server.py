@@ -107,6 +107,18 @@ class MissedCallResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["line_display"], "Support Front Desk")
         self.assertEqual(resolved["line_resolution_path"], "payload_inferred")
 
+    def test_legacy_alias_numbers_are_treated_as_payload_direct(self):
+        payload = {
+            "timestamp": 1760000000000,
+            "caller_number": "+14155550123",
+            "called_number": "+14155201316",
+        }
+        resolved = resolve_missed_call_context(payload)
+        self.assertEqual(resolved["from_number"], "+14155550123")
+        self.assertEqual(resolved["to_number"], "+14155201316")
+        self.assertEqual(resolved["caller_resolution_path"], "payload_direct")
+        self.assertEqual(resolved["line_resolution_path"], "payload_direct")
+
     def test_history_backfill_resolution(self):
         payload = {
             "date_started": 1760000000000,

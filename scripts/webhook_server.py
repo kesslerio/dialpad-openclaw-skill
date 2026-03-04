@@ -835,8 +835,8 @@ def resolve_missed_call_context(data, history_fetcher=None):
     Resolve missed-call caller/line data with deterministic fallbacks.
     Resolution path priority: payload_direct -> payload_inferred -> history_backfill -> unresolved
     """
-    payload_direct_from = _pick_nested(data, [("from_number",)])
-    payload_direct_to = _pick_nested(data, [("to_number",)])
+    payload_direct_from = extract_number(data, "from_number", "caller_number", "from")
+    payload_direct_to = extract_number(data, "to_number", "called_number", "to")
 
     payload_inferred_from = _pick_nested(
         data,

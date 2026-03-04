@@ -905,9 +905,11 @@ def resolve_missed_call_context(data, history_fetcher=None):
         for call in history_rows:
             row = _extract_call_history_row(call)
             score = 0
-            if row["direction"] == "inbound":
+            is_inbound = row["direction"] == "inbound"
+            is_missed_like = row["state"] in MISSED_CALL_STATES or row["duration"] == 0
+            if is_inbound:
                 score += 1
-            if row["state"] in MISSED_CALL_STATES or row["duration"] == 0:
+            if is_missed_like:
                 score += 1
             row_from_norm = normalize_phone_number(row["from_number"])
             row_to_norm = normalize_phone_number(row["to_number"])
@@ -915,13 +917,14 @@ def resolve_missed_call_context(data, history_fetcher=None):
                 score += 3
             if line_norm and row_to_norm and line_norm == row_to_norm:
                 score += 3
+            row["_missed_inbound"] = bool(is_inbound and is_missed_like)
             time_delta = abs((row["started_ms"] or event_ts_ms) - event_ts_ms) if event_ts_ms is not None else 0
-            ranking = (score, -time_delta)
+            ranking = (1 if row["_missed_inbound"] else 0, score, -time_delta)
             if best is None or ranking > best_key:
                 best = row
                 best_key = ranking
 
-        if best and (best_key[0] >= 2 or (not from_number and not to_number)):
+        if best and best.get("_missed_inbound") and best_key[1] >= 2:
             if caller_path == "unresolved" and best.get("from_number"):
                 from_number = best["from_number"]
                 caller_path = "history_backfill"

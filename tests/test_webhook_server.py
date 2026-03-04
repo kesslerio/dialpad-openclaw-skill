@@ -141,6 +141,27 @@ class MissedCallResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["caller_resolution_path"], "unresolved")
         self.assertEqual(resolved["line_resolution_path"], "unresolved")
 
+    def test_history_backfill_requires_inbound_missed_row(self):
+        payload = {"event_type": "call.missed", "timestamp": 1760000000000}
+
+        def fake_history(_event_ts_ms):
+            return [
+                {
+                    "direction": "outbound",
+                    "state": "answered",
+                    "duration": 65,
+                    "date_started": 1760000000050,
+                    "external_number": "+14155550999",
+                    "entry_point_target": {"phone": "+14159917155", "name": "Support"},
+                }
+            ]
+
+        resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
+        self.assertEqual(resolved["from_number"], "Unknown")
+        self.assertIsNone(resolved["line_display"])
+        self.assertEqual(resolved["caller_resolution_path"], "unresolved")
+        self.assertEqual(resolved["line_resolution_path"], "unresolved")
+
 
 if __name__ == "__main__":
     unittest.main()

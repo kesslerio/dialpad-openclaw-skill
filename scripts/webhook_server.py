@@ -940,6 +940,12 @@ def resolve_missed_call_context(data, history_fetcher=None):
         line_display = payload_inferred_line_name
         if line_path == "unresolved":
             line_path = "payload_inferred"
+    if not line_display:
+        inferred_legacy_line = infer_line_display_from_payload(data)
+        if inferred_legacy_line:
+            line_display = inferred_legacy_line
+            if line_path == "unresolved":
+                line_path = "payload_inferred"
 
     return {
         "from_number": from_number or "Unknown",

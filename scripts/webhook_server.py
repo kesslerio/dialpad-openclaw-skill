@@ -521,6 +521,16 @@ def classify_inbound_notification(data):
     return "sms"
 
 
+def escape_telegram_markdown(text):
+    """Escape Telegram MarkdownV1 control characters in dynamic content."""
+    if text is None:
+        return ""
+    escaped = str(text)
+    for ch in ("_", "*", "`", "["):
+        escaped = escaped.replace(ch, f"\\{ch}")
+    return escaped
+
+
 def send_to_telegram(text):
     """
     Send a message to the configured Telegram channel.
@@ -967,11 +977,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 from_display = f"{contact_info} ({from_num})" if contact_info else str(from_num)
                 time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
                 tg_text = (
-                    f"📩 Dialpad SMS\n"
-                    f"From: {from_display}\n"
-                    f"To: {to_display}\n"
-                    f"Time: {time_display}\n\n"
-                    f"Message: {text}"
+                    "📩 Dialpad SMS\n"
+                    f"From: {escape_telegram_markdown(from_display)}\n"
+                    f"To: {escape_telegram_markdown(to_display)}\n"
+                    f"Time: {escape_telegram_markdown(time_display)}\n\n"
+                    f"Message: {escape_telegram_markdown(text)}"
                 )
                 telegram_sms_sent = send_to_telegram(tg_text)
 

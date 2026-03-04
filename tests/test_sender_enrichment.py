@@ -227,3 +227,45 @@ def test_inbound_webhook_hook_uses_enriched_sender(monkeypatch):
     assert response["hook_forwarded"] is True
     assert response["sender_enrichment_status"] == "resolved"
     assert response["sender_enrichment_degraded"] is False
+
+
+def test_inbound_telegram_escapes_markdown_content(monkeypatch):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": "Jane_Doe",
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
+
+    telegram_messages = []
+    monkeypatch.setattr(
+        webhook_server,
+        "send_to_telegram",
+        lambda text: telegram_messages.append(text) or True,
+    )
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Need _bold_ *now* [check] `code`",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    assert status["code"] == 200
+    assert len(telegram_messages) == 1
+    assert "Jane\\_Doe" in telegram_messages[0]
+    assert "Need \\_bold\\_ \\*now\\* \\[check] \\`code\\`" in telegram_messages[0]

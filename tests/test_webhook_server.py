@@ -11,6 +11,7 @@ from webhook_server import (
     detect_reliable_missed_call_hint,
     extract_message_text,
     is_sensitive_message,
+    resolve_missed_call_context,
 )
 
 
@@ -77,6 +78,68 @@ class WebhookNotificationClassificationTests(unittest.TestCase):
         }
         self.assertEqual(extract_message_text(payload), "Real body")
         self.assertEqual(classify_inbound_notification(payload), "sms")
+
+
+class MissedCallResolutionTests(unittest.TestCase):
+    def test_sparse_payload_nested_key_resolution(self):
+        payload = {
+            "event": {
+                "timestamp": 1760000000000,
+                "call": {
+                    "from_number": "+14155550123",
+                    "to_number": "+14155201316",
+                },
+            }
+        }
+        resolved = resolve_missed_call_context(payload)
+        self.assertEqual(resolved["from_number"], "+14155550123")
+        self.assertEqual(resolved["to_number"], "+14155201316")
+        self.assertEqual(resolved["caller_resolution_path"], "payload_inferred")
+        self.assertEqual(resolved["line_resolution_path"], "payload_inferred")
+
+    def test_inferred_line_resolution_uses_line_name_when_phone_missing(self):
+        payload = {
+            "date_started": 1760000000000,
+            "from_number": "+14155550123",
+            "line": {"name": "Support Front Desk"},
+        }
+        resolved = resolve_missed_call_context(payload)
+        self.assertEqual(resolved["line_display"], "Support Front Desk")
+        self.assertEqual(resolved["line_resolution_path"], "payload_inferred")
+
+    def test_history_backfill_resolution(self):
+        payload = {
+            "date_started": 1760000000000,
+            "event_type": "call.missed",
+        }
+
+        def fake_history(_event_ts_ms):
+            return [
+                {
+                    "direction": "inbound",
+                    "state": "missed",
+                    "date_started": 1760000000500,
+                    "external_number": "+14155550999",
+                    "entry_point_target": {
+                        "phone": "+14159917155",
+                        "name": "Support",
+                    },
+                }
+            ]
+
+        resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
+        self.assertEqual(resolved["from_number"], "+14155550999")
+        self.assertEqual(resolved["to_number"], "+14159917155")
+        self.assertEqual(resolved["caller_resolution_path"], "history_backfill")
+        self.assertEqual(resolved["line_resolution_path"], "history_backfill")
+
+    def test_unresolved_guard_behavior(self):
+        payload = {"event_type": "call.missed", "timestamp": 1760000000000}
+        resolved = resolve_missed_call_context(payload, history_fetcher=lambda _ts: [])
+        self.assertEqual(resolved["from_number"], "Unknown")
+        self.assertIsNone(resolved["line_display"])
+        self.assertEqual(resolved["caller_resolution_path"], "unresolved")
+        self.assertEqual(resolved["line_resolution_path"], "unresolved")
 
 
 if __name__ == "__main__":

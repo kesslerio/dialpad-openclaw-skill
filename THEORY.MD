@@ -53,13 +53,14 @@ The long-term strategy is to harden each layer while preserving operator ergonom
 This keeps the skill useful to both daily operators and deep-debug maintainers.
 
 ## Key Discoveries
-The current 401 sender-enrichment work reinforced a broader point: communication systems fail more often at **boundaries** (auth, identity resolution, endpoint assumptions) than at transport.
+Recent hardening cycles reinforced a broader point: communication systems fail more often at **boundaries** (auth, identity resolution, endpoint assumptions) than at transport.
 
 Concrete discoveries from this cycle:
 
 - Silent fallback hides operational debt; explicit degraded-state signaling is mandatory.
 - `401` is not a single diagnosis; remediation depends on classification (expired token vs scope vs environment/audience mismatch).
 - Inbound paths must share one enrichment result per event to avoid inconsistent outputs and duplicated failure surfaces.
+- Sparse/inconsistent webhook payloads are common enough that missed-call handling must be multi-stage (`payload_direct` → `payload_inferred` → `history_backfill`), with explicit unresolved semantics.
 - Preserving graceful behavior (webhook continuity) and increasing observability are compatible if failure semantics are structured.
 
 ## Open Questions
@@ -73,6 +74,6 @@ SKILL.md defines the user-facing contract: send SMS/calls, manage contacts, quer
 
 - **Why** those features exist together (communications control plane)
 - **How** reliability and safety are maintained under drift
-- **Where** current hardening work (like 401 enrichment classification) fits the larger architecture
+- **Where** current hardening work (like auth classification and missed-call context backfill) fits the larger architecture
 
 The intent is that individual fixes should always strengthen this broader control-plane model, not become isolated patches.

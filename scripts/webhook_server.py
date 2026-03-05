@@ -120,6 +120,7 @@ SENSITIVE_KEYWORD_PATTERNS = (
 )
 
 CODE_TOKEN_PATTERN = re.compile(r"\b(?:\d[\s-]?){4,8}\b")
+CALLS_ENDPOINT = "https://dialpad.com/api/v2/call"
 
 
 def log_line(message):
@@ -689,6 +690,273 @@ def _first_value(value):
     return value
 
 
+def _clean_str(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _get_nested(data, path):
+    current = data
+    for key in path:
+        if isinstance(current, list):
+            current = current[0] if current else None
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    if isinstance(current, list):
+        current = current[0] if current else None
+    return current
+
+
+def _pick_nested(data, paths):
+    for path in paths:
+        value = _clean_str(_get_nested(data, path))
+        if value:
+            return value
+    return None
+
+
+def _parse_timestamp_ms(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+        except ValueError:
+            iso = text.replace("Z", "+00:00")
+            try:
+                return int(datetime.fromisoformat(iso).timestamp() * 1000)
+            except ValueError:
+                return None
+    if numeric > 10_000_000_000:
+        return int(numeric)
+    return int(numeric * 1000)
+
+
+def _extract_call_history_row(call):
+    from_number = _pick_nested(
+        call,
+        [
+            ("external_number",),
+            ("from_number",),
+            ("contact", "phone"),
+            ("contact", "phone_number"),
+            ("contact", "number"),
+        ],
+    )
+    to_number = _pick_nested(
+        call,
+        [
+            ("entry_point_target", "phone"),
+            ("target", "phone"),
+            ("proxy_target", "phone"),
+            ("internal_number",),
+            ("to_number",),
+        ],
+    )
+    line_name = _pick_nested(
+        call,
+        [
+            ("entry_point_target", "name"),
+            ("target", "name"),
+            ("proxy_target", "name"),
+        ],
+    )
+    started_ms = _parse_timestamp_ms(
+        _pick_nested(
+            call,
+            [
+                ("date_started",),
+                ("started_at",),
+                ("start_time",),
+                ("date_created",),
+            ],
+        )
+    )
+    direction = str(_pick_nested(call, [("direction",)]) or "").lower()
+    state = str(_pick_nested(call, [("state",)]) or "").lower()
+    duration_raw = _pick_nested(call, [("duration",), ("total_duration",)])
+    try:
+        duration = int(float(str(duration_raw)))
+    except (TypeError, ValueError):
+        duration = 0
+    return {
+        "from_number": from_number,
+        "to_number": to_number,
+        "line_name": line_name,
+        "started_ms": started_ms,
+        "direction": direction,
+        "state": state,
+        "duration": duration,
+    }
+
+
+def _fetch_recent_calls_around(event_ts_ms, window_ms=30 * 60 * 1000, limit=25):
+    if not DIALPAD_API_KEY or event_ts_ms is None:
+        return []
+
+    params = {
+        "started_after": str(max(0, event_ts_ms - window_ms)),
+        "started_before": str(event_ts_ms + window_ms),
+        "limit": str(limit),
+    }
+    url = f"{CALLS_ENDPOINT}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {DIALPAD_API_KEY}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        print(f"⚠️  Missed-call history lookup failed: {e}")
+        return []
+
+    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        return [item for item in payload["items"] if isinstance(item, dict)]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def resolve_missed_call_context(data, history_fetcher=None):
+    """
+    Resolve missed-call caller/line data with deterministic fallbacks.
+    Resolution path priority: payload_direct -> payload_inferred -> history_backfill -> unresolved
+    """
+    payload_direct_from = extract_number(data, "from_number", "caller_number", "from")
+    payload_direct_to = extract_number(data, "to_number", "called_number", "to")
+
+    payload_inferred_from = _pick_nested(
+        data,
+        [
+            ("from", "number"),
+            ("call", "from_number"),
+            ("call", "from", "number"),
+            ("event", "from_number"),
+            ("event", "call", "from_number"),
+            ("customer", "phone"),
+            ("contact", "phone"),
+        ],
+    )
+    payload_inferred_to = _pick_nested(
+        data,
+        [
+            ("to", "number"),
+            ("call", "to_number"),
+            ("call", "to", "number"),
+            ("event", "to_number"),
+            ("event", "call", "to_number"),
+            ("entry_point_target", "phone"),
+            ("target", "phone"),
+            ("proxy_target", "phone"),
+            ("line", "phone"),
+        ],
+    )
+    payload_inferred_line_name = _pick_nested(
+        data,
+        [
+            ("line", "name"),
+            ("call", "line", "name"),
+            ("entry_point_target", "name"),
+            ("target", "name"),
+            ("proxy_target", "name"),
+        ],
+    )
+
+    from_number = payload_direct_from or payload_inferred_from
+    to_number = payload_direct_to or payload_inferred_to
+    caller_path = "payload_direct" if payload_direct_from else ("payload_inferred" if payload_inferred_from else "unresolved")
+    line_path = "payload_direct" if payload_direct_to else ("payload_inferred" if (payload_inferred_to or payload_inferred_line_name) else "unresolved")
+
+    event_ts_ms = _parse_timestamp_ms(
+        _pick_nested(
+            data,
+            [
+                ("date_started",),
+                ("date_start",),
+                ("start_time",),
+                ("timestamp",),
+                ("event_timestamp",),
+                ("event", "timestamp"),
+                ("call", "date_started"),
+            ],
+        )
+    )
+
+    if caller_path == "unresolved" or line_path == "unresolved":
+        fetcher = history_fetcher or _fetch_recent_calls_around
+        history_rows = fetcher(event_ts_ms) if event_ts_ms is not None else []
+        best = None
+        best_key = None
+        caller_norm = normalize_phone_number(from_number)
+        line_norm = normalize_phone_number(to_number)
+        for call in history_rows:
+            row = _extract_call_history_row(call)
+            score = 0
+            is_inbound = row["direction"] == "inbound"
+            is_missed_like = row["state"] in MISSED_CALL_STATES or row["duration"] == 0
+            if is_inbound:
+                score += 1
+            if is_missed_like:
+                score += 1
+            row_from_norm = normalize_phone_number(row["from_number"])
+            row_to_norm = normalize_phone_number(row["to_number"])
+            if caller_norm and row_from_norm and caller_norm == row_from_norm:
+                score += 3
+            if line_norm and row_to_norm and line_norm == row_to_norm:
+                score += 3
+            row["_missed_inbound"] = bool(is_inbound and is_missed_like)
+            time_delta = abs((row["started_ms"] or event_ts_ms) - event_ts_ms) if event_ts_ms is not None else 0
+            ranking = (1 if row["_missed_inbound"] else 0, score, -time_delta)
+            if best is None or ranking > best_key:
+                best = row
+                best_key = ranking
+
+        if best and best.get("_missed_inbound") and best_key[1] >= 2:
+            if caller_path == "unresolved" and best.get("from_number"):
+                from_number = best["from_number"]
+                caller_path = "history_backfill"
+            if line_path == "unresolved" and (best.get("to_number") or best.get("line_name")):
+                if best.get("to_number"):
+                    to_number = best["to_number"]
+                if not payload_inferred_line_name and best.get("line_name"):
+                    payload_inferred_line_name = best["line_name"]
+                line_path = "history_backfill"
+
+    line_display = get_line_name(to_number)
+    if not line_display and payload_inferred_line_name:
+        line_display = payload_inferred_line_name
+        if line_path == "unresolved":
+            line_path = "payload_inferred"
+    if not line_display:
+        inferred_legacy_line = infer_line_display_from_payload(data)
+        if inferred_legacy_line:
+            line_display = inferred_legacy_line
+            if line_path == "unresolved":
+                line_path = "payload_inferred"
+
+    return {
+        "from_number": from_number or "Unknown",
+        "to_number": to_number,
+        "line_display": line_display,
+        "event_ts_ms": event_ts_ms,
+        "caller_resolution_path": caller_path,
+        "line_resolution_path": line_path,
+    }
+
+
 def normalize_sms_payload(data, contact_info=None):
     """Normalize Dialpad webhook payload to a consistent SMS object for hooks."""
     sender_number = data.get("from_number")
@@ -1063,16 +1331,17 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
         telegram_sent = False
         if should_notify:
-            from_num = extract_number(data, "from_number", "caller_number", "from") or "Unknown"
-            to_num = extract_number(data, "to_number", "called_number", "to")
-            call_ts = (
+            resolved = resolve_missed_call_context(data)
+            from_num = resolved["from_number"]
+            to_num = resolved["to_number"]
+            call_ts = resolved["event_ts_ms"] or (
                 data.get("date_started") or
                 data.get("date_start") or
                 data.get("start_time") or
                 data.get("timestamp")
             )
             contact_info = get_contact_name(from_num) if from_num != "Unknown" else None
-            line_display = get_line_name(to_num) or infer_line_display_from_payload(data)
+            line_display = resolved["line_display"] or get_line_name(to_num)
             to_display = line_display if line_display else "Unknown"
             if contact_info:
                 from_display = f"*{contact_info}* (`{from_num}`)"
@@ -1094,6 +1363,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             print(f"   📞 MISSED CALL: {from_num} -> {to_display}")
             if call_ts:
                 print(f"   🕒 Event time: {call_ts}")
+            print(
+                "   🔎 Resolution: "
+                f"caller={resolved['caller_resolution_path']}, "
+                f"line={resolved['line_resolution_path']}"
+            )
             print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
             print()
         else:

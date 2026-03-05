@@ -269,3 +269,160 @@ def test_inbound_telegram_escapes_markdown_content(monkeypatch):
     assert len(telegram_messages) == 1
     assert "Jane\\_Doe" in telegram_messages[0]
     assert "Need \\_bold\\_ \\*now\\* \\[check] \\`code\\`" in telegram_messages[0]
+
+
+def test_inbound_sensitive_sms_filtered_for_hook_and_telegram(monkeypatch):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": "Capital One",
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+
+    hook_calls = []
+
+    def _fake_hook(normalized_sms, line_display=None):
+        hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display})
+        return True, "http_200"
+
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", _fake_hook)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_to_telegram",
+        lambda text: telegram_messages.append(text) or True,
+    )
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Your OTP code is 773311 for login.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert hook_calls == []
+    assert telegram_messages == []
+    assert response["hook_status"] == "filtered_sensitive"
+    assert response["inbound_alert_eligible"] is False
+    assert response["inbound_alert_reason"] == "filtered_sensitive"
+    assert response["telegram_status"] == "filtered_sensitive"
+
+
+def test_inbound_shortcode_sms_filtered_for_hook_and_telegram(monkeypatch):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": "Unknown",
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+
+    hook_calls = []
+    telegram_messages = []
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_calls.append(
+            {"normalized_sms": normalized_sms, "line_display": line_display}
+        ) or (True, "http_200"),
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "send_to_telegram",
+        lambda text: telegram_messages.append(text) or True,
+    )
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "12345",
+        "to_number": ["+14155201316"],
+        "text": "Code 009821 to verify.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert hook_calls == []
+    assert telegram_messages == []
+    assert response["hook_status"] == "filtered_shortcode"
+    assert response["inbound_alert_eligible"] is False
+    assert response["inbound_alert_reason"] == "filtered_shortcode"
+    assert response["telegram_status"] == "filtered_shortcode"
+
+
+def test_inbound_hook_and_telegram_paths_share_eligible_result(monkeypatch):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": "Jane Doe",
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+
+    hook_calls = []
+    telegram_messages = []
+
+    def _fake_hook(normalized_sms, line_display=None):
+        hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display})
+        return True, "http_200"
+
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", _fake_hook)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_to_telegram",
+        lambda text: telegram_messages.append(text) or True,
+    )
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Inbound hello",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert len(hook_calls) == 1
+    assert len(telegram_messages) == 1
+    assert response["hook_forwarded"] is True
+    assert response["inbound_alert_eligible"] is True
+    assert response["inbound_alert_reason"] == "eligible"
+    assert response["telegram_status"] == "sent"

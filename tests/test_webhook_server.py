@@ -7,6 +7,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
 from webhook_server import (
+    assess_inbound_sms_alert_eligibility,
     classify_inbound_notification,
     detect_reliable_missed_call_hint,
     extract_message_text,
@@ -69,6 +70,51 @@ class WebhookNotificationClassificationTests(unittest.TestCase):
     def test_non_sensitive_message_not_detected(self):
         text = "See you at 6pm for dinner."
         self.assertFalse(is_sensitive_message(text=text, sender="Friend"))
+
+    def test_inbound_alert_eligibility_filters_sensitive_sms(self):
+        payload = {
+            "direction": "inbound",
+            "from_number": "+14155551234",
+            "text": "Your OTP code is 773311 for login",
+        }
+        decision = assess_inbound_sms_alert_eligibility(
+            payload,
+            from_number="+14155551234",
+            text=payload["text"],
+            sender="Capital One",
+        )
+        self.assertFalse(decision["eligible"])
+        self.assertEqual(decision["reason_code"], "filtered_sensitive")
+
+    def test_inbound_alert_eligibility_filters_shortcode_sender(self):
+        payload = {
+            "direction": "inbound",
+            "from_number": "12345",
+            "text": "Use 998812 to continue",
+        }
+        decision = assess_inbound_sms_alert_eligibility(
+            payload,
+            from_number=payload["from_number"],
+            text=payload["text"],
+            sender="Unknown",
+        )
+        self.assertFalse(decision["eligible"])
+        self.assertEqual(decision["reason_code"], "filtered_shortcode")
+
+    def test_inbound_alert_eligibility_allows_benign_sms(self):
+        payload = {
+            "direction": "inbound",
+            "from_number": "+14155551234",
+            "text": "Can we meet tomorrow at 2?",
+        }
+        decision = assess_inbound_sms_alert_eligibility(
+            payload,
+            from_number=payload["from_number"],
+            text=payload["text"],
+            sender="Friend",
+        )
+        self.assertTrue(decision["eligible"])
+        self.assertEqual(decision["reason_code"], "eligible")
 
     def test_text_content_fallback_used_when_text_is_blank(self):
         payload = {

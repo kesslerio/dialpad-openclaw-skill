@@ -1,61 +1,33 @@
 # Theory: Dialpad Skill as a Reliable Communications Control Plane
 
 ## Problem
-The Dialpad skill exists to turn OpenClaw from a chat assistant into an operational communications endpoint for real-world workflows. The broad problem is not “send an SMS” or “make a call.” The real problem is enabling automated and human-in-the-loop outreach that is deterministic, auditable, and safe across multiple channels and business contexts.
+The Dialpad skill is not just an API wrapper. It is the control plane that decides which communication events are safe to fan out, how they are enriched, and how they remain observable when dependencies fail. The core failure mode is boundary drift: when two outbound paths consume the same inbound event but enforce policy differently, sensitive data can leak even when one path appears protected.
 
-Without this skill, phone/SMS actions are fragmented across ad-hoc scripts, inconsistent sender selection, and weak observability. That creates five recurring failure classes:
-
-1. **Delivery ambiguity** — messages may send from the wrong line or profile.
-2. **Identity loss** — inbound events without contact context reduce triage quality.
-3. **Auth drift fragility** — token/scope/env issues degrade behavior without actionable signals.
-4. **State blindness** — no durable local query layer for “what happened?” after sends/receives.
-5. **Tooling mismatch** — high-level workflow usage and low-level API control are often disconnected.
-
-The Dialpad skill is intended to solve those classes systematically, not just provide thin endpoint wrappers.
+In practical terms, the highest-risk boundary is inbound SMS fan-out. The system stores all messages for auditability, but notification channels (OpenClaw hooks and Telegram alerts) must gate sensitive content consistently. If policy is duplicated or implicit, regressions appear as bypasses rather than explicit failures.
 
 ## Operating Theory
-The skill should be treated as a **communications control plane** with layered responsibilities:
+The skill should operate as a layered system with one policy source per boundary:
 
-- **Execution layer**: generated OpenAPI CLI for full Dialpad API surface.
-- **Safety/UX layer**: `bin/*.py` wrappers enforce sane defaults, auth bridging, sender resolution, and predictable operator behavior.
-- **Event ingress layer**: webhook server normalizes inbound traffic and routes it into OpenClaw hooks/Telegram while preserving graceful degradation.
-- **Persistence/inspection layer**: SQLite + FTS enables local history, debugging, and retrospective analysis.
+- Execution layer: generated OpenAPI CLI for complete Dialpad API access.
+- Safety/UX layer: wrappers in `bin/` for predictable operator behavior.
+- Event ingress layer: `scripts/webhook_server.py` normalizes inbound payloads and applies policy before fan-out.
+- Persistence layer: SQLite/FTS stores full event history regardless of downstream notification outcomes.
 
-In this model, success is measured by **reliable outcomes under imperfect conditions**: stale tokens, partial contact data, malformed payloads, and operational drift. The system must continue delivering messages/events while making degradations visible and diagnosable.
+For inbound SMS, the correct model is: one event -> one eligibility decision -> many outputs. Hook forwarding and Telegram alerting are downstream effects of a shared decision, not independent checks.
 
 ## Strategy
-The long-term strategy is to harden each layer while preserving operator ergonomics:
+The strategy is to harden boundaries where divergence risk is highest while preserving graceful service behavior:
 
-1. **Deterministic sending behavior**
-   - explicit E.164 handling
-   - clear sender/profile resolution rules
-   - dry-run and mismatch guardrails
-
-2. **Auth as a first-class boundary**
-   - canonical key source (`DIALPAD_API_KEY`) with controlled bridges
-   - explicit classification of auth failures where possible
-   - no secret leakage in logs
-
-3. **Inbound normalization with continuity guarantees**
-   - always-200 webhook semantics for resilience
-   - robust filtering/classification for notification quality
-   - hook payloads that preserve context for downstream automations
-
-4. **Progressive observability**
-   - structured status fields for degraded modes
-   - durable local storage for message/search/debug loops
-   - concise operator-facing release notes to reduce hidden behavior changes
-
-5. **Two-speed interface contract**
-   - wrappers for routine usage and safer defaults
-   - generated CLI for advanced and complete API access
-
-This keeps the skill useful to both daily operators and deep-debug maintainers.
+1. Keep webhook continuity strict: storage and response semantics remain non-blocking with always-200 success for valid authenticated events.
+2. Centralize high-risk policy checks: sensitive-content and shortcode filtering must be decided once and reused.
+3. Make decisions observable with safe reason codes instead of payload dumps.
+4. Preserve enrichment and routing determinism so sender context is resolved once per event and reused.
+5. Maintain two-speed ergonomics: safe defaults for daily use, full API/tooling depth for advanced operations.
 
 ## Key Discoveries
-Recent hardening cycles reinforced a broader point: communication systems fail more often at **boundaries** (auth, identity resolution, endpoint assumptions) than at transport.
+The previous assumption was that a shared boolean (`sensitive_filtered`) was enough to coordinate hook and Telegram behavior. The flaw is that implicit coupling is brittle: policy intent was spread across separate branches, making bypasses easier to introduce during routine changes.
 
-Concrete discoveries from this cycle:
+Current understanding:
 
 - Silent fallback hides operational debt; explicit degraded-state signaling is mandatory.
 - `401` is not a single diagnosis; remediation depends on classification (expired token vs scope vs environment/audience mismatch).
@@ -63,19 +35,15 @@ Concrete discoveries from this cycle:
 - Sparse/inconsistent webhook payloads are common enough that missed-call handling must be multi-stage (`payload_direct` → `payload_inferred` → `history_backfill`), with explicit unresolved semantics.
 - History backfill must be evidence-gated: inbound+missed-like is necessary but not sufficient; at least one normalized caller/line match should exist before enriching unresolved fields.
 - Missing or unparsable duration should remain unknown (`None`) rather than coerced to zero, otherwise answered/ambiguous rows can be misclassified as missed-like.
+- Inbound fan-out policy must be explicit and centrally computed (eligibility helper with reason code).
+- OTP/2FA and shortcode suppression are policy decisions, not channel-specific behaviors.
+- Observability should report policy outcomes (`eligible`, `filtered_sensitive`, `filtered_shortcode`, etc.) without leaking message secrets.
 - Preserving graceful behavior (webhook continuity) and increasing observability are compatible if failure semantics are structured.
 
 ## Open Questions
-- Should auth classification expand to explicit `403` handling when Dialpad scope/policy denials surface outside `401`?
-- Should enrichment degradation emit standardized counters/metrics beyond logs/response fields for fleet-level monitoring?
-- How far should the skill go toward multi-tenant line policy enforcement vs leaving policy to calling workflows?
-- Should release notes evolve into versioned migration guidance as wrapper behavior becomes more opinionated?
+- Should inbound policy reasons be exported as metrics counters for long-term drift detection?
+- Should policy become configurable per destination channel, or remain globally consistent for all notification sinks?
+- Should similar centralized policy gating be applied to missed-call and voicemail Telegram paths for uniform audit semantics?
 
 ## Scope Alignment with SKILL.md
-SKILL.md defines the user-facing contract: send SMS/calls, manage contacts, query history, and use safer wrappers with canonical auth/source-of-truth conventions. This theory document extends that contract into system intent:
-
-- **Why** those features exist together (communications control plane)
-- **How** reliability and safety are maintained under drift
-- **Where** current hardening work (like auth classification and missed-call context backfill) fits the larger architecture
-
-The intent is that individual fixes should always strengthen this broader control-plane model, not become isolated patches.
+SKILL.md promises safe operational workflows around Dialpad messaging and calls. This theory tightens that promise by treating inbound policy as a first-class invariant: every fan-out target must honor the same eligibility decision, and every decision must be explainable without exposing secrets.

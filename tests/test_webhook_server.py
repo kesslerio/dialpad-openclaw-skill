@@ -132,6 +132,7 @@ class MissedCallResolutionTests(unittest.TestCase):
         payload = {
             "date_started": 1760000000000,
             "event_type": "call.missed",
+            "from_number": "+14155550999",
         }
 
         def fake_history(_event_ts_ms):
@@ -151,7 +152,7 @@ class MissedCallResolutionTests(unittest.TestCase):
         resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
         self.assertEqual(resolved["from_number"], "+14155550999")
         self.assertEqual(resolved["to_number"], "+14159917155")
-        self.assertEqual(resolved["caller_resolution_path"], "history_backfill")
+        self.assertEqual(resolved["caller_resolution_path"], "payload_direct")
         self.assertEqual(resolved["line_resolution_path"], "history_backfill")
 
     def test_unresolved_guard_behavior(self):
@@ -181,6 +182,54 @@ class MissedCallResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["from_number"], "Unknown")
         self.assertIsNone(resolved["line_display"])
         self.assertEqual(resolved["caller_resolution_path"], "unresolved")
+        self.assertEqual(resolved["line_resolution_path"], "unresolved")
+
+    def test_history_backfill_requires_number_match_evidence(self):
+        payload = {
+            "event_type": "call.missed",
+            "timestamp": 1760000000000,
+            "from_number": "+14155550000",
+        }
+
+        def fake_history(_event_ts_ms):
+            return [
+                {
+                    "direction": "inbound",
+                    "state": "missed",
+                    "duration": 0,
+                    "date_started": 1760000000050,
+                    "external_number": "+14155550999",
+                    "entry_point_target": {"phone": "+14159917155", "name": "Support"},
+                }
+            ]
+
+        resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
+        self.assertEqual(resolved["from_number"], "+14155550000")
+        self.assertIsNone(resolved["to_number"])
+        self.assertEqual(resolved["caller_resolution_path"], "payload_direct")
+        self.assertEqual(resolved["line_resolution_path"], "unresolved")
+
+    def test_history_duration_parse_failure_not_missed_like(self):
+        payload = {
+            "event_type": "call.missed",
+            "timestamp": 1760000000000,
+            "from_number": "+14155550000",
+        }
+
+        def fake_history(_event_ts_ms):
+            return [
+                {
+                    "direction": "inbound",
+                    "state": "",
+                    "duration": "",
+                    "date_started": 1760000000050,
+                    "external_number": "+14155550000",
+                    "entry_point_target": {"phone": "+14159917155", "name": "Support"},
+                }
+            ]
+
+        resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
+        self.assertIsNone(resolved["to_number"])
         self.assertEqual(resolved["line_resolution_path"], "unresolved")
 
 

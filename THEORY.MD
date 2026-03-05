@@ -61,6 +61,8 @@ Concrete discoveries from this cycle:
 - `401` is not a single diagnosis; remediation depends on classification (expired token vs scope vs environment/audience mismatch).
 - Inbound paths must share one enrichment result per event to avoid inconsistent outputs and duplicated failure surfaces.
 - Sparse/inconsistent webhook payloads are common enough that missed-call handling must be multi-stage (`payload_direct` → `payload_inferred` → `history_backfill`), with explicit unresolved semantics.
+- History backfill must be evidence-gated: inbound+missed-like is necessary but not sufficient; at least one normalized caller/line match should exist before enriching unresolved fields.
+- Missing or unparsable duration should remain unknown (`None`) rather than coerced to zero, otherwise answered/ambiguous rows can be misclassified as missed-like.
 - Preserving graceful behavior (webhook continuity) and increasing observability are compatible if failure semantics are structured.
 
 ## Open Questions

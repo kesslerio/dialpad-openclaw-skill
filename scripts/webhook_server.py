@@ -522,6 +522,62 @@ def classify_inbound_notification(data):
     return "sms"
 
 
+def assess_inbound_sms_alert_eligibility(
+    data,
+    *,
+    from_number,
+    text,
+    sender="",
+    notification_type=None,
+):
+    """
+    Centralized eligibility decision for inbound SMS alert fan-out.
+    Returns a reason code safe for logs/response metadata.
+    """
+    resolved_type = notification_type or classify_inbound_notification(data)
+    if resolved_type == "missed_call":
+        return {
+            "eligible": False,
+            "reason_code": "filtered_missed_call",
+            "sensitive_filtered": False,
+            "notification_type": resolved_type,
+        }
+    if resolved_type == "blank_sms":
+        return {
+            "eligible": False,
+            "reason_code": "filtered_blank_sms",
+            "sensitive_filtered": False,
+            "notification_type": resolved_type,
+        }
+    if resolved_type != "sms":
+        return {
+            "eligible": False,
+            "reason_code": "not_inbound",
+            "sensitive_filtered": False,
+            "notification_type": resolved_type,
+        }
+    if is_short_code_sender(from_number):
+        return {
+            "eligible": False,
+            "reason_code": "filtered_shortcode",
+            "sensitive_filtered": True,
+            "notification_type": resolved_type,
+        }
+    if is_sensitive_message(text=text, sender=sender, contact_number=from_number):
+        return {
+            "eligible": False,
+            "reason_code": "filtered_sensitive",
+            "sensitive_filtered": True,
+            "notification_type": resolved_type,
+        }
+    return {
+        "eligible": True,
+        "reason_code": "eligible",
+        "sensitive_filtered": False,
+        "notification_type": resolved_type,
+    }
+
+
 def escape_telegram_markdown(text):
     """Escape Telegram MarkdownV1 control characters in dynamic content."""
     if text is None:
@@ -1204,6 +1260,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         hook_sent = False
         hook_status = None
         sensitive_filtered = False
+        inbound_alert_decision = {
+            "eligible": False,
+            "reason_code": "not_inbound",
+            "sensitive_filtered": False,
+            "notification_type": notification_type,
+        }
         sender_enrichment = {
             "contact_name": None,
             "status": "not_applicable",
@@ -1220,28 +1282,34 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     contact_info = cached
             sender_enrichment["contact_name"] = contact_info
 
-            if notification_type == "missed_call":
-                hook_status = "filtered_missed_call"
-            elif notification_type == "blank_sms":
-                hook_status = "filtered_blank_sms"
-            elif is_short_code_sender(from_num):
-                sensitive_filtered = True
-                hook_status = "filtered_shortcode"
-                print("   🔒 Short-code message filtered (not forwarding to OpenClaw hooks)")
-            elif is_sensitive_message(text=text, sender=contact_info or "", contact_number=from_num):
-                sensitive_filtered = True
-                hook_status = "filtered_sensitive"
-                print("   🔒 Sensitive message filtered (not forwarding to OpenClaw hooks)")
-            else:
+            inbound_alert_decision = assess_inbound_sms_alert_eligibility(
+                data,
+                from_number=from_num,
+                text=text,
+                sender=contact_info or "",
+                notification_type=notification_type,
+            )
+            hook_status = inbound_alert_decision["reason_code"]
+            sensitive_filtered = inbound_alert_decision["sensitive_filtered"]
+
+            if inbound_alert_decision["eligible"]:
                 line_display = get_line_name(to_num)
                 normalized_sms = normalize_sms_payload(data, contact_info=contact_info)
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(
                     normalized_sms, line_display=line_display
                 )
+            elif hook_status == "filtered_shortcode":
+                print("   🔒 Short-code message filtered (not forwarding to OpenClaw hooks)")
+            elif hook_status == "filtered_sensitive":
+                print("   🔒 Sensitive message filtered (not forwarding to OpenClaw hooks)")
         # Optional immediate Telegram notification for inbound SMS
         telegram_sms_sent = None
+        telegram_status = TELEGRAM_STATUS_NOT_APPLICABLE
         if direction == "inbound":
-            if notification_type == "sms" and DIALPAD_SMS_TELEGRAM_NOTIFY and not sensitive_filtered:
+            if (
+                inbound_alert_decision["eligible"]
+                and DIALPAD_SMS_TELEGRAM_NOTIFY
+            ):
                 line_display = get_line_name(to_num)
                 to_display = line_display or str(first_value(to_num) or "Unknown")
                 contact_info = sender_enrichment.get("contact_name")
@@ -1255,6 +1323,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"Message: {escape_telegram_markdown(text)}"
                 )
                 telegram_sms_sent = send_to_telegram(tg_text)
+                telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
+            elif not DIALPAD_SMS_TELEGRAM_NOTIFY:
+                telegram_status = "disabled"
+            else:
+                telegram_status = inbound_alert_decision["reason_code"]
 
         # Console logging
         print(f"[{timestamp}]")
@@ -1266,12 +1339,19 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         if WEBHOOK_SECRET:
             print(f"   🔐 Auth: ✓ ({auth_source})")
         if direction == "inbound":
+            print(
+                "   🧭 Inbound Alert Eligibility: "
+                f"{'allow' if inbound_alert_decision['eligible'] else 'block'} "
+                f"({inbound_alert_decision['reason_code']})"
+            )
             if sensitive_filtered:
                 print(f"   🪝 OpenClaw Hook: ✗ ({hook_status} — filtered)")
             else:
                 print(f"   🪝 OpenClaw Hook: {'✓' if hook_sent else '✗'} ({hook_status})")
             if telegram_sms_sent is not None:
-                print(f"   📨 Telegram SMS Alert: {'✓' if telegram_sms_sent else '✗'}")
+                print(f"   📨 Telegram SMS Alert: {'✓' if telegram_sms_sent else '✗'} ({telegram_status})")
+            else:
+                print(f"   📨 Telegram SMS Alert: ✗ ({telegram_status})")
             if sender_enrichment.get("degraded"):
                 print(
                     "   ⚠️  Sender enrichment degraded "
@@ -1289,6 +1369,13 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             "stored": True,
             "hook_forwarded": hook_sent if direction == "inbound" else None,
             "hook_status": hook_status if direction == "inbound" else None,
+            "inbound_alert_eligible": (
+                inbound_alert_decision.get("eligible") if direction == "inbound" else None
+            ),
+            "inbound_alert_reason": (
+                inbound_alert_decision.get("reason_code") if direction == "inbound" else None
+            ),
+            "telegram_status": telegram_status if direction == "inbound" else None,
             "sender_enrichment_degraded": (
                 sender_enrichment.get("degraded") if direction == "inbound" else None
             ),

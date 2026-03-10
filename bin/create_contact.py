@@ -224,49 +224,31 @@ def find_matching_contact(
 
 
 def create_contact(payload: dict[str, Any]) -> dict[str, Any]:
-    return run_generated_json(build_contact_command_args(payload, owner_id=payload.get("owner_id")))
+    return run_generated_json(build_create_contact_command_args(payload))
 
 
 def update_contact(contact_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return run_generated_json(build_contact_command_args(payload, contact_id=contact_id))
+    return run_generated_json(
+        ["contacts", "contacts.update", "--id", contact_id, "--data", json.dumps(payload)]
+    )
 
 
-def build_contact_command_args(
-    payload: dict[str, Any],
-    *,
-    contact_id: str | None = None,
-    owner_id: Any | None = None,
-) -> list[str]:
-    if contact_id:
-        command = ["contacts", "contacts.update", "--id", contact_id]
-    else:
-        command = ["contacts", "contacts.create"]
+def build_create_contact_command_args(payload: dict[str, Any]) -> list[str]:
+    first_name = str(payload.get("first_name") or "").strip()
+    last_name = str(payload.get("last_name") or "").strip()
+    if not first_name or not last_name:
+        raise WrapperError("Create contact payload requires first_name and last_name.")
 
-    option_map = [
-        ("company_name", "--company-name", False),
-        ("emails", "--emails", True),
-        ("extension", "--extension", False),
-        ("first_name", "--first-name", False),
-        ("job_title", "--job-title", False),
-        ("last_name", "--last-name", False),
-        ("phones", "--phones", True),
-        ("urls", "--urls", True),
+    return [
+        "contacts",
+        "contacts.create",
+        "--first-name",
+        first_name,
+        "--last-name",
+        last_name,
+        "--data",
+        json.dumps(payload),
     ]
-
-    for key, flag, expects_list in option_map:
-        value = payload.get(key)
-        if value in (None, ""):
-            continue
-        if expects_list:
-            command.extend([flag, json.dumps(value)])
-        else:
-            command.extend([flag, str(value)])
-
-    resolved_owner_id = owner_id if owner_id is not None else payload.get("owner_id")
-    if resolved_owner_id:
-        command.extend(["--owner-id", str(resolved_owner_id)])
-
-    return command
 
 
 def is_owner_not_found_error(message: str) -> bool:

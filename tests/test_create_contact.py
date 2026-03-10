@@ -21,6 +21,17 @@ class CreateContactTests(unittest.TestCase):
                 code = create_contact.main()
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def _get_option(self, cmd: list[str], flag: str):
+        if flag not in cmd:
+            return None
+        return cmd[cmd.index(flag) + 1]
+
+    def _get_json_option(self, cmd: list[str], flag: str):
+        value = self._get_option(cmd, flag)
+        if value is None:
+            return None
+        return json.loads(value)
+
     def test_create_contact_success_shared_create(self):
         calls: list[list[str]] = []
 
@@ -52,11 +63,35 @@ class CreateContactTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][:2], ["contacts", "contacts.list"])
         self.assertEqual(calls[1][:2], ["contacts", "contacts.create"])
-        payload = json.loads(calls[1][3])
-        self.assertEqual(payload["first_name"], "Alice")
-        self.assertEqual(payload["last_name"], "Miller")
-        self.assertEqual(payload["phones"], ["+14155550123"])
-        self.assertEqual(payload["emails"], ["alice@example.com"])
+        self.assertEqual(self._get_option(calls[1], "--first-name"), "Alice")
+        self.assertEqual(self._get_option(calls[1], "--last-name"), "Miller")
+        self.assertEqual(self._get_json_option(calls[1], "--phones"), ["+14155550123"])
+        self.assertEqual(self._get_json_option(calls[1], "--emails"), ["alice@example.com"])
+        self.assertNotIn("--data", calls[1])
+
+    def test_build_contact_command_args_uses_required_create_flags(self):
+        payload = create_contact.build_payload(
+            first_name="Phil",
+            last_name="Stockton",
+            phones=["+13174411610"],
+            emails=["phil@example.com"],
+            urls=["https://stockton.training/"],
+            company_name="Stockton Training Grounds",
+            job_title="Owner",
+            extension="101",
+            owner_id=None,
+        )
+
+        cmd = create_contact.build_contact_command_args(payload)
+
+        self.assertEqual(cmd[:2], ["contacts", "contacts.create"])
+        self.assertEqual(self._get_option(cmd, "--first-name"), "Phil")
+        self.assertEqual(self._get_option(cmd, "--last-name"), "Stockton")
+        self.assertEqual(self._get_option(cmd, "--company-name"), "Stockton Training Grounds")
+        self.assertEqual(self._get_json_option(cmd, "--phones"), ["+13174411610"])
+        self.assertEqual(self._get_json_option(cmd, "--emails"), ["phil@example.com"])
+        self.assertEqual(self._get_json_option(cmd, "--urls"), ["https://stockton.training/"])
+        self.assertNotIn("--data", cmd)
 
     def test_create_contact_api_error_propagates(self):
         with patch("create_contact.require_generated_cli"), \
@@ -105,9 +140,9 @@ class CreateContactTests(unittest.TestCase):
         self.assertIn("Updated shared contact:", out)
         self.assertEqual(calls[0][:2], ["contacts", "contacts.list"])
         self.assertEqual(calls[1][:2], ["contacts", "contacts.update"])
-        payload = json.loads(calls[1][5])
-        self.assertEqual(payload["first_name"], "New")
-        self.assertEqual(payload["last_name"], "Contact")
+        self.assertEqual(self._get_option(calls[1], "--first-name"), "New")
+        self.assertEqual(self._get_option(calls[1], "--last-name"), "Contact")
+        self.assertNotIn("--data", calls[1])
 
     def test_create_contact_auto_scope_with_owner_targets_shared_and_local(self):
         calls: list[list[str]] = []
@@ -117,8 +152,7 @@ class CreateContactTests(unittest.TestCase):
             if cmd[:2] == ["contacts", "contacts.list"]:
                 return {"items": []}
             if cmd[:2] == ["contacts", "contacts.create"]:
-                payload = json.loads(cmd[3])
-                if payload.get("owner_id") == "owner-9":
+                if self._get_option(cmd, "--owner-id") == "owner-9":
                     return {"id": "local-1"}
                 return {"id": "shared-1"}
             raise AssertionError(f"Unexpected command: {cmd}")
@@ -189,8 +223,7 @@ class CreateContactTests(unittest.TestCase):
             if cmd[:2] == ["contacts", "contacts.list"]:
                 return {"items": []}
             if cmd[:2] == ["contacts", "contacts.create"]:
-                payload = json.loads(cmd[3])
-                if payload.get("owner_id") == "missing-owner":
+                if self._get_option(cmd, "--owner-id") == "missing-owner":
                     raise WrapperError("Request failed: 404 owner not found")
                 return {"id": "shared-1"}
             raise AssertionError(f"Unexpected command: {cmd}")

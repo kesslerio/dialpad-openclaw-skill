@@ -29,11 +29,14 @@ The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints.
   - `DIALPAD_PROFILE_WORK_FROM`
   - `DIALPAD_PROFILE_SALES_FROM`
 - `--allow-profile-mismatch` bypasses strict profile/number binding.
-- `--dry-run` shows resolved sender and intended payload without sending.
+- `--message-file` reads SMS text from a UTF-8 file path.
+- `--message-stdin` reads SMS text from stdin.
+- `--dry-run` shows resolved sender and the exact message payload without sending.
 - `bin/send_group_intro.py` performs a mirrored fallback (`mode: mirrored_fallback`) by sending two separate one-to-one SMS messages because the wrapper does not guarantee a true group thread.
 
 ```bash
-bin/send_sms.py --to "+14155550111" --message "Hello" --profile work
+bin/send_sms.py --to "+14155550111" --message 'Hello' --profile work
+printf '%s' 'The premium hardshell travel case is $499.' | bin/send_sms.py --to "+14155550111" --from "+14155201316" --message-stdin --dry-run
 bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
 ```
 

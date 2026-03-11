@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-03-11
+
+- fix(send_sms): add `--message-file` and `--message-stdin` safe input paths so pricing text like `$499` survives shell boundaries.
+- fix(send_sms): make plain `--dry-run` print the exact message preview instead of only message length.
+- docs(send_sms): switch inline examples to safe quoting and document stdin/file workflows for shell-sensitive content.
+
 ## 2026-03-04
 
 - fix(webhook): close inbound Telegram OTP/2FA bypass by centralizing inbound SMS alert eligibility (`assess_inbound_sms_alert_eligibility`) and applying the same sensitive/shortcode decision to both OpenClaw hook forwarding and direct Telegram alerts.

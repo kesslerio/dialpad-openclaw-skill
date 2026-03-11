@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -154,6 +155,77 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(run_json.call_count, 0)
         self.assertIn("Dry run: SMS not sent", out)
         self.assertIn("Selected sender: +14155201316", out)
+        self.assertIn("Message source: --message", out)
+        self.assertIn("Message preview:", out)
+        self.assertIn("Hello", out)
+
+    def test_send_sms_message_file_preserves_dollar_sign_in_payload(self):
+        calls: list[list[str]] = []
+
+        def fake_run_generated(cmd: list[str]):
+            calls.append(cmd)
+            return {"id": "msg-1", "message_status": "pending"}
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+            tmp.write("The premium hardshell travel case is $499.")
+            message_path = tmp.name
+
+        try:
+            with patch("send_sms.require_generated_cli"), \
+                    patch("send_sms.require_api_key"), \
+                    patch("send_sms.run_generated_json", side_effect=fake_run_generated):
+                code, out, err = self._run_main(send_sms, [
+                    "--to", "+14155550111",
+                    "--from", "+14155201316",
+                    "--message-file", message_path,
+                ])
+        finally:
+            Path(message_path).unlink(missing_ok=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        payload = json.loads(calls[0][3])
+        self.assertEqual(payload["text"], "The premium hardshell travel case is $499.")
+        self.assertIn("Selected sender: +14155201316", out)
+
+    def test_send_sms_message_stdin_dry_run_shows_exact_message(self):
+        with patch.object(sys, "stdin", io.StringIO("It's $499 typically.")), \
+                patch("send_sms.require_generated_cli"), \
+                patch("send_sms.require_api_key") as require_key, \
+                patch("send_sms.run_generated_json") as run_json:
+            code, out, err = self._run_main(send_sms, [
+                "--to", "+14155550111",
+                "--from", "+14155201316",
+                "--message-stdin",
+                "--dry-run",
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertEqual(require_key.call_count, 0)
+        self.assertEqual(run_json.call_count, 0)
+        self.assertIn("Message source: --message-stdin", out)
+        self.assertIn("It's $499 typically.", out)
+
+    def test_send_sms_rejects_empty_message_file(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+            message_path = tmp.name
+
+        try:
+            with patch("send_sms.require_generated_cli"), \
+                    patch("send_sms.require_api_key"), \
+                    patch("send_sms.run_generated_json"):
+                code, out, err = self._run_main(send_sms, [
+                    "--to", "+14155550111",
+                    "--from", "+14155201316",
+                    "--message-file", message_path,
+                ])
+        finally:
+            Path(message_path).unlink(missing_ok=True)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Message text from --message-file", err)
 
     def test_send_sms_fails_when_generated_cli_unavailable(self):
         with patch(

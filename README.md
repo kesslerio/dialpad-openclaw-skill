@@ -36,10 +36,14 @@ Prefer wrappers in `bin/` for day-to-day usage.
 generated/dialpad --api-key "$DIALPAD_API_KEY" company company.get >/dev/null
 
 # Send SMS (recommended: explicit sender)
-bin/send_sms.py --to "+14155551234" --from "+14155201316" --message "Hello from OpenClaw"
+bin/send_sms.py --to "+14155551234" --from "+14155201316" --message 'Hello from OpenClaw'
 
 # Send SMS with sender profile
-bin/send_sms.py --to "+14155551234" --message "Hello" --profile work
+bin/send_sms.py --to "+14155551234" --message 'Hello' --profile work
+
+# Send SMS with shell-sensitive pricing text
+printf '%s' 'The premium hardshell travel case is $499.' | \
+  bin/send_sms.py --to "+14155551234" --from "+14155201316" --message-stdin --dry-run
 
 # Make a call with TTS
 bin/make_call.py --to "+14155551234" --text "This is a test call."
@@ -101,3 +105,5 @@ dialpad-openclaw-skill/
 - Root Python entrypoints were consolidated into `scripts/`.
 - If you previously used `python3 <root-script>.py`, switch to `python3 scripts/<script>.py`.
 - For direct generated CLI calls, pass `--api-key "$DIALPAD_API_KEY"` (or ensure `DIALPAD_TOKEN` is exported). Wrappers in `bin/` handle auth bridging automatically.
+- For messages containing `$` or other shell-sensitive text, prefer `--message-file` or `--message-stdin`. If you use inline `--message`, single-quote it.
+- `bin/send_sms.py --dry-run` now prints the exact message preview so pricing/shell corruption is visible before send.

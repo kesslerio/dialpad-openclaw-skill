@@ -57,7 +57,7 @@ def resolve_message_text(args: argparse.Namespace) -> tuple[str, str]:
         message_source = "--message-file"
         try:
             message_text = Path(args.message_file).read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise WrapperError(
                 f"Failed to read {message_source} '{args.message_file}': {exc}",
                 code="invalid_argument",

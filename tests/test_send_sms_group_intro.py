@@ -207,6 +207,28 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertIn("Message source: --message-stdin", out)
         self.assertIn("It's $499 typically.", out)
 
+    def test_send_sms_rejects_non_utf8_message_file(self):
+        with tempfile.NamedTemporaryFile("wb", delete=False) as tmp:
+            tmp.write(b"price: \xff\xfe")
+            message_path = tmp.name
+
+        try:
+            with patch("send_sms.require_generated_cli"), \
+                    patch("send_sms.require_api_key"), \
+                    patch("send_sms.run_generated_json"):
+                code, out, err = self._run_main(send_sms, [
+                    "--to", "+14155550111",
+                    "--from", "+14155201316",
+                    "--message-file", message_path,
+                ])
+        finally:
+            Path(message_path).unlink(missing_ok=True)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Failed to read --message-file", err)
+        self.assertIn("utf-8", err.lower())
+
     def test_send_sms_rejects_empty_message_file(self):
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
             message_path = tmp.name

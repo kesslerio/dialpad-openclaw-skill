@@ -224,13 +224,31 @@ def find_matching_contact(
 
 
 def create_contact(payload: dict[str, Any]) -> dict[str, Any]:
-    return run_generated_json(["contacts", "contacts.create", "--data", json.dumps(payload)])
+    return run_generated_json(build_create_contact_command_args(payload))
 
 
 def update_contact(contact_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return run_generated_json(
         ["contacts", "contacts.update", "--id", contact_id, "--data", json.dumps(payload)]
     )
+
+
+def build_create_contact_command_args(payload: dict[str, Any]) -> list[str]:
+    first_name = str(payload.get("first_name") or "").strip()
+    last_name = str(payload.get("last_name") or "").strip()
+    if not first_name or not last_name:
+        raise WrapperError("Create contact payload requires first_name and last_name.")
+
+    return [
+        "contacts",
+        "contacts.create",
+        "--first-name",
+        first_name,
+        "--last-name",
+        last_name,
+        "--data",
+        json.dumps(payload),
+    ]
 
 
 def is_owner_not_found_error(message: str) -> bool:

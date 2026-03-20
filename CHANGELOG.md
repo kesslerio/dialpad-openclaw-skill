@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-03-20
+
+- fix(sms_sqlite): stop using `MAX(contact_name)` for contact summaries and instead use the latest non-empty message contact name per phone number to prevent stale identity mappings.
+- feat(sms_sqlite): add `python3 scripts/sms_sqlite.py cleanup [number]` to reconcile stale local contact cache rows and remove orphaned contact entries.
+- test(sms_sqlite): add regressions covering latest-name selection and cleanup reconciliation behavior.
+
 ## 2026-03-11
 
 - fix(send_sms): add `--message-file` and `--message-stdin` safe input paths so pricing text like `$499` survives shell boundaries.

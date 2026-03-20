@@ -29,6 +29,12 @@ python3 scripts/sms_sqlite.py stats
 # Mark messages as read
 python3 scripts/sms_sqlite.py read "+14155551234"
 
+# Reconcile stale contact cache for all contacts
+python3 scripts/sms_sqlite.py cleanup
+
+# Reconcile stale contact cache for one number
+python3 scripts/sms_sqlite.py cleanup "+14155551234"
+
 # Migrate from legacy storage
 python3 scripts/sms_sqlite.py migrate
 ```
@@ -40,6 +46,7 @@ python3 scripts/sms_sqlite.py migrate
 - **ACID transactions** — no corruption on concurrent writes
 - **Unread tracking** with per-contact counts
 - **Denormalized contact stats** for instant list views
+- **Cache reconciliation** to refresh stale contact-name mappings from latest message truth
 
 ## Webhook Integration
 

@@ -215,17 +215,17 @@ def _get_latest_contact_name(conn: sqlite3.Connection, phone_number: str) -> Opt
         FROM messages
         WHERE contact_number = ?
           AND contact_name IS NOT NULL
-          AND TRIM(contact_name) != ''
         ORDER BY timestamp DESC, id DESC
-        LIMIT 1
         """,
         (phone_number,),
     )
-    row = cursor.fetchone()
-    if not row:
-        return None
-    name = row["contact_name"]
-    return name.strip() if isinstance(name, str) and name.strip() else None
+    for row in cursor.fetchall():
+        name = row["contact_name"]
+        if isinstance(name, str):
+            stripped = name.strip()
+            if stripped:
+                return stripped
+    return None
 
 
 def cleanup_stale_contacts(conn: sqlite3.Connection, phone_number: Optional[str] = None) -> dict[str, int]:

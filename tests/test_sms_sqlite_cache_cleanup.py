@@ -83,6 +83,21 @@ class SmsSqliteCacheCleanupTests(unittest.TestCase):
         self.assertEqual(result["updated"], 1)
         self.assertEqual(result["removed"], 1)
 
+    def test_latest_contact_name_skips_whitespace_only_newer_values(self):
+        number = "+14155550001"
+        self._store(20, number, "Adhara", 1000)
+        self._store(21, number, "\n\t  ", 2000)
+
+        sms_sqlite._update_contact_summary(self.conn, number)
+
+        row = self.conn.execute(
+            "SELECT name FROM contacts WHERE phone_number = ?",
+            (number,),
+        ).fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["name"], "Adhara")
+
 
 if __name__ == "__main__":
     unittest.main()

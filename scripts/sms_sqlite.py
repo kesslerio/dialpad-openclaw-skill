@@ -180,12 +180,13 @@ def store_message(conn: sqlite3.Connection, data: dict, is_new: bool = True) -> 
 
 def _update_contact_summary(conn: sqlite3.Connection, phone_number: str):
     """Update denormalized contact stats"""
+    latest_name = _get_latest_contact_name(conn, phone_number)
     conn.execute("""
         INSERT INTO contacts (phone_number, name, message_count, unread_count, 
                              first_message_at, last_message_at, last_message_preview)
         SELECT 
             contact_number,
-            MAX(contact_name) as name,
+            ? as name,
             COUNT(*) as message_count,
             SUM(CASE WHEN read = 0 AND direction = 'inbound' THEN 1 ELSE 0 END) as unread_count,
             MIN(timestamp) as first_message_at,
@@ -203,7 +204,67 @@ def _update_contact_summary(conn: sqlite3.Connection, phone_number: str):
             last_message_at = excluded.last_message_at,
             last_message_preview = excluded.last_message_preview,
             updated_at = CURRENT_TIMESTAMP
-    """, (phone_number, phone_number))
+    """, (latest_name, phone_number, phone_number))
+
+
+def _get_latest_contact_name(conn: sqlite3.Connection, phone_number: str) -> Optional[str]:
+    """Return most recent non-empty contact name seen for a phone number."""
+    cursor = conn.execute(
+        """
+        SELECT contact_name
+        FROM messages
+        WHERE contact_number = ?
+          AND contact_name IS NOT NULL
+        ORDER BY timestamp DESC, id DESC
+        """,
+        (phone_number,),
+    )
+    for row in cursor.fetchall():
+        name = row["contact_name"]
+        if isinstance(name, str):
+            stripped = name.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def cleanup_stale_contacts(conn: sqlite3.Connection, phone_number: Optional[str] = None) -> dict[str, int]:
+    """Rebuild contact summaries from message truth and remove orphaned contact rows."""
+    updated = 0
+    removed = 0
+
+    if phone_number:
+        cursor = conn.execute(
+            "SELECT DISTINCT contact_number FROM messages WHERE contact_number = ?",
+            (phone_number,),
+        )
+        numbers = [row["contact_number"] for row in cursor.fetchall()]
+    else:
+        cursor = conn.execute(
+            "SELECT DISTINCT contact_number FROM messages WHERE contact_number IS NOT NULL AND TRIM(contact_number) != ''"
+        )
+        numbers = [row["contact_number"] for row in cursor.fetchall()]
+
+    for number in numbers:
+        _update_contact_summary(conn, number)
+        updated += 1
+
+    if phone_number:
+        orphan_cursor = conn.execute(
+            "DELETE FROM contacts WHERE phone_number = ? AND phone_number NOT IN (SELECT DISTINCT contact_number FROM messages)",
+            (phone_number,),
+        )
+    else:
+        orphan_cursor = conn.execute(
+            "DELETE FROM contacts WHERE phone_number NOT IN (SELECT DISTINCT contact_number FROM messages)"
+        )
+    removed = orphan_cursor.rowcount
+
+    conn.commit()
+    return {
+        "updated": updated,
+        "removed": removed,
+    }
 
 
 def get_thread(conn: sqlite3.Connection, phone_number: str, limit: int = 100) -> List[dict]:
@@ -365,7 +426,7 @@ if __name__ == "__main__":
     conn = init_db()
     
     if len(sys.argv) < 2:
-        print("Usage: python3 scripts/sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats]")
+        print("Usage: python3 scripts/sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats|cleanup [number]|read <number>]")
         sys.exit(1)
     
     cmd = sys.argv[1]
@@ -459,6 +520,14 @@ if __name__ == "__main__":
         print(f"  Inbound: {inbound} | Outbound: {outbound}")
         print(f"  Unread: {unread}")
         print(f"  Database size: {DB_PATH.stat().st_size / 1024:.1f} KB")
+
+    elif cmd == "cleanup":
+        target = sys.argv[2] if len(sys.argv) >= 3 else None
+        result = cleanup_stale_contacts(conn, phone_number=target)
+        scope = target or "all contacts"
+        print(f"Reconciled cache for {scope}")
+        print(f"  Updated contact summaries: {result['updated']}")
+        print(f"  Removed orphan contact rows: {result['removed']}")
     
     elif cmd == "read" and len(sys.argv) >= 3:
         number = sys.argv[2]
@@ -466,6 +535,6 @@ if __name__ == "__main__":
         print(f"Marked {count} messages from {number} as read")
     
     else:
-        print("Unknown command. Usage: python3 scripts/sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats|read <number>]")
+        print("Unknown command. Usage: python3 scripts/sms_sqlite.py [list|thread <number>|search <query>|unread|migrate|stats|cleanup [number]|read <number>]")
     
     conn.close()

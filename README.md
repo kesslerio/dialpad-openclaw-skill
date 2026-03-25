@@ -1,13 +1,13 @@
 # Dialpad OpenClaw Skill
 
-Dialpad messaging and calling skill for OpenClaw with lightweight wrappers, webhook handling, and local SMS history storage.
+Dialpad messaging and calling skill for OpenClaw with task-focused wrappers, webhook handling, and local SMS history storage.
 
 ## What This Repo Contains
 
-- `SKILL.md` for skill loading and usage guidance.
-- `bin/` wrappers for stable task-focused commands.
-- `generated/` OpenAPI-generated Dialpad CLI surface.
-- `scripts/` operational Python scripts (legacy entrypoints + webhook/storage tooling).
+- `SKILL.md` for skill loading and agent-safe usage guidance.
+- `bin/` wrappers for the supported agent-facing command surface.
+- `generated/` internal OpenAPI-generated backend CLI used by wrappers and manual troubleshooting.
+- `scripts/` operational Python scripts for webhook, storage, and maintenance workflows.
 - `references/` deeper API/architecture/storage/voice docs.
 
 ## Quick Start
@@ -20,21 +20,15 @@ cd dialpad-openclaw-skill
 # Required auth (canonical)
 export DIALPAD_API_KEY="your-api-key"
 
-# Optional/derived auth bridge for direct generated CLI usage
-export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"
-
 # Optional premium TTS
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
 ```
 
 ## Common Commands
 
-Prefer wrappers in `bin/` for day-to-day usage.
+Use `bin/` wrappers for all normal agent work. They are the stable, supported command contract.
 
 ```bash
-# Auth preflight for direct generated CLI usage
-generated/dialpad --api-key "$DIALPAD_API_KEY" company company.get >/dev/null
-
 # Send SMS (recommended: explicit sender)
 bin/send_sms.py --to "+14155551234" --from "+14155201316" --message 'Hello from OpenClaw'
 
@@ -54,9 +48,6 @@ bin/send_group_intro.py --prospect "+14155550111" --reference "+14155550999" --c
 # Create/update contacts
 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
 bin/update_contact.py --id "contact_123" --job-title "Director"
-
-# SMS SQLite history (script moved under scripts/)
-python3 scripts/sms_sqlite.py list
 ```
 
 ## Webhooks to OpenClaw
@@ -75,8 +66,30 @@ export OPENCLAW_HOOKS_NAME="Dialpad SMS"
 Create/list webhook subscriptions:
 
 ```bash
-python3 scripts/create_sms_webhook.py create --url "https://your-server.com/webhook/dialpad" --direction "all"
-python3 scripts/create_sms_webhook.py list
+bin/create_sms_webhook.py create --url "https://your-server.com/webhook/dialpad" --direction "all"
+bin/create_sms_webhook.py list
+```
+
+## Operational Tools
+
+These commands are for manual operator workflows, storage inspection, and maintenance. They are not the supported agent-facing interface.
+
+```bash
+# SMS SQLite history
+python3 scripts/sms_sqlite.py list
+
+# Deep webhook/storage operations
+python3 scripts/webhook_server.py
+python3 scripts/sms_storage.py list
+```
+
+## Manual Troubleshooting
+
+`generated/dialpad` is an internal backend surface for the wrappers. Use it directly only for manual operator troubleshooting, API inspection, or regeneration work.
+
+```bash
+export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"
+generated/dialpad --api-key "$DIALPAD_API_KEY" company company.get >/dev/null
 ```
 
 ## Repository Layout
@@ -104,6 +117,6 @@ dialpad-openclaw-skill/
 
 - Root Python entrypoints were consolidated into `scripts/`.
 - If you previously used `python3 <root-script>.py`, switch to `python3 scripts/<script>.py`.
-- For direct generated CLI calls, pass `--api-key "$DIALPAD_API_KEY"` (or ensure `DIALPAD_TOKEN` is exported). Wrappers in `bin/` handle auth bridging automatically.
+- Agents should use `bin/*` wrappers for normal work. Treat `generated/dialpad` as operator-only troubleshooting infrastructure.
 - For messages containing `$` or other shell-sensitive text, prefer `--message-file` or `--message-stdin`. If you use inline `--message`, single-quote it.
 - `bin/send_sms.py --dry-run` now prints the exact message preview so pricing/shell corruption is visible before send.

@@ -1,5 +1,7 @@
 # Dialpad API & CLI Reference
 
+Agent-facing usage should go through `bin/*` wrappers. This document also keeps the underlying CLI and API details available for manual operator troubleshooting.
+
 ## API Capabilities
 
 ### SMS
@@ -14,9 +16,13 @@
 - **Features:** Outbound calling, Text-to-Speech
 - **Caller ID:** Must be assigned to your Dialpad account
 
-## Generated CLI (241 Endpoints)
+## Supported Agent Surface
 
-The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints.
+For agent workflows, `bin/*` wrappers are the supported contract. They provide task-focused arguments, auth bridging, and safer output behavior than the raw generated CLI.
+
+## Generated CLI Backend (Operator Use Only)
+
+The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints. It is the backend surface used by wrappers and a manual operator troubleshooting tool, not a normal agent entrypoint.
 
 ### Wrapper Behavior Notes
 
@@ -39,6 +45,10 @@ bin/send_sms.py --to "+14155550111" --message 'Hello' --profile work
 printf '%s' 'The premium hardshell travel case is $499.' | bin/send_sms.py --to "+14155550111" --from "+14155201316" --message-stdin --dry-run
 bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
 ```
+
+### Manual Operator CLI Examples
+
+These examples are for human operators doing deep inspection or advanced troubleshooting.
 
 ### Campaign & Automation
 ```bash
@@ -99,7 +109,7 @@ dialpad accesscontrolpolicies accesscontrolpolicies.assign --id "policy_123" --u
 
 ### Contact & CRM
 ```bash
-# Full contact CRUD (beyond just lookup)
+# Full contact CRUD (manual operator use)
 dialpad contacts contacts.create --first-name "John" --last-name "Doe" --phones '["+14155551234"]'
 dialpad contacts contacts.update --id "contact_123" --first-name "John" --job-title "VP"
 dialpad contacts contacts.delete --id "contact_123"

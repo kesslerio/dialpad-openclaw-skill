@@ -1,6 +1,6 @@
 ---
 name: dialpad
-description: Send SMS and make voice calls via Dialpad API using an OpenAPI-generated CLI with compatibility wrappers.
+description: Send SMS and make voice calls via Dialpad API using task-focused wrappers backed by an OpenAPI-generated CLI.
 homepage: https://developers.dialpad.com/
 ---
 
@@ -14,7 +14,7 @@ Use this skill to:
 - Send SMS messages (individual or batch)
 - Make voice calls (with TTS or custom voices)
 - Manage contacts and organization settings
-- Query SMS history from local SQLite database
+- Inspect SMS history through operator tooling when needed
 
 ## Available Phone Numbers
 
@@ -25,11 +25,6 @@ Use this skill to:
 | (415) 991-7155 | Support SMS Only | SMS only (no voice) |
 
 ## Quick Start
-
-**Auth preflight (run first):**
-```bash
-generated/dialpad --api-key "$DIALPAD_API_KEY" company company.get >/dev/null
-```
 
 **Send SMS (explicit sender recommended):**
 ```bash
@@ -56,37 +51,40 @@ bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+1415555012
 bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 ```
 
-**Check SMS History:**
-```bash
-python3 scripts/sms_sqlite.py list
-```
-
 ## Key Rules
 
 1. **Format:** Always use E.164 format for numbers (e.g., `+14155551234`).
 2. **Escaping:** Use single quotes for inline `--message` values containing `$` to prevent shell expansion (e.g., `'Price is $10'`).
 3. **Safer message input:** Prefer `--message-file` or `--message-stdin` for pricing text, multi-line copy, or anything shell-sensitive.
-4. **Auth canonical source:** `DIALPAD_API_KEY` is canonical. `DIALPAD_TOKEN` is optional/derived.
-   - Recommended: `export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"`
-5. **Execution modes:**
-   - `bin/*.py` wrappers: preferred for routine operations (auto auth bridging + safer UX)
-   - `generated/dialpad`: advanced/direct API control; always pass `--api-key` (or set `DIALPAD_TOKEN`)
-6. **SMS sender safety:** `--from` and `--profile work|sales` are supported. Prefer explicit `--from` for deterministic routing.
+4. **Supported agent interface:** use `bin/*.py` wrappers for normal work. They are the stable command contract for agents.
+5. **Operator-only surfaces:** `generated/dialpad` and `scripts/*` are for manual troubleshooting, storage inspection, or operational maintenance, not normal agent task execution.
+6. **Auth canonical source:** `DIALPAD_API_KEY` is canonical. `DIALPAD_TOKEN` is only needed for manual generated CLI troubleshooting.
+   - Operator example: `export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"`
+7. **SMS sender safety:** `--from` and `--profile work|sales` are supported. Prefer explicit `--from` for deterministic routing.
    - `--profile` maps to configured env vars:
      - work: `DIALPAD_PROFILE_WORK_FROM`
      - sales: `DIALPAD_PROFILE_SALES_FROM`
    - default fallback order: `DIALPAD_DEFAULT_FROM_NUMBER`, then `DIALPAD_DEFAULT_PROFILE`
    - `--allow-profile-mismatch` permits explicit/profile mismatches when intentional
    - `--dry-run` prints sender resolution and the exact message/request preview without an API call
-7. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
-8. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
+8. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
+9. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
 
 ## Reference Documentation
 
-- **`references/api-reference.md`** — API endpoints, Generated CLI usage, Webhooks
+- **`references/api-reference.md`** — Wrapper behavior, operator CLI reference, Webhooks
 - **`references/sms-storage.md`** — SQLite commands, FTS5 search, legacy storage
 - **`references/voice-options.md`** — List of available TTS voices (Budget & Premium)
 - **`references/architecture.md`** — System architecture, wrappers, and CLI generation
+
+## Operational Tools
+
+Use these only for manual operator workflows, storage inspection, and maintenance:
+
+```bash
+python3 scripts/sms_sqlite.py list
+python3 scripts/webhook_server.py
+```
 
 ## Setup
 
@@ -95,7 +93,7 @@ python3 scripts/sms_sqlite.py list
 export DIALPAD_API_KEY="your_key"
 ```
 
-**Recommended auth bridge for direct generated CLI usage:**
+**Operator auth bridge for manual generated CLI troubleshooting:**
 ```bash
 export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"
 ```

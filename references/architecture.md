@@ -4,7 +4,7 @@
 Dialpad OpenClaw Skill
 ├── SKILL.md                      # Skill trigger/instruction entrypoint
 ├── README.md                     # Concise setup + navigation
-├── bin/                          # Preferred user-facing wrappers
+├── bin/                          # Supported agent-facing wrappers
 │   ├── send_sms.py
 │   ├── send_group_intro.py
 │   ├── make_call.py
@@ -14,10 +14,10 @@ Dialpad OpenClaw Skill
 │   ├── export_sms.py
 │   ├── create_sms_webhook.py
 │   └── _dialpad_compat.py
-├── generated/                    # OpenAPI-generated CLI
+├── generated/                    # Internal backend CLI used by wrappers
 │   ├── dialpad
 │   └── dialpad.openapi
-├── scripts/                      # Operational/legacy Python tooling
+├── scripts/                      # Operator-only operational Python tooling
 │   ├── send_sms.py
 │   ├── make_call.py
 │   ├── list_calls.py
@@ -41,6 +41,8 @@ Dialpad OpenClaw Skill
 
 ## Wrapper to Generated CLI Flow
 
+`bin/*` is the stable agent contract. `generated/dialpad` sits behind that contract and should only be used directly by human operators for troubleshooting or regeneration work.
+
 1. Wrapper receives task-oriented arguments.
 2. Wrapper transforms arguments to Dialpad CLI payloads.
 3. Wrapper executes `generated/dialpad` with auth from env.
@@ -48,7 +50,7 @@ Dialpad OpenClaw Skill
 
 ## Script Layer
 
-Scripts in `scripts/` are retained for compatibility and operational workflows (webhooks, storage, exports, and call lookup utilities). They are no longer placed in repository root.
+Scripts in `scripts/` are retained for compatibility and operational workflows (webhooks, storage, exports, and call lookup utilities). They are no longer placed in repository root and are not the supported agent-facing interface.
 
 ## Regeneration
 

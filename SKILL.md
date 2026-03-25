@@ -46,6 +46,12 @@ bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --c
 bin/make_call.py --to "+14155551234" --text "This is a call from the agent."
 ```
 
+**List Recent Calls:**
+```bash
+bin/list_calls.py --today --limit 20
+bin/list_calls.py --hours 6 --missed --json
+```
+
 **Create Contact:**
 ```bash
 bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
@@ -79,7 +85,8 @@ python3 scripts/sms_sqlite.py list
    - `--allow-profile-mismatch` permits explicit/profile mismatches when intentional
    - `--dry-run` prints sender resolution and the exact message/request preview without an API call
 7. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
-8. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
+8. **Call history:** `bin/list_calls.py` is the supported call-history command for agents. Use `--json` when downstream automation needs a deterministic response envelope.
+9. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
 
 ## Reference Documentation
 

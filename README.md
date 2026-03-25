@@ -48,6 +48,10 @@ printf '%s' 'The premium hardshell travel case is $499.' | \
 # Make a call with TTS
 bin/make_call.py --to "+14155551234" --text "This is a test call."
 
+# List recent calls
+bin/list_calls.py --today --limit 20
+bin/list_calls.py --hours 6 --missed --json
+
 # Group intro (mirrored fallback)
 bin/send_group_intro.py --prospect "+14155550111" --reference "+14155550999" --confirm-share --from "+14153602954"
 
@@ -86,6 +90,7 @@ dialpad-openclaw-skill/
 ├── SKILL.md
 ├── README.md
 ├── bin/
+│   ├── list_calls.py
 ├── generated/
 ├── scripts/
 ├── references/

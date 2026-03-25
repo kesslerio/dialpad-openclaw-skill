@@ -14,8 +14,10 @@ from webhook_server import (
     build_hook_session_key,
     build_openclaw_hook_payload,
     format_hook_message,
+    normalize_call_hook_payload,
     normalize_sms_payload,
     parse_signature_candidates,
+    parse_bool_env,
     verify_bearer_jwt,
     verify_hmac_signature,
     verify_webhook_auth,
@@ -39,6 +41,15 @@ def test_parse_signature_candidates_supports_raw_and_prefixed():
     digest = "a" * 64
     values = parse_signature_candidates(f"sha256={digest}, {digest}, v1:{digest}")
     assert values == [digest, digest, digest]
+
+
+def test_parse_bool_env_supports_public_flag_values():
+    assert parse_bool_env("1", False) is True
+    assert parse_bool_env("true", False) is True
+    assert parse_bool_env("0", True) is False
+    assert parse_bool_env("off", True) is False
+    assert parse_bool_env("", True) is True
+    assert parse_bool_env(None, False) is False
 
 
 def test_verify_hmac_signature_accepts_prefixed_header():
@@ -135,3 +146,63 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
     assert payload["to"] == "-5102073225"
     assert payload["agentId"] == "niemand-work"
     assert payload["sessionKey"] == "hook:dialpad:sms:conv-123"
+
+
+def test_build_hook_session_key_for_missed_call_fallback_order():
+    assert build_hook_session_key({"event_type": "missed_call", "call_id": "call-1"}) == "hook:dialpad:call:call-1"
+    assert build_hook_session_key(
+        {"event_type": "missed_call", "call_id": None, "sender_number": "+1 (415) 555-0123", "timestamp": 1760000000000}
+    ) == "hook:dialpad:call:4155550123:1760000000000"
+    assert build_hook_session_key({"event_type": "missed_call", "timestamp": 1760000000000}) == "hook:dialpad:call:1760000000000"
+    assert build_hook_session_key({"event_type": "missed_call"}) == "hook:dialpad:call:unknown"
+
+
+def test_normalize_call_payload_and_format_hook_message():
+    payload = {
+        "direction": "inbound",
+        "call_direction": "inbound",
+        "call_id": "call-123",
+        "date_started": 1760000000000,
+    }
+    resolved = {
+        "from_number": "+14155550123",
+        "to_number": "+14155559876",
+        "line_display": "Support (415) 555-9876",
+        "event_ts_ms": 1760000000000,
+    }
+
+    normalized = normalize_call_hook_payload(payload, resolved, contact_info="Jane Doe")
+
+    assert normalized["event_type"] == "missed_call"
+    assert normalized["sender"] == "Jane Doe"
+    assert normalized["sender_number"] == "+14155550123"
+    assert normalized["recipient_number"] == "+14155559876"
+    assert normalized["timestamp"] == 1760000000000
+    assert normalized["call_id"] == "call-123"
+
+    message = format_hook_message(normalized, line_display=normalized["line_display"])
+    assert "📞 Dialpad Missed Call" in message
+    assert "Line: Support (415) 555-9876" in message
+    assert "From: Jane Doe (+14155550123)" in message
+    assert "Call ID: call-123" in message
+
+
+def test_call_hook_payload_uses_shared_envelope(monkeypatch):
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_NAME", "Dialpad Inbox")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CALL_NAME", "Dialpad Missed Call")
+
+    normalized = {
+        "event_type": "missed_call",
+        "sender": "Jane Doe",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155559876",
+        "line_display": "Support",
+        "timestamp": 1760000000000,
+        "call_id": "call-123",
+    }
+
+    payload = build_openclaw_hook_payload(normalized, line_display="Support")
+    assert payload["name"] == "Dialpad Missed Call"
+    assert payload["deliver"] is True
+    assert payload["sessionKey"] == "hook:dialpad:call:call-123"
+    assert "📞 Dialpad Missed Call" in payload["message"]

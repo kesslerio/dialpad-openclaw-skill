@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import sys
@@ -18,6 +19,14 @@ import make_call
 import send_sms
 import update_contact
 from _dialpad_compat import ERROR_CODES, WrapperError
+
+LIST_CALLS_SPEC = importlib.util.spec_from_file_location(
+    "bin_list_calls_contract",
+    Path(__file__).resolve().parent.parent / "bin" / "list_calls.py",
+)
+assert LIST_CALLS_SPEC is not None and LIST_CALLS_SPEC.loader is not None
+list_calls_wrapper = importlib.util.module_from_spec(LIST_CALLS_SPEC)
+LIST_CALLS_SPEC.loader.exec_module(list_calls_wrapper)
 
 
 class JsonContractTests(unittest.TestCase):
@@ -101,6 +110,29 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
         self._assert_success(self._parse(out), "make_call.call")
+
+    def test_list_calls_json_success_envelope(self):
+        with patch.object(list_calls_wrapper, "require_api_key"), \
+                patch.object(
+                    list_calls_wrapper,
+                    "fetch_calls",
+                    return_value=[
+                        {
+                            "call_id": "call-1",
+                            "date_started": 1742900400000,
+                            "duration": 9000,
+                            "direction": "outbound",
+                            "contact": {"name": "Prospect"},
+                        }
+                    ],
+                ):
+            code, out, err = self._run(
+                list_calls_wrapper,
+                ["bin/list_calls.py", "--limit", "1", "--json"],
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self._assert_success(self._parse(out), "list_calls.list")
 
     def test_create_contact_json_success_envelope(self):
         def fake_run(cmd: list[str]):
@@ -202,6 +234,14 @@ class JsonContractTests(unittest.TestCase):
         parsed = self._parse(out)
         self._assert_error(parsed, "export_sms.export")
         self.assertEqual(parsed["error"]["code"], "timeout")
+
+    def test_list_calls_argparse_failure_is_json_envelope(self):
+        code, out, err = self._run(list_calls_wrapper, ["bin/list_calls.py", "--limit", "0", "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "list_calls.list")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
 
     def test_update_contact_argparse_failure_is_json_envelope(self):
         code, out, err = self._run(update_contact, ["bin/update_contact.py", "--json"])

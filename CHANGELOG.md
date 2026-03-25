@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-03-25
+
+- feat(list_calls): add `bin/list_calls.py` as the supported agent-facing recent-call wrapper with table and JSON envelope output.
+- test(list_calls): cover wrapper JSON output plus structured recent-call summaries for issue `#50`.
+- docs(list_calls): document the supported recent-call wrapper across `README.md`, `SKILL.md`, and reference docs.
+
 ## 2026-03-20
 
 - fix(sms_sqlite): stop using `MAX(contact_name)` for contact summaries and instead use the latest non-empty message contact name per phone number to prevent stale identity mappings.

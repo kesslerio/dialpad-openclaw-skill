@@ -9,6 +9,8 @@ Usage:
     python3 scripts/list_calls.py --today --output recent_calls.csv
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -17,16 +19,19 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
-DIALPAD_API_KEY = os.environ.get("DIALPAD_API_KEY")
 CALLS_ENDPOINT = "https://dialpad.com/api/v2/call"
 DEFAULT_HOURS = 24
 DEFAULT_LIMIT = 50
 MAX_PAGE_SIZE = 100
 MAX_PAGES = 20
+
+
+def get_api_key() -> str | None:
+    return os.environ.get("DIALPAD_API_KEY") or os.environ.get("DIALPAD_TOKEN")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,8 +99,9 @@ def fetch_calls(
     limit: int,
     missed_only: bool = False,
 ) -> list[dict[str, Any]]:
+    api_key = get_api_key()
     headers = {
-        "Authorization": f"Bearer {DIALPAD_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Accept": "application/json",
     }
 
@@ -158,6 +164,15 @@ def pick_first_string(values: list[Any]) -> str:
             if cleaned:
                 return cleaned
     return "-"
+
+
+def pick_optional_string(values: list[Any]) -> str | None:
+    for value in values:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+    return None
 
 
 def to_ms(value: Any) -> int | None:
@@ -252,6 +267,48 @@ def get_line(call: dict[str, Any]) -> str:
     )
 
 
+def get_call_id(call: dict[str, Any]) -> str | None:
+    return pick_optional_string([call.get("call_id"), call.get("id")])
+
+
+def get_started_at_iso(call: dict[str, Any]) -> str | None:
+    started_ms = to_ms(call.get("date_started"))
+    if started_ms is None:
+        return None
+    return datetime.fromtimestamp(started_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def to_call_summary(call: dict[str, Any]) -> dict[str, object]:
+    duration_seconds = normalize_duration(call)
+
+    return {
+        "call_id": get_call_id(call),
+        "started_at": get_started_at_iso(call),
+        "contact": get_caller(call),
+        "direction": get_direction(call),
+        "duration_seconds": duration_seconds,
+        "duration_display": format_duration(duration_seconds),
+        "status": infer_status(call),
+        "state": pick_optional_string([call.get("state")]),
+        "line": get_line(call),
+        "recording_url": pick_optional_string(
+            [
+                call.get("recording_url"),
+                call.get("recording_link"),
+                call.get("call_review_share_link"),
+                call.get("voicemail_link"),
+            ]
+        ),
+        "outcome": pick_optional_string(
+            [
+                call.get("disposition"),
+                call.get("disposition_name"),
+                call.get("outcome"),
+            ]
+        ),
+    }
+
+
 def to_row(call: dict[str, Any]) -> dict[str, str]:
     started_ms = to_ms(call.get("date_started"))
     started = "-"
@@ -307,7 +364,7 @@ def main() -> int:
         print("Configuration error: --limit must be greater than 0", file=sys.stderr)
         return 1
 
-    if not DIALPAD_API_KEY:
+    if not get_api_key():
         print("Configuration error: DIALPAD_API_KEY environment variable not set", file=sys.stderr)
         return 1
 

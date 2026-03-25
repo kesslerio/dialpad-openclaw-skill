@@ -8,6 +8,7 @@ Dialpad OpenClaw Skill
 │   ├── send_sms.py
 │   ├── send_group_intro.py
 │   ├── make_call.py
+│   ├── list_calls.py
 │   ├── lookup_contact.py
 │   ├── create_contact.py
 │   ├── update_contact.py
@@ -39,13 +40,13 @@ Dialpad OpenClaw Skill
 └── openapi.json
 ```
 
-## Wrapper to Generated CLI Flow
+## Wrapper Execution Flow
 
 `bin/*` is the stable agent contract. `generated/dialpad` sits behind that contract and should only be used directly by human operators for troubleshooting or regeneration work.
 
 1. Wrapper receives task-oriented arguments.
-2. Wrapper transforms arguments to Dialpad CLI payloads.
-3. Wrapper executes `generated/dialpad` with auth from env.
+2. Wrapper chooses the narrow backend needed for the task.
+3. Most wrappers execute `generated/dialpad` with auth from env, while `bin/list_calls.py` reuses the proven `scripts/list_calls.py` HTTP path for recent call history.
 4. Wrapper normalizes output for downstream workflows.
 
 ## Script Layer

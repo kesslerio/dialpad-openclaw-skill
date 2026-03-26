@@ -129,6 +129,7 @@ dialpad-openclaw-skill/
 
 - `references/api-reference.md`
 - `references/architecture.md`
+- `references/openclaw-integration.md`
 - `references/sms-storage.md`
 - `references/voice-options.md`
 

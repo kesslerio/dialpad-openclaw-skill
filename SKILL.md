@@ -80,6 +80,7 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 ## Reference Documentation
 
 - **`references/api-reference.md`** — Wrapper behavior, operator CLI reference, Webhooks
+- **`references/openclaw-integration.md`** — End-to-end setup guide for wiring this repo's webhook server to OpenClaw with human approval defaults
 - **`references/sms-storage.md`** — SQLite commands, FTS5 search, legacy storage
 - **`references/voice-options.md`** — List of available TTS voices (Budget & Premium)
 - **`references/architecture.md`** — System architecture, wrappers, and CLI generation

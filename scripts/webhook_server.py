@@ -1094,6 +1094,38 @@ def normalize_call_hook_payload(data, resolved_context, contact_info=None):
     }
 
 
+def build_first_contact_context(normalized_event, sender_enrichment=None, line_display=None):
+    """Build a compact first-contact hint for downstream operator assist."""
+    event_type = normalized_event.get("event_type") or "sms"
+    if event_type not in {"sms", "missed_call"}:
+        return None
+
+    sender_enrichment = sender_enrichment or {}
+    contact_name = sender_enrichment.get("contact_name")
+    contact_name_text = str(contact_name or "").strip()
+    known_contact = bool(contact_name_text) and contact_name_text.lower() != "unknown"
+    first_contact_candidate = not known_contact
+
+    return {
+        "knownContact": known_contact,
+        "needsIdentityLookup": first_contact_candidate,
+        "needsBusinessContext": first_contact_candidate,
+        "needsDraftReply": first_contact_candidate,
+        "needsDialpadContactSync": first_contact_candidate,
+        "keepBrief": not first_contact_candidate,
+        "contactName": contact_name,
+        "senderNumber": normalized_event.get("sender_number"),
+        "recipientNumber": normalized_event.get("recipient_number"),
+        "lineDisplay": line_display or normalized_event.get("line_display"),
+        "eventType": event_type,
+        "lookup": {
+            "status": sender_enrichment.get("status", "not_applicable"),
+            "degraded": bool(sender_enrichment.get("degraded")),
+            "degradedReason": sender_enrichment.get("degraded_reason"),
+        },
+    }
+
+
 def build_hook_session_key(normalized_event):
     """Build stable OpenClaw hook session key with fallbacks."""
     event_type = normalized_event.get("event_type") or "sms"
@@ -1190,6 +1222,17 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
         payload["to"] = target_to
     if OPENCLAW_HOOKS_AGENT_ID:
         payload["agentId"] = OPENCLAW_HOOKS_AGENT_ID
+
+    first_contact = normalized_event.get("first_contact")
+    if first_contact is None and normalized_event.get("sender_enrichment"):
+        first_contact = build_first_contact_context(
+            normalized_event,
+            sender_enrichment=normalized_event.get("sender_enrichment"),
+            line_display=line_display,
+        )
+    if first_contact is not None:
+        payload["firstContact"] = first_contact
+
     return payload
 
 
@@ -1398,6 +1441,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             if inbound_alert_decision["eligible"]:
                 line_display = get_line_name(to_num)
                 normalized_sms = normalize_sms_payload(data, contact_info=contact_info)
+                normalized_sms["first_contact"] = build_first_contact_context(
+                    normalized_sms,
+                    sender_enrichment=sender_enrichment,
+                    line_display=line_display,
+                )
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(
                     normalized_sms, line_display=line_display
                 )
@@ -1552,6 +1600,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 from_display = "Unknown"
             else:
                 from_display = f"`{from_num}`"
+            sender_enrichment = {
+                "contact_name": contact_info,
+                "status": "resolved" if contact_info else "not_found",
+                "degraded": False,
+                "degraded_reason": None,
+            }
             time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
             if call_ts is not None:
                 try:
@@ -1572,6 +1626,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 data,
                 resolved,
                 contact_info=contact_info,
+            )
+            normalized_event["first_contact"] = build_first_contact_context(
+                normalized_event,
+                sender_enrichment=sender_enrichment,
+                line_display=line_display,
             )
             hook_sent, hook_status = send_to_openclaw_hooks(
                 normalized_event,

@@ -387,6 +387,8 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(len(hook_calls), 1)
         self.assertEqual(hook_calls[0]["normalized_event"]["event_type"], "missed_call")
         self.assertEqual(hook_calls[0]["normalized_event"]["call_id"], "call-123")
+        self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["knownContact"], True)
+        self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["keepBrief"], True)
         self.assertEqual(len(telegram_messages), 1)
         self.assertTrue(response["missed_call"])
         self.assertTrue(response["hook_forwarded"])

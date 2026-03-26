@@ -187,6 +187,7 @@ Behavior notes:
 - Set `OPENCLAW_HOOKS_SMS_ENABLED=0` or `OPENCLAW_HOOKS_CALL_ENABLED=0` to disable one event class
 - Voicemail notifications remain Telegram-only in this repo
 - The local OpenClaw gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
+- For unknown inbound contacts, the hook may include a `firstContact` hint with lookup and reply-drafting signals; downstream users can map that to Attio, HubSpot, Airtable, or any other source of truth
 - The repo preserves the current top-level OpenClaw hook envelope and does not claim end-to-end validation of downstream proactive enrichment behavior
 - If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
 

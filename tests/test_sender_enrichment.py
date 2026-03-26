@@ -141,6 +141,8 @@ def test_lookup_contact_enrichment_401_degraded_and_cached_fallback(monkeypatch)
     assert response["sender_enrichment_degraded"] is True
     assert response["sender_enrichment_degraded_reason"] == "expired_token"
     assert hook_calls[0]["normalized_sms"]["sender"] == "Cached Person"
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["knownContact"] is True
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is True
 
 
 def test_inbound_telegram_uses_enriched_sender(monkeypatch):
@@ -224,9 +226,55 @@ def test_inbound_webhook_hook_uses_enriched_sender(monkeypatch):
     response = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert status["code"] == 200
     assert hook_calls[0]["normalized_sms"]["sender"] == "Jane Doe"
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["knownContact"] is True
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is True
     assert response["hook_forwarded"] is True
     assert response["sender_enrichment_status"] == "resolved"
     assert response["sender_enrichment_degraded"] is False
+
+
+def test_inbound_webhook_hook_marks_unknown_sender_first_contact_candidate(monkeypatch):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+
+    hook_calls = []
+
+    def _fake_hook(normalized_sms, line_display=None):
+        hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display})
+        return True, "http_200"
+
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", _fake_hook)
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Who is this?",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    assert status["code"] == 200
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["knownContact"] is False
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["needsIdentityLookup"] is True
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["needsDraftReply"] is True
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is False
 
 
 def test_inbound_telegram_escapes_markdown_content(monkeypatch):

@@ -76,6 +76,8 @@ export OPENCLAW_HOOKS_CALL_ENABLED="1"
 When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are forwarded to OpenClaw by default. Set `OPENCLAW_HOOKS_SMS_ENABLED=0` or `OPENCLAW_HOOKS_CALL_ENABLED=0` to disable one event class without changing the shared destination config.
 If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
 The local gateway allows explicit `niemand-work` routing and `hook:dialpad:` session keys.
+For first-time or unknown inbound contacts, the payload also carries a `firstContact` hint that tells OpenClaw to enrich identity, look up business context, draft a reply, and suggest Dialpad contact sync when the match is clear.
+That pattern is CRM-agnostic: Attio is one example, but the same setup works with HubSpot, Pipedrive, Airtable, a spreadsheet, or a custom directory service downstream.
 
 Create/list webhook subscriptions:
 

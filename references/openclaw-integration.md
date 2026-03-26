@@ -114,6 +114,40 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
 - `channel`
 - `to`
 - `agentId`
+- `firstContact`
+
+### First-Contact Assist Hint
+
+The webhook may include a `firstContact` object for first-time or otherwise unknown inbound contacts. It is an additive hint, not a required field.
+
+```json
+{
+  "knownContact": false,
+  "needsIdentityLookup": true,
+  "needsBusinessContext": true,
+  "needsDraftReply": true,
+  "needsDialpadContactSync": true,
+  "keepBrief": false,
+  "contactName": null,
+  "senderNumber": "+14155550123",
+  "recipientNumber": "+14155201316",
+  "lineDisplay": "Sales (415) 520-1316",
+  "eventType": "sms",
+  "lookup": {
+    "status": "not_found",
+    "degraded": false,
+    "degradedReason": null
+  }
+}
+```
+
+Interpretation:
+
+- when `knownContact` is `false`, do the identity/business lookup first
+- use Attio if that is your source of truth, or plug in a different CRM/directory if you do not use Attio
+- if lookup is still ambiguous, use web research as fallback and keep the output concise
+- if the match is clear, suggest Dialpad contact normalization or update
+- if `keepBrief` is `true`, skip the long background pass and stay short
 
 ### SMS Example
 
@@ -125,7 +159,25 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
   "deliver": true,
   "channel": "telegram",
   "to": "-5102073225",
-  "agentId": "niemand-work"
+  "agentId": "niemand-work",
+  "firstContact": {
+    "knownContact": false,
+    "needsIdentityLookup": true,
+    "needsBusinessContext": true,
+    "needsDraftReply": true,
+    "needsDialpadContactSync": true,
+    "keepBrief": false,
+    "contactName": null,
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "sms",
+    "lookup": {
+      "status": "not_found",
+      "degraded": false,
+      "degradedReason": null
+    }
+  }
 }
 ```
 
@@ -136,7 +188,25 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
   "message": "📞 Dialpad Missed Call\nFrom: Jane Doe (+14155550123)\nLine: Sales (415) 520-1316\nTime: 1760000000000\nCall ID: call-123",
   "name": "Dialpad Missed Call",
   "sessionKey": "hook:dialpad:call:call-123",
-  "deliver": true
+  "deliver": true,
+  "firstContact": {
+    "knownContact": true,
+    "needsIdentityLookup": false,
+    "needsBusinessContext": false,
+    "needsDraftReply": false,
+    "needsDialpadContactSync": false,
+    "keepBrief": true,
+    "contactName": "Jane Doe",
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "missed_call",
+    "lookup": {
+      "status": "resolved",
+      "degraded": false,
+      "degradedReason": null
+    }
+  }
 }
 ```
 
@@ -181,7 +251,25 @@ SMS:
   "line": "Sales (415) 520-1316",
   "timestamp": 1760000000000,
   "body": "Need a callback",
-  "callId": null
+  "callId": null,
+  "firstContact": {
+    "knownContact": false,
+    "needsIdentityLookup": true,
+    "needsBusinessContext": true,
+    "needsDraftReply": true,
+    "needsDialpadContactSync": true,
+    "keepBrief": false,
+    "contactName": null,
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "sms",
+    "lookup": {
+      "status": "not_found",
+      "degraded": false,
+      "degradedReason": null
+    }
+  }
 }
 ```
 
@@ -196,7 +284,25 @@ Missed call:
   "line": "Sales (415) 520-1316",
   "timestamp": 1760000000000,
   "body": null,
-  "callId": "call-123"
+  "callId": "call-123",
+  "firstContact": {
+    "knownContact": true,
+    "needsIdentityLookup": false,
+    "needsBusinessContext": false,
+    "needsDraftReply": false,
+    "needsDialpadContactSync": false,
+    "keepBrief": true,
+    "contactName": "Jane Doe",
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "missed_call",
+    "lookup": {
+      "status": "resolved",
+      "degraded": false,
+      "degradedReason": null
+    }
+  }
 }
 ```
 

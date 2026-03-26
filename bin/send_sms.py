@@ -134,9 +134,6 @@ def annotate_message_status(result: object) -> object:
         annotated["delivery_status_raw"] = raw_status
         annotated["status"] = normalized_status
         annotated["status_raw"] = raw_status
-        if "message_status" in annotated:
-            annotated["message_status"] = normalized_status
-            annotated["message_status_raw"] = raw_status
     return annotated
 
 

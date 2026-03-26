@@ -74,10 +74,28 @@ class JsonContractTests(unittest.TestCase):
         self._assert_success(parsed, "send_sms.send")
         self.assertEqual(parsed["data"]["status"], "accepted/queued")
         self.assertEqual(parsed["data"]["status_raw"], "pending")
-        self.assertEqual(parsed["data"]["message_status"], "accepted/queued")
-        self.assertEqual(parsed["data"]["message_status_raw"], "pending")
+        self.assertEqual(parsed["data"]["message_status"], "pending")
         self.assertEqual(parsed["data"]["delivery_status"], "accepted/queued")
         self.assertEqual(parsed["data"]["delivery_status_raw"], "pending")
+
+    def test_send_sms_json_success_envelope_status_fallback(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.run_generated_json", return_value={"id": "msg-2", "status": "pending"}), \
+                patch("send_sms.require_api_key"):
+            code, out, err = self._run(
+                send_sms,
+                ["bin/send_sms.py", "--to", "+14155550111", "--message", "hello", "--from", "+14155201316", "--json"],
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "send_sms.send")
+        self.assertEqual(parsed["data"]["status"], "accepted/queued")
+        self.assertEqual(parsed["data"]["status_raw"], "pending")
+        self.assertEqual(parsed["data"]["delivery_status"], "accepted/queued")
+        self.assertEqual(parsed["data"]["delivery_status_raw"], "pending")
+        self.assertNotIn("message_status", parsed["data"])
 
     def test_send_sms_json_error_envelope(self):
         with patch(

@@ -76,6 +76,7 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 8. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
 9. **Call history:** `bin/list_calls.py` is the supported call-history command for agents. Use `--json` when downstream automation needs a deterministic response envelope.
 10. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
+11. **Current-turn verification:** "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory. If the current turn has not verified the action yet, say that plainly and run the tool now.
 
 ## Reference Documentation
 

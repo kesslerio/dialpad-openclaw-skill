@@ -357,6 +357,12 @@ The safe default is:
    - reject
    - mark for callback
 
+Current-turn verification applies here too:
+
+- "Already sent" and "Already updated" are only valid after a fresh tool result in the same turn.
+- Stale session memory is not proof of a send or contact update.
+- If the current turn has not verified the action yet, say so plainly and continue with the send/update step.
+
 Suggested state fields:
 
 ```json
@@ -397,6 +403,8 @@ OpenClaw should:
 - dedupe using `sessionKey`
 - never assume duplicate delivery means duplicate user intent
 - separate "draft generation" from "send authority"
+- require current-turn verification before any success claim about sending or updating
+- treat stale context as non-evidence for "Already sent" or "Already updated"
 
 Outbound send must always enforce `sendMode`.
 

@@ -1,11 +1,15 @@
+import io
+import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
+import webhook_server
 from webhook_server import (
     assess_inbound_sms_alert_eligibility,
     classify_inbound_notification,
@@ -14,6 +18,37 @@ from webhook_server import (
     is_sensitive_message,
     resolve_missed_call_context,
 )
+
+
+def _build_handler(payload, headers=None):
+    raw = json.dumps(payload).encode("utf-8")
+    handler = object.__new__(webhook_server.DialpadWebhookHandler)
+    handler.headers = {"Content-Length": str(len(raw))}
+    if headers:
+        handler.headers.update(headers)
+    handler.rfile = io.BytesIO(raw)
+    handler.wfile = io.BytesIO()
+    handler.client_address = ("127.0.0.1", 12345)
+
+    status = {"code": None}
+
+    def _send_response(code):
+        status["code"] = code
+
+    def _send_header(_name, _value):
+        return None
+
+    def _end_headers():
+        return None
+
+    def _send_error(code, _message=None):
+        status["code"] = code
+
+    handler.send_response = _send_response
+    handler.send_header = _send_header
+    handler.end_headers = _end_headers
+    handler.send_error = _send_error
+    return handler, status
 
 
 class WebhookNotificationClassificationTests(unittest.TestCase):
@@ -277,6 +312,252 @@ class MissedCallResolutionTests(unittest.TestCase):
         resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
         self.assertIsNone(resolved["to_number"])
         self.assertEqual(resolved["line_resolution_path"], "unresolved")
+
+
+class CallWebhookHandlerTests(unittest.TestCase):
+    class _FakeMoment:
+        def __init__(self, text):
+            self._text = text
+
+        def astimezone(self):
+            return self
+
+        def strftime(self, _fmt):
+            return self._text
+
+        def isoformat(self):
+            return "2026-03-26T11:11:00-07:00"
+
+    class _FakeDatetime:
+        @classmethod
+        def now(cls):
+            return CallWebhookHandlerTests._FakeMoment("11:11 PM")
+
+        @classmethod
+        def fromtimestamp(cls, _value):
+            return CallWebhookHandlerTests._FakeMoment("9:42 AM")
+
+    def test_call_webhook_requires_auth_when_secret_configured(self):
+        with patch.object(webhook_server, "WEBHOOK_SECRET", "secret-123"):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        self.assertEqual(status["code"], 401)
+
+    def test_inbound_missed_call_forwards_hook_and_telegram(self):
+        hook_calls = []
+        telegram_messages = []
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    side_effect=lambda normalized_event, line_display=None: (
+                        hook_calls.append({"normalized_event": normalized_event, "line_display": line_display}) or
+                        (True, "http_200")
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(len(hook_calls), 1)
+        self.assertEqual(hook_calls[0]["normalized_event"]["event_type"], "missed_call")
+        self.assertEqual(hook_calls[0]["normalized_event"]["call_id"], "call-123")
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertTrue(response["missed_call"])
+        self.assertTrue(response["hook_forwarded"])
+        self.assertEqual(response["hook_status"], "http_200")
+        self.assertTrue(response["telegram_sent"])
+
+    def test_inbound_missed_call_respects_disabled_hook_config(self):
+        telegram_messages = []
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", False), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertTrue(response["missed_call"])
+        self.assertFalse(response["hook_forwarded"])
+        self.assertEqual(response["hook_status"], "disabled_by_config")
+        self.assertTrue(response["telegram_sent"])
+
+    def test_inbound_missed_call_hook_failure_keeps_webhook_200(self):
+        telegram_messages = []
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    return_value=(False, "request_failed"),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertTrue(response["missed_call"])
+        self.assertFalse(response["hook_forwarded"])
+        self.assertEqual(response["hook_status"], "request_failed")
+        self.assertTrue(response["telegram_sent"])
+
+    def test_inbound_missed_call_token_missing_keeps_webhook_200(self):
+        telegram_messages = []
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", ""), \
+                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_state": "missed",
+                "call_id": "call-123",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertTrue(response["missed_call"])
+        self.assertFalse(response["hook_forwarded"])
+        self.assertEqual(response["hook_status"], "token_missing")
+        self.assertTrue(response["telegram_sent"])
+
+    def test_outbound_call_does_not_forward_hook_or_telegram(self):
+        hook_calls = []
+        telegram_messages = []
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    side_effect=lambda normalized_event, line_display=None: (
+                        hook_calls.append({"normalized_event": normalized_event, "line_display": line_display}) or
+                        (True, "http_200")
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "outbound",
+                "call_direction": "outbound",
+                "duration": 12,
+                "call_state": "answered",
+                "call_id": "call-123",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(hook_calls, [])
+        self.assertEqual(telegram_messages, [])
+        self.assertFalse(response["missed_call"])
+        self.assertIsNone(response["hook_forwarded"])
+        self.assertIsNone(response["hook_status"])
+        self.assertIsNone(response["telegram_sent"])
+
+    def test_inbound_missed_call_telegram_uses_event_timestamp_and_escapes_markdown(self):
+        telegram_messages = []
+
+        with patch.object(webhook_server, "datetime", self._FakeDatetime), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", False), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(webhook_server, "get_contact_name", return_value="Jane_Doe"), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertIn("*Time:* 9:42 AM", telegram_messages[0])
+        self.assertIn(r"Jane\_Doe", telegram_messages[0])
+        self.assertNotIn("11:11 PM", telegram_messages[0])
 
 
 if __name__ == "__main__":

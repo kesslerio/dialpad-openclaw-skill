@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Dialpad SMS Webhook Server with SQLite Storage and OpenClaw Hooks SMS Ingress
+Dialpad SMS Webhook Server with SQLite Storage and OpenClaw Hooks Ingress
 
 Receives Dialpad SMS events, stores in SQLite with FTS5 search, and sends
-OpenClaw hook messages for inbound SMS.
+OpenClaw hook messages for inbound SMS and missed calls.
 
 Features:
 - SQLite storage with FTS5 full-text search (via webhook_sqlite.py)
-- OpenClaw hooks forwarding for inbound SMS with contact name resolution
+- OpenClaw hooks forwarding for inbound SMS and missed calls
 - Telegram notifications for missed calls and voicemails
 - Health check endpoint
 - Graceful error handling (hook/Telegram failures don't break webhooks)
@@ -21,12 +21,15 @@ Environment Variables:
 - DIALPAD_API_KEY - Dialpad API key (required for contact lookup)
 - DIALPAD_WEBHOOK_SECRET - webhook auth secret (optional, enables signature/JWT verification)
 - OPENCLAW_GATEWAY_URL (default: http://127.0.0.1:8080)
-- OPENCLAW_HOOKS_TOKEN (required for SMS hook forwarding)
+- OPENCLAW_HOOKS_TOKEN (required for OpenClaw hook forwarding)
 - OPENCLAW_HOOKS_PATH (default: /hooks/agent)
 - OPENCLAW_HOOKS_NAME (default: Dialpad SMS)
+- OPENCLAW_HOOKS_CALL_NAME (default: Dialpad Missed Call)
 - OPENCLAW_HOOKS_CHANNEL (optional)
 - OPENCLAW_HOOKS_TO (optional)
 - OPENCLAW_HOOKS_AGENT_ID (optional)
+- OPENCLAW_HOOKS_SMS_ENABLED (default: enabled)
+- OPENCLAW_HOOKS_CALL_ENABLED (default: enabled)
 """
 
 import json
@@ -51,6 +54,21 @@ sys.path.insert(0, str(skill_dir))
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook
 
+
+def parse_bool_env(raw_value, default=True):
+    """Parse common truthy/falsey env values, falling back when unset."""
+    if raw_value is None:
+        return default
+    text = str(raw_value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 # Environment configuration (NO HARDCODED SECRETS)
 PORT = int(os.environ.get("PORT", "8081"))
 WEBHOOK_SECRET = os.environ.get("DIALPAD_WEBHOOK_SECRET", "")
@@ -62,9 +80,12 @@ OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:
 OPENCLAW_HOOKS_TOKEN = os.environ.get("OPENCLAW_HOOKS_TOKEN", "")
 OPENCLAW_HOOKS_PATH = os.environ.get("OPENCLAW_HOOKS_PATH", "/hooks/agent")
 OPENCLAW_HOOKS_NAME = os.environ.get("OPENCLAW_HOOKS_NAME", "Dialpad SMS")
+OPENCLAW_HOOKS_CALL_NAME = os.environ.get("OPENCLAW_HOOKS_CALL_NAME", "Dialpad Missed Call")
 OPENCLAW_HOOKS_CHANNEL = os.environ.get("OPENCLAW_HOOKS_CHANNEL", "")
 OPENCLAW_HOOKS_TO = os.environ.get("OPENCLAW_HOOKS_TO", "")
 OPENCLAW_HOOKS_AGENT_ID = os.environ.get("OPENCLAW_HOOKS_AGENT_ID", "")
+OPENCLAW_HOOKS_SMS_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_SMS_ENABLED"), True)
+OPENCLAW_HOOKS_CALL_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_CALL_ENABLED"), True)
 DIALPAD_SMS_TELEGRAM_NOTIFY = os.environ.get("DIALPAD_SMS_TELEGRAM_NOTIFY", "1").lower() in {"1", "true", "yes", "on"}
 DIALPAD_PRIORITY_ROUTE_TO = os.environ.get("DIALPAD_PRIORITY_ROUTE_TO", "")
 DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", "")
@@ -1035,6 +1056,7 @@ def normalize_sms_payload(data, contact_info=None):
     sender = contact_name or sender_number or "Unknown"
 
     return {
+        "event_type": "sms",
         "sender": sender,
         "sender_number": sender_number,
         "recipient_number": recipient_number,
@@ -1046,28 +1068,85 @@ def normalize_sms_payload(data, contact_info=None):
     }
 
 
-def build_hook_session_key(normalized_sms):
+def normalize_call_hook_payload(data, resolved_context, contact_info=None):
+    """Normalize missed-call context to a consistent hook event object."""
+    sender_number = resolved_context.get("from_number")
+    recipient_number = resolved_context.get("to_number")
+    timestamp = resolved_context.get("event_ts_ms") or (
+        data.get("date_started")
+        or data.get("date_start")
+        or data.get("start_time")
+        or data.get("timestamp")
+    )
+    call_id = data.get("call_id") or data.get("id")
+    line_display = resolved_context.get("line_display") or get_line_name(recipient_number)
+    sender = contact_info or sender_number or "Unknown"
+
+    return {
+        "event_type": "missed_call",
+        "sender": sender,
+        "sender_number": sender_number,
+        "recipient_number": recipient_number,
+        "timestamp": timestamp,
+        "call_id": call_id,
+        "line_display": line_display,
+        "direction": str(data.get("call_direction", data.get("direction", "unknown"))).lower(),
+    }
+
+
+def build_hook_session_key(normalized_event):
     """Build stable OpenClaw hook session key with fallbacks."""
+    event_type = normalized_event.get("event_type") or "sms"
+    if event_type == "missed_call":
+        call_id = normalized_event.get("call_id")
+        if call_id:
+            return f"hook:dialpad:call:{call_id}"
+
+        sender_number = normalize_phone_number(normalized_event.get("sender_number"))
+        timestamp = normalized_event.get("timestamp")
+        if sender_number and timestamp is not None:
+            return f"hook:dialpad:call:{sender_number}:{timestamp}"
+        if timestamp is not None:
+            return f"hook:dialpad:call:{timestamp}"
+        if sender_number:
+            return f"hook:dialpad:call:{sender_number}"
+        return "hook:dialpad:call:unknown"
+
     candidate = (
-        normalized_sms.get("conversation_id")
-        or normalized_sms.get("message_id")
-        or normalize_phone_number(normalized_sms.get("sender_number"))
+        normalized_event.get("conversation_id")
+        or normalized_event.get("message_id")
+        or normalize_phone_number(normalized_event.get("sender_number"))
         or "unknown"
     )
     return f"hook:dialpad:sms:{candidate}"
 
 
-def format_hook_message(normalized_sms, line_display=None):
-    """Build hook message text with a clear alert-style SMS format."""
-    sender = normalized_sms.get("sender") or "Unknown"
-    sender_number = normalized_sms.get("sender_number") or "Unknown"
-    recipient_number = normalized_sms.get("recipient_number")
-    timestamp = normalized_sms.get("timestamp")
-    body = normalized_sms.get("text", "")
+def format_hook_message(normalized_event, line_display=None):
+    """Build hook message text for a normalized OpenClaw hook event."""
+    sender = normalized_event.get("sender") or "Unknown"
+    sender_number = normalized_event.get("sender_number") or "Unknown"
+    recipient_number = normalized_event.get("recipient_number")
+    timestamp = normalized_event.get("timestamp")
+    event_type = normalized_event.get("event_type") or "sms"
+    resolved_line = line_display or normalized_event.get("line_display")
 
+    if event_type == "missed_call":
+        lines = ["📞 Dialpad Missed Call", f"From: {sender} ({sender_number})"]
+        if resolved_line:
+            lines.append(f"Line: {resolved_line}")
+        elif recipient_number:
+            lines.append(f"Line: {recipient_number}")
+        if timestamp is not None:
+            lines.append(f"Time: {timestamp}")
+        call_id = normalized_event.get("call_id")
+        if call_id:
+            lines.append(f"Call ID: {call_id}")
+        return "\n".join(lines)
+
+    body = normalized_event.get("text", "")
     lines = ["📩 Dialpad SMS", f"From: {sender} ({sender_number})"]
-    if line_display:
-        lines.append(f"To: {line_display}")
+    if resolved_line:
+        lines.append(f"To: {resolved_line}")
     elif recipient_number:
         lines.append(f"To: {recipient_number}")
     if timestamp is not None:
@@ -1082,16 +1161,21 @@ def get_openclaw_hooks_url():
     return f"{OPENCLAW_GATEWAY_URL.rstrip('/')}/{OPENCLAW_HOOKS_PATH.lstrip('/')}"
 
 
-def build_openclaw_hook_payload(normalized_sms, line_display=None):
-    """Build /hooks/agent payload for a normalized inbound SMS."""
+def build_openclaw_hook_payload(normalized_event, line_display=None):
+    """Build /hooks/agent payload for a normalized hook event."""
+    event_type = normalized_event.get("event_type") or "sms"
+    hook_name = OPENCLAW_HOOKS_NAME
+    if event_type == "missed_call":
+        hook_name = OPENCLAW_HOOKS_CALL_NAME
+
     payload = {
-        "message": format_hook_message(normalized_sms, line_display=line_display),
-        "name": OPENCLAW_HOOKS_NAME,
-        "sessionKey": build_hook_session_key(normalized_sms),
+        "message": format_hook_message(normalized_event, line_display=line_display),
+        "name": hook_name,
+        "sessionKey": build_hook_session_key(normalized_event),
         "deliver": True,
     }
 
-    sender_number_normalized = normalize_phone_number(normalized_sms.get("sender_number"))
+    sender_number_normalized = normalize_phone_number(normalized_event.get("sender_number"))
     target_to = OPENCLAW_HOOKS_TO
     if (
         DIALPAD_PRIORITY_ROUTE_TO
@@ -1109,16 +1193,27 @@ def build_openclaw_hook_payload(normalized_sms, line_display=None):
     return payload
 
 
-def send_sms_to_openclaw_hooks(normalized_sms, line_display=None):
+def send_to_openclaw_hooks(normalized_event, line_display=None):
     """
-    Forward normalized SMS payload to OpenClaw hooks.
+    Forward a normalized event payload to OpenClaw hooks.
     Returns (success: bool, status: str).
     """
+    event_type = normalized_event.get("event_type") or "sms"
+    hooks_enabled = OPENCLAW_HOOKS_SMS_ENABLED
+    event_label = "SMS"
+    if event_type == "missed_call":
+        hooks_enabled = OPENCLAW_HOOKS_CALL_ENABLED
+        event_label = "missed call"
+
+    if not hooks_enabled:
+        print(f"⚠️  OpenClaw {event_label} hook forwarding disabled by config")
+        return False, "disabled_by_config"
+
     if not OPENCLAW_HOOKS_TOKEN:
-        print("⚠️  OPENCLAW_HOOKS_TOKEN is not configured (SMS hooks forwarding disabled)")
+        print(f"⚠️  OPENCLAW_HOOKS_TOKEN is not configured ({event_label} hooks forwarding disabled)")
         return False, "token_missing"
 
-    payload = build_openclaw_hook_payload(normalized_sms, line_display=line_display)
+    payload = build_openclaw_hook_payload(normalized_event, line_display=line_display)
 
     url = get_openclaw_hooks_url()
     data = json.dumps(payload).encode("utf-8")
@@ -1138,8 +1233,16 @@ def send_sms_to_openclaw_hooks(normalized_sms, line_display=None):
                 return True, f"http_{status_code}"
             return False, f"http_{status_code}"
     except Exception as e:
-        print(f"❌ Error forwarding inbound SMS to OpenClaw hooks: {e}")
+        print(f"❌ Error forwarding {event_label} to OpenClaw hooks: {e}")
         return False, "request_failed"
+
+
+def send_sms_to_openclaw_hooks(normalized_sms, line_display=None):
+    """
+    Forward normalized SMS payload to OpenClaw hooks.
+    Returns (success: bool, status: str).
+    """
+    return send_to_openclaw_hooks(normalized_sms, line_display=line_display)
 
 
 class DialpadWebhookHandler(BaseHTTPRequestHandler):
@@ -1393,7 +1496,15 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         # Limit request body size to prevent memory exhaustion (1MB max)
         MAX_BODY_SIZE = 1024 * 1024  # 1MB
         content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
-        body = self.rfile.read(content_length).decode("utf-8")
+        raw_body = self.rfile.read(content_length)
+
+        auth_ok, auth_source = verify_webhook_auth(self.headers, raw_body, WEBHOOK_SECRET)
+        if not auth_ok:
+            log_line("❌ Unauthorized webhook request on /webhook/dialpad-call")
+            self.send_error(401, "Unauthorized")
+            return
+
+        body = raw_body.decode("utf-8")
 
         try:
             data = json.loads(body) if body else {}
@@ -1419,6 +1530,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             )
         )
 
+        hook_sent = False
+        hook_status = None
         telegram_sent = False
         if should_notify:
             resolved = resolve_missed_call_context(data)
@@ -1440,17 +1553,36 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             else:
                 from_display = f"`{from_num}`"
             time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
+            if call_ts is not None:
+                try:
+                    time_display = datetime.fromtimestamp(
+                        int(call_ts) / 1000
+                    ).astimezone().strftime("%I:%M %p").lstrip("0")
+                except (TypeError, ValueError, OSError, OverflowError):
+                    pass
 
             tg_text = (
                 f"📞 *Missed Call*\n"
-                f"*Line:* {to_display}\n"
-                f"*From:* {from_display}\n"
-                f"*Time:* {time_display}"
+                f"*Line:* {escape_telegram_markdown(to_display)}\n"
+                f"*From:* {escape_telegram_markdown(from_display)}\n"
+                f"*Time:* {escape_telegram_markdown(time_display)}"
+            )
+
+            normalized_event = normalize_call_hook_payload(
+                data,
+                resolved,
+                contact_info=contact_info,
+            )
+            hook_sent, hook_status = send_to_openclaw_hooks(
+                normalized_event,
+                line_display=line_display,
             )
             telegram_sent = send_to_telegram(tg_text)
 
             print(f"[{datetime.now().isoformat()}]")
             print(f"   📞 MISSED CALL: {from_num} -> {to_display}")
+            if WEBHOOK_SECRET:
+                print(f"   🔐 Auth: ✓ ({auth_source})")
             if call_ts:
                 print(f"   🕒 Event time: {call_ts}")
             print(
@@ -1458,11 +1590,14 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 f"caller={resolved['caller_resolution_path']}, "
                 f"line={resolved['line_resolution_path']}"
             )
+            print(f"   🪝 OpenClaw Hook: {'✓' if hook_sent else '✗'} ({hook_status})")
             print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
             print()
         else:
             print(f"[{datetime.now().isoformat()}]")
             print(f"   📞 CALL EVENT ignored (not inbound missed call)")
+            if WEBHOOK_SECRET:
+                print(f"   🔐 Auth: ✓ ({auth_source})")
             print()
 
         # Always return 200 OK (graceful degradation)
@@ -1472,6 +1607,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         response = {
             "status": "ok",
             "missed_call": should_notify,
+            "hook_forwarded": hook_sent if should_notify else None,
+            "hook_status": hook_status if should_notify else None,
             "telegram_sent": telegram_sent if should_notify else None
         }
         self.wfile.write(json.dumps(response).encode())
@@ -1569,10 +1706,13 @@ def main():
     print(f"  - Dialpad API: {'✓' if DIALPAD_API_KEY else '✗ (contact lookup disabled)'}")
     print(f"  - OpenClaw Gateway URL: {OPENCLAW_GATEWAY_URL}")
     print(f"  - OpenClaw Hooks Path: {OPENCLAW_HOOKS_PATH}")
-    print(f"  - OpenClaw Hooks Token: {'✓' if OPENCLAW_HOOKS_TOKEN else '✗ (SMS hook forwarding disabled)'}")
+    print(f"  - OpenClaw Hooks Token: {'✓' if OPENCLAW_HOOKS_TOKEN else '✗ (hook forwarding disabled)'}")
     print(f"  - OpenClaw Hooks Name: {OPENCLAW_HOOKS_NAME}")
+    print(f"  - OpenClaw Call Hooks Name: {OPENCLAW_HOOKS_CALL_NAME}")
     print(f"  - OpenClaw Hooks Channel: {OPENCLAW_HOOKS_CHANNEL or '(unset)'}")
     print(f"  - OpenClaw Hooks To: {OPENCLAW_HOOKS_TO or '(unset)'}")
+    print(f"  - OpenClaw SMS Hooks Enabled: {'✓' if OPENCLAW_HOOKS_SMS_ENABLED else '✗'}")
+    print(f"  - OpenClaw Call Hooks Enabled: {'✓' if OPENCLAW_HOOKS_CALL_ENABLED else '✗'}")
     print(f"  - Priority Route To: {DIALPAD_PRIORITY_ROUTE_TO or '(unset)'}")
     if PRIORITY_ROUTE_PHONES:
         print(f"  - Priority Route Phones: {', '.join(sorted(PRIORITY_ROUTE_PHONES))}")

@@ -1591,7 +1591,15 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 data.get("start_time") or
                 data.get("timestamp")
             )
-            contact_info = get_contact_name(from_num) if from_num != "Unknown" else None
+            sender_enrichment = (
+                lookup_contact_enrichment(from_num) if from_num != "Unknown" else {
+                    "contact_name": None,
+                    "status": "not_applicable",
+                    "degraded": False,
+                    "degraded_reason": None,
+                }
+            )
+            contact_info = sender_enrichment.get("contact_name")
             line_display = resolved["line_display"] or get_line_name(to_num)
             to_display = line_display if line_display else "Unknown"
             if contact_info:
@@ -1600,12 +1608,6 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 from_display = "Unknown"
             else:
                 from_display = f"`{from_num}`"
-            sender_enrichment = {
-                "contact_name": contact_info,
-                "status": "resolved" if contact_info else "not_found",
-                "degraded": False,
-                "degraded_reason": None,
-            }
             time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
             if call_ts is not None:
                 try:

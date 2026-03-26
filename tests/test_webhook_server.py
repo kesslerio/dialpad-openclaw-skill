@@ -356,7 +356,16 @@ class CallWebhookHandlerTests(unittest.TestCase):
 
         with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
-                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": "Jane Doe",
+                        "status": "resolved",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
                 patch.object(
                     webhook_server,
                     "send_to_openclaw_hooks",
@@ -400,7 +409,16 @@ class CallWebhookHandlerTests(unittest.TestCase):
 
         with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", False), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
-                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": "Jane Doe",
+                        "status": "resolved",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
@@ -431,7 +449,16 @@ class CallWebhookHandlerTests(unittest.TestCase):
 
         with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
-                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": "Jane Doe",
+                        "status": "resolved",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
                 patch.object(
                     webhook_server,
                     "send_to_openclaw_hooks",
@@ -466,7 +493,16 @@ class CallWebhookHandlerTests(unittest.TestCase):
 
         with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", ""), \
-                patch.object(webhook_server, "get_contact_name", return_value="Jane Doe"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": "Jane Doe",
+                        "status": "resolved",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
@@ -537,7 +573,16 @@ class CallWebhookHandlerTests(unittest.TestCase):
         with patch.object(webhook_server, "datetime", self._FakeDatetime), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", False), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
-                patch.object(webhook_server, "get_contact_name", return_value="Jane_Doe"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": "Jane_Doe",
+                        "status": "resolved",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
                 patch.object(
                     webhook_server,
                     "send_to_telegram",

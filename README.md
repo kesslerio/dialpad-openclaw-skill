@@ -81,6 +81,7 @@ If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accor
 The local gateway allows explicit `niemand-work` routing and `hook:dialpad:` session keys.
 For first-time or unknown inbound contacts, the payload also carries a `firstContact` hint that tells OpenClaw to enrich identity, look up business context, draft a reply, and suggest Dialpad contact sync when the match is clear.
 That pattern is CRM-agnostic: Attio is one example, but the same setup works with HubSpot, Pipedrive, Airtable, a spreadsheet, or a custom directory service downstream.
+Current-turn verification still applies: "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory.
 When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` get a short SMS acknowledgment automatically before the hook handoff continues. Missed calls get a "sorry we missed you" variant; SMS and voicemail get a "we'll be in touch shortly" variant.
 
 Create/list webhook subscriptions:

@@ -192,6 +192,7 @@ Behavior notes:
 - For unknown inbound contacts, the hook may include a `firstContact` hint with lookup and reply-drafting signals; downstream users can map that to Attio, HubSpot, Airtable, or any other source of truth
 - The webhook server also adds `autoReply` metadata when it sends the sales-line acknowledgment directly, so downstream automation can avoid double-sending the same reply
 - The repo preserves the current top-level OpenClaw hook envelope and does not claim end-to-end validation of downstream proactive enrichment behavior
+- Current-turn verification still applies to `niemand-work`: stale context must not produce "Already sent" or "Already updated"; only a fresh tool result in the same turn can justify those claims.
 - If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
 
 ### Advanced Webhooks (CLI)

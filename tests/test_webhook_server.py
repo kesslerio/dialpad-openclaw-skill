@@ -353,6 +353,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
     def test_inbound_missed_call_forwards_hook_and_telegram(self):
         hook_calls = []
         telegram_messages = []
+        sms_calls = []
 
         with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
@@ -360,8 +361,12 @@ class CallWebhookHandlerTests(unittest.TestCase):
                     webhook_server,
                     "lookup_contact_enrichment",
                     return_value={
-                        "contact_name": "Jane Doe",
-                        "status": "resolved",
+                        "contact_name": None,
+                        "first_name": None,
+                        "last_name": None,
+                        "company": None,
+                        "job_title": None,
+                        "status": "not_found",
                         "degraded": False,
                         "degraded_reason": None,
                     },
@@ -378,6 +383,18 @@ class CallWebhookHandlerTests(unittest.TestCase):
                     webhook_server,
                     "send_to_telegram",
                     side_effect=lambda text: telegram_messages.append(text) or True,
+                ), \
+                patch.object(
+                    webhook_server,
+                    "dialpad_send_sms",
+                    side_effect=lambda to_numbers, message, from_number=None, infer_country_code=False: sms_calls.append(
+                        {
+                            "to_numbers": to_numbers,
+                            "message": message,
+                            "from_number": from_number,
+                            "infer_country_code": infer_country_code,
+                        }
+                    ) or {"id": "msg-1", "message_status": "pending"},
                 ):
             payload = {
                 "direction": "inbound",
@@ -394,15 +411,19 @@ class CallWebhookHandlerTests(unittest.TestCase):
         response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
         self.assertEqual(len(hook_calls), 1)
+        self.assertEqual(len(sms_calls), 1)
         self.assertEqual(hook_calls[0]["normalized_event"]["event_type"], "missed_call")
         self.assertEqual(hook_calls[0]["normalized_event"]["call_id"], "call-123")
-        self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["knownContact"], True)
-        self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["keepBrief"], True)
+        self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["knownContact"], False)
+        self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["keepBrief"], False)
+        self.assertIn("ShapeScale for Business Sales", sms_calls[0]["message"])
         self.assertEqual(len(telegram_messages), 1)
         self.assertTrue(response["missed_call"])
         self.assertTrue(response["hook_forwarded"])
         self.assertEqual(response["hook_status"], "http_200")
         self.assertTrue(response["telegram_sent"])
+        self.assertTrue(response["auto_reply_sent"])
+        self.assertEqual(response["auto_reply_status"], "accepted/queued")
 
     def test_inbound_missed_call_respects_disabled_hook_config(self):
         telegram_messages = []
@@ -605,6 +626,60 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertIn("*Time:* 9:42 AM", telegram_messages[0])
         self.assertIn(r"Jane\_Doe", telegram_messages[0])
         self.assertNotIn("11:11 PM", telegram_messages[0])
+
+
+class VoicemailWebhookHandlerTests(unittest.TestCase):
+    def test_voicemail_sales_auto_reply_reaches_sender(self):
+        sms_calls = []
+        telegram_messages = []
+
+        with patch.object(
+            webhook_server,
+            "lookup_contact_enrichment",
+            return_value={
+                "contact_name": None,
+                "first_name": None,
+                "last_name": None,
+                "company": None,
+                "job_title": None,
+                "status": "not_found",
+                "degraded": False,
+                "degraded_reason": None,
+            },
+        ), patch.object(
+            webhook_server,
+            "send_to_telegram",
+            side_effect=lambda text: telegram_messages.append(text) or True,
+        ), patch.object(
+            webhook_server,
+            "dialpad_send_sms",
+            side_effect=lambda to_numbers, message, from_number=None, infer_country_code=False: sms_calls.append(
+                {
+                    "to_numbers": to_numbers,
+                    "message": message,
+                    "from_number": from_number,
+                    "infer_country_code": infer_country_code,
+                }
+            ) or {"id": "msg-3", "message_status": "pending"},
+        ):
+            payload = {
+                "from_number": "+14155550123",
+                "to_number": ["+14155201316"],
+                "duration": 19,
+                "voicemail_transcription": "Please call me back.",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_voicemail_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertEqual(len(sms_calls), 1)
+        self.assertEqual(sms_calls[0]["to_numbers"], ["+14155550123"])
+        self.assertEqual(sms_calls[0]["from_number"], "+14155201316")
+        self.assertIn("thanks for the voicemail", sms_calls[0]["message"])
+        self.assertTrue(response["auto_reply_sent"])
+        self.assertEqual(response["auto_reply_status"], "accepted/queued")
 
 
 if __name__ == "__main__":

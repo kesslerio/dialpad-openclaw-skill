@@ -178,6 +178,7 @@ export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
 export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
+export DIALPAD_AUTO_REPLY_ENABLED="1"
 ```
 
 Behavior notes:
@@ -185,9 +186,11 @@ Behavior notes:
 - Inbound SMS forwarding is enabled by default when `OPENCLAW_HOOKS_TOKEN` is configured
 - Inbound missed-call forwarding is enabled by default when `OPENCLAW_HOOKS_TOKEN` is configured
 - Set `OPENCLAW_HOOKS_SMS_ENABLED=0` or `OPENCLAW_HOOKS_CALL_ENABLED=0` to disable one event class
-- Voicemail notifications remain Telegram-only in this repo
+- First-contact auto-replies are only sent on the sales line `(415) 520-1316` when `DIALPAD_AUTO_REPLY_ENABLED` is truthy
+- Voicemail notifications remain Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails also get the SMS acknowledgment when auto-replies are enabled
 - The local OpenClaw gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
 - For unknown inbound contacts, the hook may include a `firstContact` hint with lookup and reply-drafting signals; downstream users can map that to Attio, HubSpot, Airtable, or any other source of truth
+- The webhook server also adds `autoReply` metadata when it sends the sales-line acknowledgment directly, so downstream automation can avoid double-sending the same reply
 - The repo preserves the current top-level OpenClaw hook envelope and does not claim end-to-end validation of downstream proactive enrichment behavior
 - If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
 

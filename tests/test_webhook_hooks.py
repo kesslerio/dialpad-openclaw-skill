@@ -156,6 +156,12 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
                 "degradedReason": None,
             },
         },
+        "auto_reply": {
+            "eligible": True,
+            "sent": True,
+            "status": "accepted/queued",
+            "message": "Hi there, thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly.",
+        },
     }
 
     payload = build_openclaw_hook_payload(normalized, line_display="Support")
@@ -165,6 +171,7 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
     assert payload["agentId"] == "niemand-work"
     assert payload["sessionKey"] == "hook:dialpad:sms:conv-123"
     assert payload["firstContact"]["needsDraftReply"] is True
+    assert payload["autoReply"]["sent"] is True
 
 
 def test_build_hook_session_key_for_missed_call_fallback_order():
@@ -236,6 +243,12 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
                 "degradedReason": None,
             },
         },
+        "auto_reply": {
+            "eligible": False,
+            "sent": False,
+            "status": "not_eligible",
+            "message": None,
+        },
     }
 
     payload = build_openclaw_hook_payload(normalized, line_display="Support")
@@ -244,3 +257,4 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
     assert payload["sessionKey"] == "hook:dialpad:call:call-123"
     assert "📞 Dialpad Missed Call" in payload["message"]
     assert payload["firstContact"]["keepBrief"] is True
+    assert payload["autoReply"]["eligible"] is False

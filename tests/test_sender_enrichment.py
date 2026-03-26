@@ -277,6 +277,93 @@ def test_inbound_webhook_hook_marks_unknown_sender_first_contact_candidate(monke
     assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is False
 
 
+def test_inbound_sales_sms_auto_replies_on_first_contact(monkeypatch):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "first_name": None,
+            "last_name": None,
+            "company": None,
+            "job_title": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+
+    hook_calls = []
+    sms_calls = []
+
+    def _fake_hook(normalized_sms, line_display=None):
+        hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display})
+        return True, "http_200"
+
+    def _fake_send_sms(to_numbers, message, from_number=None, infer_country_code=False):
+        sms_calls.append(
+            {
+                "to_numbers": to_numbers,
+                "message": message,
+                "from_number": from_number,
+                "infer_country_code": infer_country_code,
+            }
+        )
+        return {"id": "msg-1", "message_status": "pending"}
+
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", _fake_hook)
+    monkeypatch.setattr(webhook_server, "dialpad_send_sms", _fake_send_sms)
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Do you have the same type of machine?",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert len(sms_calls) == 1
+    assert sms_calls[0]["to_numbers"] == ["+14155550123"]
+    assert sms_calls[0]["from_number"] == "+14155201316"
+    assert "ShapeScale for Business Sales" in sms_calls[0]["message"]
+    assert response["auto_reply_sent"] is True
+    assert response["auto_reply_status"] == "accepted/queued"
+
+
+@pytest.mark.parametrize("lookup_status", ["disabled", "not_applicable", "resolved"])
+def test_should_send_proactive_reply_requires_unknown_lookup(monkeypatch, lookup_status):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155201316",
+        "first_contact": {
+            "knownContact": False,
+            "lookup": {
+                "status": lookup_status,
+                "degraded": False,
+                "degradedReason": None,
+            },
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+
+
 def test_inbound_telegram_escapes_markdown_content(monkeypatch):
     monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
     monkeypatch.setattr(

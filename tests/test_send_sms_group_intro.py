@@ -138,6 +138,25 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(payload["from_number"], "+14155201316")
         self.assertIn("Selected sender: +14155201316", out)
 
+    def test_send_sms_reports_accepted_queued_for_pending_result(self):
+        def fake_run_generated(cmd: list[str]):
+            self.assertEqual(cmd[:2], ["sms", "send"])
+            return {"id": "msg-1", "message_status": "pending"}
+
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.require_api_key"), \
+                patch("send_sms.run_generated_json", side_effect=fake_run_generated):
+            code, out, err = self._run_main(send_sms, [
+                "--to", "+14155550111",
+                "--from", "+14155201316",
+                "--message", "Hello",
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Status: accepted/queued (raw: pending)", out)
+        self.assertNotIn("Status: pending\n", out)
+
     def test_send_sms_dry_run_does_not_call_api(self):
         with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key") as require_key, \

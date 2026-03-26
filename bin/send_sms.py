@@ -105,6 +105,38 @@ def _build_payload(
     }
 
 
+def summarize_message_status(result: object) -> tuple[str, str | None]:
+    if not isinstance(result, dict):
+        return "unknown", None
+
+    raw_status = result.get("message_status")
+    if raw_status is None:
+        raw_status = result.get("status")
+    if raw_status is None:
+        return "unknown", None
+
+    raw_text = str(raw_status).strip()
+    if not raw_text:
+        return "unknown", None
+
+    normalized = "accepted/queued" if raw_text.lower() == "pending" else raw_text
+    return normalized, raw_text
+
+
+def annotate_message_status(result: object) -> object:
+    if not isinstance(result, dict):
+        return result
+
+    normalized_status, raw_status = summarize_message_status(result)
+    annotated = dict(result)
+    annotated["delivery_status"] = normalized_status
+    if raw_status is not None:
+        annotated["delivery_status_raw"] = raw_status
+        annotated["status"] = normalized_status
+        annotated["status_raw"] = raw_status
+    return annotated
+
+
 def main() -> int:
     json_mode = "--json" in sys.argv
     command = COMMAND_IDS["send_sms.send"]
@@ -147,12 +179,16 @@ def main() -> int:
         result = run_generated_json(["sms", "send", "--data", json.dumps(payload)])
 
         if json_mode:
-            emit_success(command, wrapper, result if isinstance(result, dict) else {"result": result})
+            emit_success(command, wrapper, annotate_message_status(result) if isinstance(result, dict) else {"result": result})
         else:
             print(f"Selected sender: {sender_number} ({sender_source})")
             print("SMS sent successfully!")
             print(f"   ID: {result.get('id', 'N/A')}")
-            print(f"   Status: {result.get('message_status') or result.get('status', 'unknown')}")
+            status_label, raw_status = summarize_message_status(result)
+            status_line = f"   Status: {status_label}"
+            if raw_status and raw_status != status_label:
+                status_line += f" (raw: {raw_status})"
+            print(status_line)
             print(f"   From: {sender_number}")
             to_numbers = result.get("to_numbers") or args.to
             print(f"   To: {', '.join(to_numbers)}")

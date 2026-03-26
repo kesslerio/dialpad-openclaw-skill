@@ -53,6 +53,10 @@ sys.path.insert(0, str(skill_dir))
 
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook
+try:
+    from send_sms import send_sms as dialpad_send_sms
+except Exception:
+    dialpad_send_sms = None
 
 
 def parse_bool_env(raw_value, default=True):
@@ -89,6 +93,7 @@ OPENCLAW_HOOKS_CALL_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_CALL
 DIALPAD_SMS_TELEGRAM_NOTIFY = os.environ.get("DIALPAD_SMS_TELEGRAM_NOTIFY", "1").lower() in {"1", "true", "yes", "on"}
 DIALPAD_PRIORITY_ROUTE_TO = os.environ.get("DIALPAD_PRIORITY_ROUTE_TO", "")
 DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", "")
+DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), True)
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -165,6 +170,11 @@ def normalize_phone_number(phone_number):
     if len(digits) >= 10:
         return digits[-10:]
     return digits
+
+
+DIALPAD_AUTO_REPLY_SALES_LINE = normalize_phone_number(
+    os.environ.get("DIALPAD_AUTO_REPLY_SALES_LINE", "+14155201316")
+)
 
 
 def format_phone_number(phone_number):
@@ -350,6 +360,10 @@ def lookup_contact_enrichment(phone_number):
     """
     result = {
         "contact_name": None,
+        "first_name": None,
+        "last_name": None,
+        "company": None,
+        "job_title": None,
         "status": "disabled",
         "degraded": False,
         "degraded_reason": None,
@@ -376,15 +390,21 @@ def lookup_contact_enrichment(phone_number):
             items = data.get("items", [])
             if items:
                 c = items[0]
-                name = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip()
-                company = c.get("company", "")
-                title = c.get("job_title", "")
+                first_name = str(c.get("first_name", "") or "").strip()
+                last_name = str(c.get("last_name", "") or "").strip()
+                company = str(c.get("company", "") or "").strip()
+                title = str(c.get("job_title", "") or "").strip()
+                name = f"{first_name} {last_name}".strip()
                 info = name or "Known Contact"
                 if company:
                     info += f" ({company})"
                 if title:
                     info = f"{title} | {info}"
                 result["contact_name"] = info
+                result["first_name"] = first_name or None
+                result["last_name"] = last_name or None
+                result["company"] = company or None
+                result["job_title"] = title or None
                 result["status"] = "resolved"
             return result
     except urllib.error.HTTPError as e:
@@ -1094,6 +1114,137 @@ def normalize_call_hook_payload(data, resolved_context, contact_info=None):
     }
 
 
+def build_first_contact_context(normalized_event, sender_enrichment=None, line_display=None):
+    """Build a compact first-contact hint for downstream operator assist."""
+    event_type = normalized_event.get("event_type") or "sms"
+    if event_type not in {"sms", "missed_call", "voicemail"}:
+        return None
+
+    sender_enrichment = sender_enrichment or {}
+    contact_name = sender_enrichment.get("contact_name")
+    contact_name_text = str(contact_name or "").strip()
+    known_contact = bool(contact_name_text) and contact_name_text.lower() != "unknown"
+    first_contact_candidate = not known_contact
+
+    return {
+        "knownContact": known_contact,
+        "needsIdentityLookup": first_contact_candidate,
+        "needsBusinessContext": first_contact_candidate,
+        "needsDraftReply": first_contact_candidate,
+        "needsDialpadContactSync": first_contact_candidate,
+        "keepBrief": not first_contact_candidate,
+        "contactName": contact_name,
+        "senderNumber": normalized_event.get("sender_number"),
+        "recipientNumber": normalized_event.get("recipient_number"),
+        "lineDisplay": line_display or normalized_event.get("line_display"),
+        "eventType": event_type,
+        "lookup": {
+            "status": sender_enrichment.get("status", "not_applicable"),
+            "degraded": bool(sender_enrichment.get("degraded")),
+            "degradedReason": sender_enrichment.get("degraded_reason"),
+        },
+    }
+
+
+def build_proactive_reply_message(normalized_event, sender_enrichment=None):
+    """Build the sales-line auto-reply message for first-contact inbound events."""
+    sender_enrichment = sender_enrichment or {}
+    contact_name = sender_enrichment.get("first_name") or sender_enrichment.get("contact_name")
+    if contact_name:
+        greeting_name = str(contact_name).strip().split()[0]
+    else:
+        greeting_name = "there"
+
+    event_type = normalized_event.get("event_type") or "sms"
+    if event_type == "missed_call":
+        body = "you've reached ShapeScale for Business Sales. Sorry we missed your call. How can we help?"
+    elif event_type == "voicemail":
+        body = "thanks for the voicemail. We received it and will be in touch shortly."
+    else:
+        body = "thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly."
+
+    return f"Hi {greeting_name}, {body}"
+
+
+def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_display=None):
+    """Return True when the sales-line auto-reply should be sent."""
+    if not DIALPAD_AUTO_REPLY_ENABLED:
+        return False
+
+    sender_number = normalized_event.get("sender_number")
+    recipient_number = normalized_event.get("recipient_number")
+    if not sender_number or not recipient_number:
+        return False
+
+    if normalize_phone_number(recipient_number) != DIALPAD_AUTO_REPLY_SALES_LINE:
+        return False
+
+    first_contact = normalized_event.get("first_contact") or build_first_contact_context(
+        normalized_event,
+        sender_enrichment=sender_enrichment,
+        line_display=line_display,
+    )
+    if not first_contact:
+        return False
+
+    lookup = first_contact.get("lookup") or {}
+    if first_contact.get("knownContact"):
+        return False
+    if lookup.get("degraded"):
+        return False
+    if lookup.get("status") != "not_found":
+        return False
+    return True
+
+
+def summarize_message_status(result):
+    """Normalize Dialpad SMS send status for auto-reply logging."""
+    if not isinstance(result, dict):
+        return "unknown", None
+
+    raw_status = result.get("message_status")
+    if raw_status is None:
+        raw_status = result.get("status")
+    if raw_status is None:
+        return "unknown", None
+
+    raw_text = str(raw_status).strip()
+    if not raw_text:
+        return "unknown", None
+
+    normalized = "accepted/queued" if raw_text.lower() == "pending" else raw_text
+    return normalized, raw_text
+
+
+def send_proactive_reply(normalized_event, sender_enrichment=None, line_display=None):
+    """Send the sales-line auto-reply SMS for eligible first-contact inbound events."""
+    if dialpad_send_sms is None:
+        return False, "sender_unavailable", None
+
+    if not should_send_proactive_reply(
+        normalized_event,
+        sender_enrichment=sender_enrichment,
+        line_display=line_display,
+    ):
+        return False, "not_eligible", None
+
+    recipient_number = normalized_event.get("sender_number")
+    sender_number = normalized_event.get("recipient_number")
+    message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
+
+    try:
+        result = dialpad_send_sms(
+            [recipient_number],
+            message,
+            from_number=sender_number,
+        )
+        status_label, _raw_status = summarize_message_status(result)
+        return True, status_label, message
+    except Exception as e:
+        print(f"⚠️  Proactive auto-reply failed ({type(e).__name__})")
+        return False, "failed", message
+
+
 def build_hook_session_key(normalized_event):
     """Build stable OpenClaw hook session key with fallbacks."""
     event_type = normalized_event.get("event_type") or "sms"
@@ -1190,6 +1341,21 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
         payload["to"] = target_to
     if OPENCLAW_HOOKS_AGENT_ID:
         payload["agentId"] = OPENCLAW_HOOKS_AGENT_ID
+
+    first_contact = normalized_event.get("first_contact")
+    if first_contact is None and normalized_event.get("sender_enrichment"):
+        first_contact = build_first_contact_context(
+            normalized_event,
+            sender_enrichment=normalized_event.get("sender_enrichment"),
+            line_display=line_display,
+        )
+    if first_contact is not None:
+        payload["firstContact"] = first_contact
+
+    auto_reply = normalized_event.get("auto_reply")
+    if auto_reply is not None:
+        payload["autoReply"] = auto_reply
+
     return payload
 
 
@@ -1362,6 +1528,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         # Forward inbound SMS to OpenClaw hooks (non-sensitive only)
         hook_sent = False
         hook_status = None
+        auto_reply_sent = False
+        auto_reply_status = None
         sensitive_filtered = False
         inbound_alert_decision = {
             "eligible": False,
@@ -1398,9 +1566,34 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             if inbound_alert_decision["eligible"]:
                 line_display = get_line_name(to_num)
                 normalized_sms = normalize_sms_payload(data, contact_info=contact_info)
+                normalized_sms["first_contact"] = build_first_contact_context(
+                    normalized_sms,
+                    sender_enrichment=sender_enrichment,
+                    line_display=line_display,
+                )
+                auto_reply_eligible = should_send_proactive_reply(
+                    normalized_sms,
+                    sender_enrichment=sender_enrichment,
+                    line_display=line_display,
+                )
+                auto_reply_sent, auto_reply_status, auto_reply_message = send_proactive_reply(
+                    normalized_sms,
+                    sender_enrichment=sender_enrichment,
+                    line_display=line_display,
+                )
+                normalized_sms["auto_reply"] = {
+                    "eligible": auto_reply_eligible,
+                    "sent": auto_reply_sent,
+                    "status": auto_reply_status,
+                    "message": auto_reply_message,
+                }
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(
                     normalized_sms, line_display=line_display
                 )
+                if auto_reply_sent:
+                    print(f"   🤖 Auto Reply: ✓ ({auto_reply_status})")
+                elif auto_reply_status:
+                    print(f"   🤖 Auto Reply: ✗ ({auto_reply_status})")
             elif hook_status == "filtered_shortcode":
                 print("   🔒 Short-code message filtered (not forwarding to OpenClaw hooks)")
             elif hook_status == "filtered_sensitive":
@@ -1455,6 +1648,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 print(f"   📨 Telegram SMS Alert: {'✓' if telegram_sms_sent else '✗'} ({telegram_status})")
             else:
                 print(f"   📨 Telegram SMS Alert: ✗ ({telegram_status})")
+            if auto_reply_status is not None and not auto_reply_sent:
+                print(f"   🤖 Auto Reply: ✗ ({auto_reply_status})")
             if sender_enrichment.get("degraded"):
                 print(
                     "   ⚠️  Sender enrichment degraded "
@@ -1479,6 +1674,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 inbound_alert_decision.get("reason_code") if direction == "inbound" else None
             ),
             "telegram_status": telegram_status if direction == "inbound" else None,
+            "auto_reply_sent": auto_reply_sent if direction == "inbound" else None,
+            "auto_reply_status": auto_reply_status if direction == "inbound" else None,
             "sender_enrichment_degraded": (
                 sender_enrichment.get("degraded") if direction == "inbound" else None
             ),
@@ -1533,6 +1730,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         hook_sent = False
         hook_status = None
         telegram_sent = False
+        auto_reply_sent = False
+        auto_reply_status = None
         if should_notify:
             resolved = resolve_missed_call_context(data)
             from_num = resolved["from_number"]
@@ -1543,7 +1742,15 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 data.get("start_time") or
                 data.get("timestamp")
             )
-            contact_info = get_contact_name(from_num) if from_num != "Unknown" else None
+            sender_enrichment = (
+                lookup_contact_enrichment(from_num) if from_num != "Unknown" else {
+                    "contact_name": None,
+                    "status": "not_applicable",
+                    "degraded": False,
+                    "degraded_reason": None,
+                }
+            )
+            contact_info = sender_enrichment.get("contact_name")
             line_display = resolved["line_display"] or get_line_name(to_num)
             to_display = line_display if line_display else "Unknown"
             if contact_info:
@@ -1573,6 +1780,27 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 resolved,
                 contact_info=contact_info,
             )
+            normalized_event["first_contact"] = build_first_contact_context(
+                normalized_event,
+                sender_enrichment=sender_enrichment,
+                line_display=line_display,
+            )
+            auto_reply_eligible = should_send_proactive_reply(
+                normalized_event,
+                sender_enrichment=sender_enrichment,
+                line_display=line_display,
+            )
+            auto_reply_sent, auto_reply_status, auto_reply_message = send_proactive_reply(
+                normalized_event,
+                sender_enrichment=sender_enrichment,
+                line_display=line_display,
+            )
+            normalized_event["auto_reply"] = {
+                "eligible": auto_reply_eligible,
+                "sent": auto_reply_sent,
+                "status": auto_reply_status,
+                "message": auto_reply_message,
+            }
             hook_sent, hook_status = send_to_openclaw_hooks(
                 normalized_event,
                 line_display=line_display,
@@ -1590,6 +1818,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 f"caller={resolved['caller_resolution_path']}, "
                 f"line={resolved['line_resolution_path']}"
             )
+            if auto_reply_status is not None:
+                print(f"   🤖 Auto Reply: {'✓' if auto_reply_sent else '✗'} ({auto_reply_status})")
             print(f"   🪝 OpenClaw Hook: {'✓' if hook_sent else '✗'} ({hook_status})")
             print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
             print()
@@ -1609,6 +1839,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             "missed_call": should_notify,
             "hook_forwarded": hook_sent if should_notify else None,
             "hook_status": hook_status if should_notify else None,
+            "auto_reply_sent": auto_reply_sent if should_notify else None,
+            "auto_reply_status": auto_reply_status if should_notify else None,
             "telegram_sent": telegram_sent if should_notify else None
         }
         self.wfile.write(json.dumps(response).encode())
@@ -1632,7 +1864,19 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         duration = data.get("duration", data.get("voicemail_duration", 0))
         transcription = data.get("voicemail_transcription") or data.get("transcription")
 
-        contact_info = get_contact_name(from_num) if from_num != "Unknown" else None
+        sender_enrichment = (
+            lookup_contact_enrichment(from_num) if from_num != "Unknown" else {
+                "contact_name": None,
+                "first_name": None,
+                "last_name": None,
+                "company": None,
+                "job_title": None,
+                "status": "not_applicable",
+                "degraded": False,
+                "degraded_reason": None,
+            }
+        )
+        contact_info = sender_enrichment.get("contact_name")
         line_display = get_line_name(to_num)
         to_display = line_display if line_display else "Unknown"
         if contact_info:
@@ -1661,7 +1905,39 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 f"_\"{transcription}\"_"
             )
 
+        auto_reply_sent = False
+        auto_reply_status = None
         telegram_sent = send_to_telegram(tg_text)
+        normalized_event = {
+            "event_type": "voicemail",
+            "sender": contact_info or from_num or "Unknown",
+            "sender_number": from_num,
+            "recipient_number": to_num,
+            "timestamp": data.get("timestamp") or data.get("created_date"),
+            "line_display": line_display,
+            "direction": "inbound",
+        }
+        normalized_event["first_contact"] = build_first_contact_context(
+            normalized_event,
+            sender_enrichment=sender_enrichment,
+            line_display=line_display,
+        )
+        auto_reply_eligible = should_send_proactive_reply(
+            normalized_event,
+            sender_enrichment=sender_enrichment,
+            line_display=line_display,
+        )
+        auto_reply_sent, auto_reply_status, auto_reply_message = send_proactive_reply(
+            normalized_event,
+            sender_enrichment=sender_enrichment,
+            line_display=line_display,
+        )
+        normalized_event["auto_reply"] = {
+            "eligible": auto_reply_eligible,
+            "sent": auto_reply_sent,
+            "status": auto_reply_status,
+            "message": auto_reply_message,
+        }
 
         print(f"[{datetime.now().isoformat()}]")
         print(f"   📬 VOICEMAIL: {from_num} -> {to_display}")
@@ -1669,6 +1945,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         if transcription:
             trans_preview = transcription[:80] + "..." if len(transcription) > 80 else transcription
             print(f"   📝 Transcription: \"{trans_preview}\"")
+        if auto_reply_status is not None:
+            print(f"   🤖 Auto Reply: {'✓' if auto_reply_sent else '✗'} ({auto_reply_status})")
         print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
         print()
 
@@ -1679,7 +1957,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         response = {
             "status": "ok",
             "voicemail": True,
-            "telegram_sent": telegram_sent
+            "telegram_sent": telegram_sent,
+            "auto_reply_sent": auto_reply_sent,
+            "auto_reply_status": auto_reply_status,
         }
         self.wfile.write(json.dumps(response).encode())
 

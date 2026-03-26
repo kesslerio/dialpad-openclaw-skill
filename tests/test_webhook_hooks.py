@@ -138,6 +138,30 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
         "recipient_number": "+14155559876",
         "text": "Ping",
         "conversation_id": "conv-123",
+        "first_contact": {
+            "knownContact": False,
+            "needsIdentityLookup": True,
+            "needsBusinessContext": True,
+            "needsDraftReply": True,
+            "needsDialpadContactSync": True,
+            "keepBrief": False,
+            "contactName": None,
+            "senderNumber": "+14155550123",
+            "recipientNumber": "+14155559876",
+            "lineDisplay": "Support",
+            "eventType": "sms",
+            "lookup": {
+                "status": "not_found",
+                "degraded": False,
+                "degradedReason": None,
+            },
+        },
+        "auto_reply": {
+            "eligible": True,
+            "sent": True,
+            "status": "accepted/queued",
+            "message": "Hi there, thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly.",
+        },
     }
 
     payload = build_openclaw_hook_payload(normalized, line_display="Support")
@@ -146,6 +170,8 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
     assert payload["to"] == "-5102073225"
     assert payload["agentId"] == "niemand-work"
     assert payload["sessionKey"] == "hook:dialpad:sms:conv-123"
+    assert payload["firstContact"]["needsDraftReply"] is True
+    assert payload["autoReply"]["sent"] is True
 
 
 def test_build_hook_session_key_for_missed_call_fallback_order():
@@ -199,6 +225,30 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
         "line_display": "Support",
         "timestamp": 1760000000000,
         "call_id": "call-123",
+        "first_contact": {
+            "knownContact": True,
+            "needsIdentityLookup": False,
+            "needsBusinessContext": False,
+            "needsDraftReply": False,
+            "needsDialpadContactSync": False,
+            "keepBrief": True,
+            "contactName": "Jane Doe",
+            "senderNumber": "+14155550123",
+            "recipientNumber": "+14155559876",
+            "lineDisplay": "Support",
+            "eventType": "missed_call",
+            "lookup": {
+                "status": "resolved",
+                "degraded": False,
+                "degradedReason": None,
+            },
+        },
+        "auto_reply": {
+            "eligible": False,
+            "sent": False,
+            "status": "not_eligible",
+            "message": None,
+        },
     }
 
     payload = build_openclaw_hook_payload(normalized, line_display="Support")
@@ -206,3 +256,5 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
     assert payload["deliver"] is True
     assert payload["sessionKey"] == "hook:dialpad:call:call-123"
     assert "📞 Dialpad Missed Call" in payload["message"]
+    assert payload["firstContact"]["keepBrief"] is True
+    assert payload["autoReply"]["eligible"] is False

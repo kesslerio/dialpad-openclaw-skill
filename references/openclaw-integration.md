@@ -65,12 +65,14 @@ export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
 export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
+export DIALPAD_AUTO_REPLY_ENABLED="1"
 ```
 
 Behavior:
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS forwarding is enabled by default unless `OPENCLAW_HOOKS_SMS_ENABLED=0`
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding is enabled by default unless `OPENCLAW_HOOKS_CALL_ENABLED=0`
-- voicemail remains Telegram-only in this repo
+- when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, first-contact messages on the sales line `(415) 520-1316` get an automatic SMS acknowledgment before the hook handoff continues
+- voicemail remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails also get the SMS acknowledgment when auto-replies are enabled
 - if your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly
 - the local gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
 
@@ -114,6 +116,41 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
 - `channel`
 - `to`
 - `agentId`
+- `firstContact`
+
+### First-Contact Assist Hint
+
+The webhook may include a `firstContact` object for first-time or otherwise unknown inbound contacts. It is an additive hint, not a required field.
+
+```json
+{
+  "knownContact": false,
+  "needsIdentityLookup": true,
+  "needsBusinessContext": true,
+  "needsDraftReply": true,
+  "needsDialpadContactSync": true,
+  "keepBrief": false,
+  "contactName": null,
+  "senderNumber": "+14155550123",
+  "recipientNumber": "+14155201316",
+  "lineDisplay": "Sales (415) 520-1316",
+  "eventType": "sms",
+  "lookup": {
+    "status": "not_found",
+    "degraded": false,
+    "degradedReason": null
+  }
+}
+```
+
+Interpretation:
+
+- when `knownContact` is `false`, do the identity/business lookup first
+- use Attio if that is your source of truth, or plug in a different CRM/directory if you do not use Attio
+- if lookup is still ambiguous, use web research as fallback and keep the output concise
+- if the match is clear, suggest Dialpad contact normalization or update
+- if `keepBrief` is `true`, skip the long background pass and stay short
+- if `autoReply` is present, the webhook server already sent the sales-line acknowledgment and downstream automation should not send the same reply again
 
 ### SMS Example
 
@@ -125,7 +162,31 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
   "deliver": true,
   "channel": "telegram",
   "to": "-5102073225",
-  "agentId": "niemand-work"
+  "agentId": "niemand-work",
+  "firstContact": {
+    "knownContact": false,
+    "needsIdentityLookup": true,
+    "needsBusinessContext": true,
+    "needsDraftReply": true,
+    "needsDialpadContactSync": true,
+    "keepBrief": false,
+    "contactName": null,
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "sms",
+    "lookup": {
+      "status": "not_found",
+      "degraded": false,
+      "degradedReason": null
+    }
+  },
+  "autoReply": {
+    "eligible": true,
+    "sent": true,
+    "status": "accepted/queued",
+    "message": "Hi there, thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly."
+  }
 }
 ```
 
@@ -136,7 +197,31 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
   "message": "📞 Dialpad Missed Call\nFrom: Jane Doe (+14155550123)\nLine: Sales (415) 520-1316\nTime: 1760000000000\nCall ID: call-123",
   "name": "Dialpad Missed Call",
   "sessionKey": "hook:dialpad:call:call-123",
-  "deliver": true
+  "deliver": true,
+  "firstContact": {
+    "knownContact": false,
+    "needsIdentityLookup": true,
+    "needsBusinessContext": true,
+    "needsDraftReply": true,
+    "needsDialpadContactSync": true,
+    "keepBrief": false,
+    "contactName": null,
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "missed_call",
+    "lookup": {
+      "status": "not_found",
+      "degraded": false,
+      "degradedReason": null
+    }
+  },
+  "autoReply": {
+    "eligible": true,
+    "sent": true,
+    "status": "accepted/queued",
+    "message": "Hi there, you've reached ShapeScale for Business Sales. Sorry we missed your call. How can we help?"
+  }
 }
 ```
 
@@ -181,7 +266,31 @@ SMS:
   "line": "Sales (415) 520-1316",
   "timestamp": 1760000000000,
   "body": "Need a callback",
-  "callId": null
+  "callId": null,
+  "firstContact": {
+    "knownContact": false,
+    "needsIdentityLookup": true,
+    "needsBusinessContext": true,
+    "needsDraftReply": true,
+    "needsDialpadContactSync": true,
+    "keepBrief": false,
+    "contactName": null,
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "sms",
+    "lookup": {
+      "status": "not_found",
+      "degraded": false,
+      "degradedReason": null
+    }
+  },
+  "autoReply": {
+    "eligible": true,
+    "sent": true,
+    "status": "accepted/queued",
+    "message": "Hi there, thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly."
+  }
 }
 ```
 
@@ -196,7 +305,25 @@ Missed call:
   "line": "Sales (415) 520-1316",
   "timestamp": 1760000000000,
   "body": null,
-  "callId": "call-123"
+  "callId": "call-123",
+  "firstContact": {
+    "knownContact": true,
+    "needsIdentityLookup": false,
+    "needsBusinessContext": false,
+    "needsDraftReply": false,
+    "needsDialpadContactSync": false,
+    "keepBrief": true,
+    "contactName": "Jane Doe",
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "missed_call",
+    "lookup": {
+      "status": "resolved",
+      "degraded": false,
+      "degradedReason": null
+    }
+  }
 }
 ```
 

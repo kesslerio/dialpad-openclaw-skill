@@ -145,6 +145,7 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
             "needsDraftReply": True,
             "needsDialpadContactSync": True,
             "keepBrief": False,
+            "identityState": "not_found",
             "contactName": None,
             "senderNumber": "+14155550123",
             "recipientNumber": "+14155559876",
@@ -171,6 +172,7 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
     assert payload["agentId"] == "niemand-work"
     assert payload["sessionKey"] == "hook:dialpad:sms:conv-123"
     assert payload["firstContact"]["needsDraftReply"] is True
+    assert payload["firstContact"]["identityState"] == "not_found"
     assert payload["autoReply"]["sent"] is True
 
 
@@ -226,6 +228,7 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
         "timestamp": 1760000000000,
         "call_id": "call-123",
         "first_contact": {
+            "identityState": "resolved",
             "knownContact": True,
             "needsIdentityLookup": False,
             "needsBusinessContext": False,
@@ -256,5 +259,6 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
     assert payload["deliver"] is True
     assert payload["sessionKey"] == "hook:dialpad:call:call-123"
     assert "📞 Dialpad Missed Call" in payload["message"]
+    assert payload["firstContact"]["identityState"] == "resolved"
     assert payload["firstContact"]["keepBrief"] is True
     assert payload["autoReply"]["eligible"] is False

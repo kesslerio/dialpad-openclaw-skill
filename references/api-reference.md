@@ -40,6 +40,7 @@ The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints. It is the
 - `--dry-run` shows resolved sender and the exact message payload without sending.
 - `bin/send_group_intro.py` performs a mirrored fallback (`mode: mirrored_fallback`) by sending two separate one-to-one SMS messages because the wrapper does not guarantee a true group thread.
 - `bin/list_calls.py` provides agent-safe recent call history with `--hours` or `--today`, optional missed-call filtering, and `--json` for a machine-readable envelope.
+- `firstContact` includes an explicit `identityState` and raw lookup status so downstream agents can keep weak matches draft-only instead of mutating a contact record too early.
 
 ```bash
 bin/send_sms.py --to "+14155550111" --message 'Hello' --profile work
@@ -190,6 +191,7 @@ Behavior notes:
 - Voicemail notifications remain Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails also get the SMS acknowledgment when auto-replies are enabled
 - The local OpenClaw gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
 - For unknown inbound contacts, the hook may include a `firstContact` hint with lookup and reply-drafting signals; downstream users can map that to Attio, HubSpot, Airtable, or any other source of truth
+- Identity states are preserved as data, not implied behavior: `resolved` is safe to mutate, while `ambiguous`, `not_found`, and `degraded` should stay non-mutating until the CRM/agent layer proves the identity
 - The webhook server also adds `autoReply` metadata when it sends the sales-line acknowledgment directly, so downstream automation can avoid double-sending the same reply
 - The repo preserves the current top-level OpenClaw hook envelope and does not claim end-to-end validation of downstream proactive enrichment behavior
 - Current-turn verification still applies to `niemand-work`: stale context must not produce "Already sent" or "Already updated"; only a fresh tool result in the same turn can justify those claims.

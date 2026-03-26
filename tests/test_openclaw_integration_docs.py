@@ -19,3 +19,9 @@ def test_openclaw_docs_require_current_turn_verification():
     assert "stale session memory" in skill
     assert "fresh tool result in the same turn" in api_reference
     assert "fresh tool result in the same turn" in integration
+    assert "identitystate" in readme
+    assert "identitystate" in api_reference
+    assert "identitystate" in integration
+    assert "ambiguous" in integration
+    assert "first name" in integration
+    assert "area code" in integration

@@ -77,6 +77,7 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 9. **Call history:** `bin/list_calls.py` is the supported call-history command for agents. Use `--json` when downstream automation needs a deterministic response envelope.
 10. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
 11. **Current-turn verification:** "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory. If the current turn has not verified the action yet, say that plainly and run the tool now.
+12. **Identity guardrail:** For first-contact work, soft signals like first name, area code, industry, or job title are not enough to merge or update a contact. Keep uncertain identity `draft-only` and let the CRM layer prove the match before mutating anything.
 
 ## Reference Documentation
 

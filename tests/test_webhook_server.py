@@ -416,6 +416,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(hook_calls[0]["normalized_event"]["call_id"], "call-123")
         self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["knownContact"], False)
         self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["keepBrief"], False)
+        self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["identityState"], "not_found")
         self.assertIn("ShapeScale for Business Sales", sms_calls[0]["message"])
         self.assertEqual(len(telegram_messages), 1)
         self.assertTrue(response["missed_call"])

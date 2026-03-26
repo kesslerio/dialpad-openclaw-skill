@@ -1125,6 +1125,13 @@ def build_first_contact_context(normalized_event, sender_enrichment=None, line_d
     contact_name_text = str(contact_name or "").strip()
     known_contact = bool(contact_name_text) and contact_name_text.lower() != "unknown"
     first_contact_candidate = not known_contact
+    lookup_status = str(sender_enrichment.get("status") or "not_applicable")
+    if sender_enrichment.get("degraded") or lookup_status in {"disabled", "not_applicable"}:
+        identity_state = "degraded"
+    elif known_contact:
+        identity_state = "resolved"
+    else:
+        identity_state = lookup_status
 
     return {
         "knownContact": known_contact,
@@ -1133,13 +1140,14 @@ def build_first_contact_context(normalized_event, sender_enrichment=None, line_d
         "needsDraftReply": first_contact_candidate,
         "needsDialpadContactSync": first_contact_candidate,
         "keepBrief": not first_contact_candidate,
+        "identityState": identity_state,
         "contactName": contact_name,
         "senderNumber": normalized_event.get("sender_number"),
         "recipientNumber": normalized_event.get("recipient_number"),
         "lineDisplay": line_display or normalized_event.get("line_display"),
         "eventType": event_type,
         "lookup": {
-            "status": sender_enrichment.get("status", "not_applicable"),
+            "status": lookup_status,
             "degraded": bool(sender_enrichment.get("degraded")),
             "degradedReason": sender_enrichment.get("degraded_reason"),
         },

@@ -315,6 +315,28 @@ class MissedCallResolutionTests(unittest.TestCase):
 
 
 class CallWebhookHandlerTests(unittest.TestCase):
+    class _FakeMoment:
+        def __init__(self, text):
+            self._text = text
+
+        def astimezone(self):
+            return self
+
+        def strftime(self, _fmt):
+            return self._text
+
+        def isoformat(self):
+            return "2026-03-26T11:11:00-07:00"
+
+    class _FakeDatetime:
+        @classmethod
+        def now(cls):
+            return CallWebhookHandlerTests._FakeMoment("11:11 PM")
+
+        @classmethod
+        def fromtimestamp(cls, _value):
+            return CallWebhookHandlerTests._FakeMoment("9:42 AM")
+
     def test_call_webhook_requires_auth_when_secret_configured(self):
         with patch.object(webhook_server, "WEBHOOK_SECRET", "secret-123"):
             payload = {
@@ -506,6 +528,36 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertIsNone(response["hook_forwarded"])
         self.assertIsNone(response["hook_status"])
         self.assertIsNone(response["telegram_sent"])
+
+    def test_inbound_missed_call_telegram_uses_event_timestamp_and_escapes_markdown(self):
+        telegram_messages = []
+
+        with patch.object(webhook_server, "datetime", self._FakeDatetime), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", False), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(webhook_server, "get_contact_name", return_value="Jane_Doe"), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertIn("*Time:* 9:42 AM", telegram_messages[0])
+        self.assertIn(r"Jane\_Doe", telegram_messages[0])
+        self.assertNotIn("11:11 PM", telegram_messages[0])
 
 
 if __name__ == "__main__":

@@ -1553,12 +1553,19 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             else:
                 from_display = f"`{from_num}`"
             time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
+            if call_ts is not None:
+                try:
+                    time_display = datetime.fromtimestamp(
+                        int(call_ts) / 1000
+                    ).astimezone().strftime("%I:%M %p").lstrip("0")
+                except (TypeError, ValueError, OSError, OverflowError):
+                    pass
 
             tg_text = (
                 f"📞 *Missed Call*\n"
-                f"*Line:* {to_display}\n"
-                f"*From:* {from_display}\n"
-                f"*Time:* {time_display}"
+                f"*Line:* {escape_telegram_markdown(to_display)}\n"
+                f"*From:* {escape_telegram_markdown(from_display)}\n"
+                f"*Time:* {escape_telegram_markdown(time_display)}"
             )
 
             normalized_event = normalize_call_hook_payload(

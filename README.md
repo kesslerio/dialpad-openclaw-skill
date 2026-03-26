@@ -61,11 +61,12 @@ bin/update_contact.py --id "contact_123" --job-title "Director"
 export DIALPAD_WEBHOOK_SECRET="your-dialpad-webhook-secret"
 
 # OpenClaw hook destination
-export OPENCLAW_GATEWAY_URL="http://127.0.0.1:8080"
+export OPENCLAW_GATEWAY_URL="http://127.0.0.1:18789"
 export OPENCLAW_HOOKS_TOKEN="your-openclaw-hooks-token"
 export OPENCLAW_HOOKS_PATH="/hooks/agent"
 export OPENCLAW_HOOKS_NAME="Dialpad SMS"
 export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
+export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 
 # Optional per-event hook controls (enabled by default)
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
@@ -73,6 +74,8 @@ export OPENCLAW_HOOKS_CALL_ENABLED="1"
 ```
 
 When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are forwarded to OpenClaw by default. Set `OPENCLAW_HOOKS_SMS_ENABLED=0` or `OPENCLAW_HOOKS_CALL_ENABLED=0` to disable one event class without changing the shared destination config.
+If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
+The local gateway allows explicit `niemand-work` routing and `hook:dialpad:` session keys.
 
 Create/list webhook subscriptions:
 
@@ -84,7 +87,7 @@ bin/create_sms_webhook.py list
 Notes:
 
 - `/webhook/dialpad` handles SMS storage plus optional OpenClaw/Telegram fan-out
-- `/webhook/dialpad-call` handles missed-call Telegram alerts plus optional OpenClaw hook forwarding
+- `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, plus optional OpenClaw hook forwarding
 - `/webhook/dialpad-voicemail` remains a Telegram-only path in this repo
 - This repo validates hook request shape, gating, and graceful degradation only. It does not validate downstream OpenClaw proactive enrichment behavior
 

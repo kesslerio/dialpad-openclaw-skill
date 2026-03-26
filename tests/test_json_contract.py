@@ -62,7 +62,7 @@ class JsonContractTests(unittest.TestCase):
     def test_send_sms_json_success_envelope(self):
         with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
-                patch("send_sms.run_generated_json", return_value={"id": "msg-1", "status": "pending"}), \
+                patch("send_sms.run_generated_json", return_value={"id": "msg-1", "message_status": "pending"}), \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
                 send_sms,
@@ -70,7 +70,14 @@ class JsonContractTests(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
-        self._assert_success(self._parse(out), "send_sms.send")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "send_sms.send")
+        self.assertEqual(parsed["data"]["status"], "accepted/queued")
+        self.assertEqual(parsed["data"]["status_raw"], "pending")
+        self.assertEqual(parsed["data"]["message_status"], "accepted/queued")
+        self.assertEqual(parsed["data"]["message_status_raw"], "pending")
+        self.assertEqual(parsed["data"]["delivery_status"], "accepted/queued")
+        self.assertEqual(parsed["data"]["delivery_status_raw"], "pending")
 
     def test_send_sms_json_error_envelope(self):
         with patch(

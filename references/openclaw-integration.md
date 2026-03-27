@@ -124,6 +124,7 @@ The webhook may include a `firstContact` object for first-time or otherwise unkn
 
 ```json
 {
+  "identityState": "not_found",
   "knownContact": false,
   "needsIdentityLookup": true,
   "needsBusinessContext": true,
@@ -145,10 +146,12 @@ The webhook may include a `firstContact` object for first-time or otherwise unkn
 
 Interpretation:
 
+- `identityState` is the normalized identity result carried through the hook; only `resolved` is safe to treat as auto-mutable
 - when `knownContact` is `false`, do the identity/business lookup first
 - use Attio if that is your source of truth, or plug in a different CRM/directory if you do not use Attio
 - if lookup is still ambiguous, use web research as fallback and keep the output concise
 - if the match is clear, suggest Dialpad contact normalization or update
+- if the evidence is only first name, area code, industry, or job title, keep the lead ambiguous and draft-only until stronger proof appears
 - if `keepBrief` is `true`, skip the long background pass and stay short
 - if `autoReply` is present, the webhook server already sent the sales-line acknowledgment and downstream automation should not send the same reply again
 
@@ -268,6 +271,7 @@ SMS:
   "body": "Need a callback",
   "callId": null,
   "firstContact": {
+    "identityState": "not_found",
     "knownContact": false,
     "needsIdentityLookup": true,
     "needsBusinessContext": true,
@@ -307,6 +311,7 @@ Missed call:
   "body": null,
   "callId": "call-123",
   "firstContact": {
+    "identityState": "resolved",
     "knownContact": true,
     "needsIdentityLookup": false,
     "needsBusinessContext": false,
@@ -357,6 +362,19 @@ The safe default is:
    - reject
    - mark for callback
 
+Current-turn verification applies here too:
+
+- "Already sent" and "Already updated" are only valid after a fresh tool result in the same turn.
+- Stale session memory is not proof of a send or contact update.
+- If the current turn has not verified the action yet, say so plainly and continue with the send/update step.
+
+Suggested identity states:
+
+- `resolved` when the payload already carries a strong contact match or the downstream CRM proves identity with strong evidence
+- `ambiguous` when the downstream CRM can narrow to a candidate but not prove it, or the evidence is too soft to mutate
+- `not_found` when no strong match exists yet and the lead should stay draft-only until more evidence appears
+- `degraded` when lookup failed or is partially unavailable
+
 Suggested state fields:
 
 ```json
@@ -397,6 +415,9 @@ OpenClaw should:
 - dedupe using `sessionKey`
 - never assume duplicate delivery means duplicate user intent
 - separate "draft generation" from "send authority"
+- require `identityState == "resolved"` before any contact mutation; `ambiguous`, `not_found`, and `degraded` stay draft-only
+- require current-turn verification before any success claim about sending or updating
+- treat stale context as non-evidence for "Already sent" or "Already updated"
 
 Outbound send must always enforce `sendMode`.
 

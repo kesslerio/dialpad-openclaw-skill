@@ -143,6 +143,7 @@ def test_lookup_contact_enrichment_401_degraded_and_cached_fallback(monkeypatch)
     assert hook_calls[0]["normalized_sms"]["sender"] == "Cached Person"
     assert hook_calls[0]["normalized_sms"]["first_contact"]["knownContact"] is True
     assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is True
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["identityState"] == "degraded"
 
 
 def test_inbound_telegram_uses_enriched_sender(monkeypatch):
@@ -228,6 +229,7 @@ def test_inbound_webhook_hook_uses_enriched_sender(monkeypatch):
     assert hook_calls[0]["normalized_sms"]["sender"] == "Jane Doe"
     assert hook_calls[0]["normalized_sms"]["first_contact"]["knownContact"] is True
     assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is True
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["identityState"] == "resolved"
     assert response["hook_forwarded"] is True
     assert response["sender_enrichment_status"] == "resolved"
     assert response["sender_enrichment_degraded"] is False
@@ -275,6 +277,7 @@ def test_inbound_webhook_hook_marks_unknown_sender_first_contact_candidate(monke
     assert hook_calls[0]["normalized_sms"]["first_contact"]["needsIdentityLookup"] is True
     assert hook_calls[0]["normalized_sms"]["first_contact"]["needsDraftReply"] is True
     assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is False
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["identityState"] == "not_found"
 
 
 def test_inbound_sales_sms_auto_replies_on_first_contact(monkeypatch):
@@ -339,6 +342,7 @@ def test_inbound_sales_sms_auto_replies_on_first_contact(monkeypatch):
     assert sms_calls[0]["to_numbers"] == ["+14155550123"]
     assert sms_calls[0]["from_number"] == "+14155201316"
     assert "ShapeScale for Business Sales" in sms_calls[0]["message"]
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["identityState"] == "not_found"
     assert response["auto_reply_sent"] is True
     assert response["auto_reply_status"] == "accepted/queued"
 

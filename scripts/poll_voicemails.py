@@ -194,23 +194,33 @@ def fetch_inbound_calls(api_key, lookback_ms=None, now_ms=None):
 
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            raw_response = response.read().decode("utf-8")
+            try:
+                data = json.loads(raw_response)
+            except json.JSONDecodeError as exc:
+                print(f"❌ Failed to parse Dialpad JSON response: {exc}\nResponse: {raw_response[:200]}...", file=sys.stderr)
+                raise RuntimeError(f"Invalid JSON response from Dialpad API")
 
         if isinstance(data, list):
             all_calls.extend(data)
             break
 
         if not isinstance(data, dict):
-            break
+            print(f"❌ Unexpected Dialpad API response structure (not dict/list): {type(data)}", file=sys.stderr)
+            raise RuntimeError(f"Unexpected API response structure")
 
         items = []
+        found_key = False
         for key in ("items", "calls", "data", "results"):
             value = data.get(key)
             if isinstance(value, list):
                 items = value
+                found_key = True
                 break
 
-        all_calls.extend(items)
+        if not found_key:
+            print(f"❌ Could not find items/calls/data key in Dialpad response: {data.keys()}", file=sys.stderr)
+            raise RuntimeError(f"Missing items in API response")
 
         # Stop paginating if all items on this page are older than lookback
         if lookback_ms and now_ms and items:

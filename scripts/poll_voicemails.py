@@ -340,12 +340,10 @@ def main():
                 calls = fetch_inbound_calls(DIALPAD_API_KEY, lookback_ms=lookback_ms, now_ms=now_ms)
             except urllib.error.HTTPError as exc:
                 print(f"❌ Dialpad API HTTP error: {exc.code} {exc.reason}", file=sys.stderr)
-                print("found 0 voicemail(s), notified 0 new")
-                return 0
+                return 1
             except Exception as exc:
                 print(f"❌ Dialpad API request failed: {exc}", file=sys.stderr)
-                print("found 0 voicemail(s), notified 0 new")
-                return 0
+                return 1
             voicemails = [
                 call
                 for call in calls

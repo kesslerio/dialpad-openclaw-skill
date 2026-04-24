@@ -466,6 +466,48 @@ def test_standard_stop_keyword_blocks_sms_automation(monkeypatch, tmp_path):
     assert response["hook_status"] == "filtered_opt_out"
 
 
+def test_opt_out_with_security_code_persists_opt_out_before_sensitive_filter(monkeypatch, tmp_path):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Your security code is 123456. Do not contact me.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+    finally:
+        conn.close()
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert response["hook_status"] == "filtered_opt_out"
+    assert opted_out is True
+
+
 def test_stop_by_phrase_does_not_create_permanent_opt_out(monkeypatch, tmp_path):
     hook_calls = []
     monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")

@@ -339,14 +339,14 @@ def approve_draft(
                     "draft": draft,
                 }
         else:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE sms_approval_drafts
                 SET status = ?, first_confirmed_by = ?, first_confirmed_username = ?,
                     first_confirmed_at_ms = ?
-                WHERE draft_id = ?
+                WHERE draft_id = ? AND status = ? AND first_confirmed_at_ms IS NULL
                 """,
-                (STATUS_RISK_PENDING, actor_id, actor_username, ts, draft_id),
+                (STATUS_RISK_PENDING, actor_id, actor_username, ts, draft_id, STATUS_PENDING),
             )
             conn.commit()
             return {
@@ -354,7 +354,7 @@ def approve_draft(
                 "status": "risky_confirmation_required",
                 "sent": False,
                 "risk_reason": draft.get("risk_reason"),
-                "draft": get_draft(conn, draft_id),
+                "draft": get_draft(conn, draft_id) if cursor.rowcount == 1 else draft,
             }
 
     expected_status = STATUS_RISK_PENDING if draft.get("risk_state") == RISK_RISKY else STATUS_PENDING

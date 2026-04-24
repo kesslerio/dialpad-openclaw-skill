@@ -648,19 +648,20 @@ def assess_inbound_sms_alert_eligibility(
             "sensitive_filtered": True,
             "notification_type": resolved_type,
         }
-    if is_sensitive_message(text=text, sender=sender, contact_number=from_number):
-        return {
-            "eligible": False,
-            "reason_code": "filtered_sensitive",
-            "sensitive_filtered": True,
-            "notification_type": resolved_type,
-        }
     reply_policy = classify_sms_reply_policy(text)
     if reply_policy["state"] == "blocked_opt_out":
         return {
             "eligible": False,
             "reason_code": reply_policy["reason_code"],
             "sensitive_filtered": False,
+            "notification_type": resolved_type,
+            "reply_policy": reply_policy,
+        }
+    if is_sensitive_message(text=text, sender=sender, contact_number=from_number):
+        return {
+            "eligible": False,
+            "reason_code": "filtered_sensitive",
+            "sensitive_filtered": True,
             "notification_type": resolved_type,
             "reply_policy": reply_policy,
         }

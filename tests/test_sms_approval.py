@@ -121,6 +121,34 @@ class SmsApprovalTests(unittest.TestCase):
         stored = sms_approval.get_draft(self.conn, draft["draft_id"])
         self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
 
+    def test_risky_draft_repeated_first_step_preserves_original_confirmer(self):
+        draft = self._draft(
+            risk_state=sms_approval.RISK_RISKY,
+            risk_reason="customer asked for a real person",
+        )
+
+        sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            actor_username="first",
+            send_func=lambda *_args, **_kwargs: self.fail("first step should not send"),
+            approved_at_ms=1000,
+        )
+        sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="67890",
+            actor_username="second",
+            send_func=lambda *_args, **_kwargs: self.fail("repeat first step should not send"),
+            approved_at_ms=2000,
+        )
+
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["first_confirmed_by"], "12345")
+        self.assertEqual(stored["first_confirmed_username"], "first")
+        self.assertEqual(stored["first_confirmed_at_ms"], 1000)
+
     def test_bot_actor_is_rejected(self):
         draft = self._draft()
         result = sms_approval.approve_draft(

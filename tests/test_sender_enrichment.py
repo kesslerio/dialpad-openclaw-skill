@@ -448,8 +448,9 @@ def test_standard_stop_keyword_blocks_sms_automation(monkeypatch, tmp_path):
             "degraded_reason": None,
         },
     )
-    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
     monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
 
     payload = {
@@ -484,8 +485,9 @@ def test_opt_out_with_security_code_persists_opt_out_before_sensitive_filter(mon
             "degraded_reason": None,
         },
     )
-    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
     monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
 
     payload = {
@@ -759,8 +761,9 @@ def test_previously_opted_out_customer_gets_blocked_status_not_persistence_failu
             "degraded_reason": None,
         },
     )
-    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
     monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
 
     conn = webhook_server.sms_approval.init_db()
@@ -787,6 +790,11 @@ def test_previously_opted_out_customer_gets_blocked_status_not_persistence_failu
     assert status["code"] == 200
     assert response["auto_reply_status"] == "blocked_opt_out"
     assert response["auto_reply_draft_id"] is None
+    assert response["telegram_status"] == "sent"
+    assert len(telegram_messages) == 1
+    assert "Automation blocked" in telegram_messages[0]
+    assert "human" in telegram_messages[0]
+    assert "No SMS approval draft" in telegram_messages[0]
 
 
 

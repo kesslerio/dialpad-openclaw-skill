@@ -1844,6 +1844,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     auto_reply_message,
                     reply_policy,
                 )
+                tg_text += build_human_only_blocked_suffix(reply_policy)
                 telegram_sms_sent = send_to_telegram(tg_text)
                 telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif hook_status == "filtered_opt_out":

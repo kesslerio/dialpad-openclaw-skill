@@ -1336,10 +1336,31 @@ def build_human_only_blocked_suffix(reply_policy=None):
     return "\n".join(lines)
 
 
+def invalidate_pending_sms_drafts(thread_key=None, customer_number=None, reason="new_inbound"):
+    """Stale pending approval drafts when newer inbound context makes them unsafe."""
+    if sms_approval is None or (not thread_key and not customer_number):
+        return False
+
+    try:
+        conn = sms_approval.init_db()
+        try:
+            if thread_key:
+                sms_approval.invalidate_pending(conn, thread_key=thread_key, reason=reason)
+            if customer_number:
+                sms_approval.invalidate_pending(conn, customer_number=customer_number, reason=reason)
+        finally:
+            conn.close()
+        return True
+    except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
+        print(f"⚠️  Failed to invalidate pending SMS approvals ({type(exc).__name__})")
+        return False
+
+
 def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_display=None):
     """Create an approval-gated proactive reply draft instead of sending SMS."""
     sender_number = normalized_event.get("recipient_number")
     recipient_number = normalized_event.get("sender_number")
+    thread_key = build_hook_session_key(normalized_event)
     reply_policy = classify_sms_reply_policy(normalized_event.get("text") or "")
     if reply_policy["state"] == "blocked_opt_out":
         if sms_approval is not None and recipient_number:
@@ -1363,9 +1384,13 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
         sender_enrichment=sender_enrichment,
         line_display=line_display,
     ):
+        invalidate_pending_sms_drafts(
+            thread_key=thread_key,
+            customer_number=recipient_number,
+            reason="new_inbound_not_eligible",
+        )
         return False, "not_eligible", None, None, None
 
-    thread_key = build_hook_session_key(normalized_event)
     message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
     if sms_approval is None:
         return False, "approval_unavailable", message, None, reply_policy
@@ -1741,6 +1766,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             )
             hook_status = inbound_alert_decision["reason_code"]
             sensitive_filtered = inbound_alert_decision["sensitive_filtered"]
+
+            if not inbound_alert_decision["eligible"] and hook_status != "filtered_opt_out":
+                invalidate_pending_sms_drafts(
+                    customer_number=from_num,
+                    reason=f"new_inbound_{hook_status}",
+                )
 
             if inbound_alert_decision["eligible"]:
                 line_display = get_line_name(to_num)

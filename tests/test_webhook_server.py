@@ -760,6 +760,50 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         self.assertIsNone(response["auto_reply_draft_id"])
         self.assertTrue(opted_out)
 
+    def test_known_contact_voicemail_opt_out_persists_even_when_reply_not_eligible(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            webhook_server.sms_approval,
+            "DB_PATH",
+            Path(temp_dir) / "approvals.db",
+        ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
+            webhook_server,
+            "DIALPAD_AUTO_REPLY_SALES_LINE",
+            "4155201316",
+        ), patch.object(
+            webhook_server,
+            "lookup_contact_enrichment",
+            return_value={
+                "contact_name": "Jane Doe",
+                "first_name": "Jane",
+                "last_name": "Doe",
+                "company": "Example Co",
+                "job_title": "Owner",
+                "status": "resolved",
+                "degraded": False,
+                "degraded_reason": None,
+            },
+        ), patch.object(webhook_server, "send_to_telegram", return_value=True):
+            payload = {
+                "from_number": "+14155550123",
+                "to_number": ["+14155201316"],
+                "duration": 19,
+                "voicemail_transcription": "Please stop texting me.",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_voicemail_webhook(handler)
+
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+            finally:
+                conn.close()
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(response["auto_reply_status"], "blocked_opt_out")
+        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertTrue(opted_out)
+
     def test_voicemail_risky_transcription_creates_risky_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             webhook_server.sms_approval,

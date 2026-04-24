@@ -1396,18 +1396,10 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "reason_code": "filtered_opt_out",
                     "risk_reason": "customer previously opted out",
                 }
-            sms_approval.invalidate_pending(
+            draft = sms_approval.create_replacement_draft(
                 conn,
-                thread_key=thread_key,
-                reason="superseded_by_new_draft",
-            )
-            sms_approval.invalidate_pending(
-                conn,
-                customer_number=recipient_number,
-                reason="superseded_by_new_draft",
-            )
-            draft = sms_approval.create_draft(
-                conn,
+                invalidate_thread_key=thread_key,
+                invalidate_customer_number=recipient_number,
                 thread_key=thread_key,
                 customer_number=recipient_number,
                 sender_number=sender_number,

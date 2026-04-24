@@ -246,6 +246,45 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertEqual(len(send_calls), 1)
         self.assertEqual(sum(1 for result in results if result.get("sent")), 1)
 
+    def test_concurrent_replacement_drafts_leave_one_pending(self):
+        barrier = threading.Barrier(2)
+
+        def create_from_new_connection(suffix):
+            conn = sms_approval.init_db(sms_approval.DB_PATH)
+            try:
+                barrier.wait(timeout=2)
+                return sms_approval.create_replacement_draft(
+                    conn,
+                    invalidate_thread_key="thread-1",
+                    invalidate_customer_number="+15125550100",
+                    thread_key="thread-1",
+                    customer_number="+15125550100",
+                    sender_number="+14155201316",
+                    draft_text=f"Replacement draft {suffix}.",
+                )
+            finally:
+                conn.close()
+
+        results = []
+        threads = [
+            threading.Thread(target=lambda suffix=suffix: results.append(create_from_new_connection(suffix)))
+            for suffix in ("A", "B")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        rows = self.conn.execute(
+            "SELECT draft_id, status FROM sms_approval_drafts WHERE thread_key = ?",
+            ("thread-1",),
+        ).fetchall()
+        pending = [row for row in rows if row["status"] == sms_approval.STATUS_PENDING]
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(pending), 1)
+
     def test_opted_out_customer_cannot_get_new_or_approved_drafts(self):
         sms_approval.mark_opt_out(
             self.conn,

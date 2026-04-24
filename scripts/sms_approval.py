@@ -144,6 +144,7 @@ def create_draft(
     metadata: dict[str, Any] | None = None,
     draft_id: str | None = None,
     created_at_ms: int | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     if risk_state not in {RISK_NORMAL, RISK_RISKY}:
         raise ValueError(f"invalid risk_state: {risk_state}")
@@ -179,7 +180,8 @@ def create_draft(
             json.dumps(metadata or {}, sort_keys=True),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return get_draft(conn, resolved_draft_id) or {}
 
 
@@ -238,6 +240,7 @@ def invalidate_pending(
     reason: str,
     invalidated_at_ms: int | None = None,
     exclude_draft_id: str | None = None,
+    commit: bool = True,
 ) -> int:
     clauses = ["status IN (?, ?)"]
     params: list[Any] = [STATUS_PENDING, STATUS_RISK_PENDING]
@@ -262,8 +265,45 @@ def invalidate_pending(
         """,
         params,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.rowcount
+
+
+def create_replacement_draft(
+    conn: sqlite3.Connection,
+    *,
+    invalidate_thread_key: str | None = None,
+    invalidate_customer_number: str | None = None,
+    invalidated_reason: str = "superseded_by_new_draft",
+    **draft_kwargs: Any,
+) -> dict[str, Any]:
+    """Atomically stale prior pending drafts and insert the replacement draft."""
+    if not invalidate_thread_key and not invalidate_customer_number:
+        raise ValueError("invalidate_thread_key or invalidate_customer_number is required")
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if invalidate_thread_key:
+            invalidate_pending(
+                conn,
+                thread_key=invalidate_thread_key,
+                reason=invalidated_reason,
+                commit=False,
+            )
+        if invalidate_customer_number:
+            invalidate_pending(
+                conn,
+                customer_number=invalidate_customer_number,
+                reason=invalidated_reason,
+                commit=False,
+            )
+        draft = create_draft(conn, commit=False, **draft_kwargs)
+        conn.commit()
+        return draft
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _is_bot_actor(actor_id: str | None, actor_is_bot: bool = False) -> bool:

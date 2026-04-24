@@ -11,7 +11,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from sms_approval import RISK_NORMAL, RISK_RISKY, create_draft, init_db, invalidate_pending
+from sms_approval import RISK_NORMAL, RISK_RISKY, create_draft, create_replacement_draft, init_db
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,23 +45,25 @@ def main() -> int:
     message = resolve_message_text(args)
     conn = init_db()
     try:
-        if not args.keep_pending:
-            invalidate_pending(
+        draft_args = {
+            "thread_key": args.thread_key,
+            "customer_number": args.customer_number,
+            "sender_number": args.sender_number,
+            "draft_text": message,
+            "source_inbound_id": args.source_inbound_id,
+            "risk_state": args.risk_state,
+            "risk_reason": args.risk_reason,
+            "context_fingerprint": args.context_fingerprint,
+        }
+        if args.keep_pending:
+            draft = create_draft(conn, **draft_args)
+        else:
+            draft = create_replacement_draft(
                 conn,
-                thread_key=args.thread_key,
-                reason="superseded_by_new_draft",
+                invalidate_thread_key=args.thread_key,
+                invalidate_customer_number=args.customer_number,
+                **draft_args,
             )
-        draft = create_draft(
-            conn,
-            thread_key=args.thread_key,
-            customer_number=args.customer_number,
-            sender_number=args.sender_number,
-            draft_text=message,
-            source_inbound_id=args.source_inbound_id,
-            risk_state=args.risk_state,
-            risk_reason=args.risk_reason,
-            context_fingerprint=args.context_fingerprint,
-        )
     finally:
         conn.close()
 

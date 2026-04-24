@@ -180,6 +180,41 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertEqual(stored["dialpad_sms_id"], None)
         self.assertIn("Dialpad unavailable", stored["send_error"])
 
+    def test_failed_delivery_status_remains_unsent(self):
+        draft = self._draft()
+
+        result = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *_args, **_kwargs: {"id": "sms-1", "message_status": "failed"},
+        )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], sms_approval.STATUS_FAILED)
+        self.assertEqual(result["error"], "delivery_status_failed")
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_FAILED)
+        self.assertEqual(stored["dialpad_sms_id"], "sms-1")
+        self.assertEqual(stored["delivery_status"], "failed")
+
+    def test_malformed_send_response_without_sms_id_remains_unsent(self):
+        draft = self._draft()
+
+        result = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *_args, **_kwargs: {"message_status": "queued"},
+        )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], sms_approval.STATUS_FAILED)
+        self.assertEqual(result["error"], "missing_dialpad_sms_id")
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_FAILED)
+        self.assertEqual(stored["send_error"], "missing_dialpad_sms_id")
+
     def test_concurrent_approvals_only_send_once(self):
         draft = self._draft()
         send_calls = []

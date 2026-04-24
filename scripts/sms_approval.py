@@ -29,6 +29,16 @@ ACTION_APPROVE = "approve"
 ACTION_CONFIRM_RISK = "confirm-risk"
 
 BOT_ACTOR_IDS = {"", "agent", "bot", "openclaw", "niemand", "niemand-work"}
+FAILED_DELIVERY_STATUSES = {
+    "failed",
+    "failure",
+    "undelivered",
+    "rejected",
+    "error",
+    "errored",
+    "cancelled",
+    "canceled",
+}
 
 
 def now_ms() -> int:
@@ -279,6 +289,15 @@ def _extract_send_result(result: Any) -> tuple[str | None, str | None]:
     return (str(sms_id) if sms_id is not None else None, str(status) if status is not None else None)
 
 
+def _send_result_failure_reason(sms_id: str | None, delivery_status: str | None) -> str | None:
+    if not sms_id:
+        return "missing_dialpad_sms_id"
+    normalized_status = str(delivery_status or "").strip().lower()
+    if normalized_status in FAILED_DELIVERY_STATUSES:
+        return f"delivery_status_{normalized_status}"
+    return None
+
+
 def approve_draft(
     conn: sqlite3.Connection,
     *,
@@ -390,6 +409,26 @@ def approve_draft(
             from_number=draft["sender_number"],
         )
         sms_id, delivery_status = _extract_send_result(result)
+        failure_reason = _send_result_failure_reason(sms_id, delivery_status)
+        if failure_reason:
+            conn.execute(
+                """
+                UPDATE sms_approval_drafts
+                SET status = ?, dialpad_sms_id = ?, delivery_status = ?, send_error = ?
+                WHERE draft_id = ? AND status = ?
+                """,
+                (STATUS_FAILED, sms_id, delivery_status, failure_reason, draft_id, STATUS_SENDING),
+            )
+            conn.commit()
+            return {
+                "ok": False,
+                "status": STATUS_FAILED,
+                "sent": False,
+                "error": failure_reason,
+                "dialpad_sms_id": sms_id,
+                "delivery_status": delivery_status,
+                "draft": get_draft(conn, draft_id),
+            }
         conn.execute(
             """
             UPDATE sms_approval_drafts

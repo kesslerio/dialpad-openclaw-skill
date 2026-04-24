@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -355,7 +357,11 @@ class CallWebhookHandlerTests(unittest.TestCase):
         telegram_messages = []
         sms_calls = []
 
-        with patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
                 patch.object(
                     webhook_server,
@@ -411,20 +417,23 @@ class CallWebhookHandlerTests(unittest.TestCase):
         response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
         self.assertEqual(len(hook_calls), 1)
-        self.assertEqual(len(sms_calls), 1)
+        self.assertEqual(sms_calls, [])
         self.assertEqual(hook_calls[0]["normalized_event"]["event_type"], "missed_call")
         self.assertEqual(hook_calls[0]["normalized_event"]["call_id"], "call-123")
         self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["knownContact"], False)
         self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["keepBrief"], False)
         self.assertEqual(hook_calls[0]["normalized_event"]["first_contact"]["identityState"], "not_found")
-        self.assertIn("ShapeScale for Business Sales", sms_calls[0]["message"])
+        self.assertFalse(hook_calls[0]["normalized_event"]["auto_reply"]["sent"])
+        self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
+        self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftId"])
         self.assertEqual(len(telegram_messages), 1)
         self.assertTrue(response["missed_call"])
         self.assertTrue(response["hook_forwarded"])
         self.assertEqual(response["hook_status"], "http_200")
         self.assertTrue(response["telegram_sent"])
-        self.assertTrue(response["auto_reply_sent"])
-        self.assertEqual(response["auto_reply_status"], "accepted/queued")
+        self.assertFalse(response["auto_reply_sent"])
+        self.assertEqual(response["auto_reply_status"], "draft_created")
+        self.assertTrue(response["auto_reply_draft_id"])
 
     def test_inbound_missed_call_respects_disabled_hook_config(self):
         telegram_messages = []
@@ -630,11 +639,36 @@ class CallWebhookHandlerTests(unittest.TestCase):
 
 
 class VoicemailWebhookHandlerTests(unittest.TestCase):
-    def test_voicemail_sales_auto_reply_reaches_sender(self):
+    def setUp(self):
+        webhook_server.sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear()
+        self.addCleanup(webhook_server.sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear)
+
+    def test_voicemail_webhook_requires_auth_when_secret_configured(self):
+        with patch.object(webhook_server, "WEBHOOK_SECRET", "secret-123"):
+            payload = {
+                "from_number": "+14155550123",
+                "to_number": ["+14155201316"],
+                "duration": 19,
+                "voicemail_transcription": "Please call me back.",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_voicemail_webhook(handler)
+
+        self.assertEqual(status["code"], 401)
+
+    def test_voicemail_sales_auto_reply_creates_approval_draft(self):
         sms_calls = []
         telegram_messages = []
 
-        with patch.object(
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            webhook_server.sms_approval,
+            "DB_PATH",
+            Path(temp_dir) / "approvals.db",
+        ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
+            webhook_server,
+            "DIALPAD_AUTO_REPLY_SALES_LINE",
+            "4155201316",
+        ), patch.object(
             webhook_server,
             "lookup_contact_enrichment",
             return_value={
@@ -675,12 +709,216 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
         self.assertEqual(len(telegram_messages), 1)
-        self.assertEqual(len(sms_calls), 1)
-        self.assertEqual(sms_calls[0]["to_numbers"], ["+14155550123"])
-        self.assertEqual(sms_calls[0]["from_number"], "+14155201316")
-        self.assertIn("thanks for the voicemail", sms_calls[0]["message"])
-        self.assertTrue(response["auto_reply_sent"])
-        self.assertEqual(response["auto_reply_status"], "accepted/queued")
+        self.assertEqual(sms_calls, [])
+        self.assertFalse(response["auto_reply_sent"])
+        self.assertEqual(response["auto_reply_status"], "draft_created")
+        self.assertTrue(response["auto_reply_draft_id"])
+
+    def test_voicemail_opt_out_transcription_blocks_draft_and_persists_opt_out(self):
+        telegram_messages = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            webhook_server.sms_approval,
+            "DB_PATH",
+            Path(temp_dir) / "approvals.db",
+        ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
+            webhook_server,
+            "DIALPAD_AUTO_REPLY_SALES_LINE",
+            "4155201316",
+        ), patch.object(
+            webhook_server,
+            "lookup_contact_enrichment",
+            return_value={
+                "contact_name": None,
+                "first_name": None,
+                "last_name": None,
+                "company": None,
+                "job_title": None,
+                "status": "not_found",
+                "degraded": False,
+                "degraded_reason": None,
+            },
+        ), patch.object(
+            webhook_server,
+            "send_to_telegram",
+            side_effect=lambda text: telegram_messages.append(text) or True,
+        ):
+            payload = {
+                "from_number": "+14155550123",
+                "to_number": ["+14155201316"],
+                "duration": 19,
+                "voicemail_transcription": "STOP texting me.",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_voicemail_webhook(handler)
+
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+            finally:
+                conn.close()
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertFalse(response["auto_reply_sent"])
+        self.assertEqual(response["auto_reply_status"], "blocked_opt_out")
+        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertTrue(opted_out)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertIn("Automation blocked", telegram_messages[0])
+        self.assertIn("human", telegram_messages[0])
+        self.assertIn("No SMS approval draft", telegram_messages[0])
+
+    def test_voicemail_opt_out_persistence_failure_returns_failed_status(self):
+        customer_number = "+14155550987"
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"DIALPAD_SMS_APPROVAL_EMERGENCY_PATH": temp_dir},
+        ), patch.object(
+            webhook_server.sms_approval,
+            "DB_PATH",
+            Path(temp_dir) / "approvals.db",
+        ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
+            webhook_server,
+            "DIALPAD_AUTO_REPLY_SALES_LINE",
+            "4155201316",
+        ), patch.object(
+            webhook_server,
+            "lookup_contact_enrichment",
+            return_value={
+                "contact_name": None,
+                "first_name": None,
+                "last_name": None,
+                "company": None,
+                "job_title": None,
+                "status": "not_found",
+                "degraded": False,
+                "degraded_reason": None,
+            },
+        ), patch.object(
+            webhook_server,
+            "send_to_telegram",
+            return_value=True,
+        ), patch.object(
+            webhook_server.sms_approval,
+            "mark_opt_out",
+            side_effect=OSError("simulated approval db failure"),
+        ):
+            payload = {
+                "from_number": customer_number,
+                "to_number": ["+14155201316"],
+                "duration": 19,
+                "voicemail_transcription": "STOP texting me.",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_voicemail_webhook(handler)
+
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                opted_out = webhook_server.sms_approval.is_opted_out(conn, customer_number)
+            finally:
+                conn.close()
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(response["auto_reply_status"], "opt_out_persistence_failed")
+        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertTrue(opted_out)
+
+    def test_known_contact_voicemail_opt_out_persists_even_when_reply_not_eligible(self):
+        telegram_messages = []
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            webhook_server.sms_approval,
+            "DB_PATH",
+            Path(temp_dir) / "approvals.db",
+        ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
+            webhook_server,
+            "DIALPAD_AUTO_REPLY_SALES_LINE",
+            "4155201316",
+        ), patch.object(
+            webhook_server,
+            "lookup_contact_enrichment",
+            return_value={
+                "contact_name": "Jane Doe",
+                "first_name": "Jane",
+                "last_name": "Doe",
+                "company": "Example Co",
+                "job_title": "Owner",
+                "status": "resolved",
+                "degraded": False,
+                "degraded_reason": None,
+            },
+        ), patch.object(
+            webhook_server,
+            "send_to_telegram",
+            side_effect=lambda text: telegram_messages.append(text) or True,
+        ):
+            payload = {
+                "from_number": "+14155550123",
+                "to_number": ["+14155201316"],
+                "duration": 19,
+                "voicemail_transcription": "Please stop texting me.",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_voicemail_webhook(handler)
+
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+            finally:
+                conn.close()
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(response["auto_reply_status"], "blocked_opt_out")
+        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertTrue(opted_out)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertIn("Automation blocked", telegram_messages[0])
+        self.assertIn("No SMS approval draft", telegram_messages[0])
+
+    def test_voicemail_risky_transcription_creates_risky_draft(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            webhook_server.sms_approval,
+            "DB_PATH",
+            Path(temp_dir) / "approvals.db",
+        ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
+            webhook_server,
+            "DIALPAD_AUTO_REPLY_SALES_LINE",
+            "4155201316",
+        ), patch.object(
+            webhook_server,
+            "lookup_contact_enrichment",
+            return_value={
+                "contact_name": None,
+                "first_name": None,
+                "last_name": None,
+                "company": None,
+                "job_title": None,
+                "status": "not_found",
+                "degraded": False,
+                "degraded_reason": None,
+            },
+        ), patch.object(webhook_server, "send_to_telegram", return_value=True):
+            payload = {
+                "from_number": "+14155550123",
+                "to_number": ["+14155201316"],
+                "duration": 19,
+                "voicemail_transcription": "I need to talk to a real person.",
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_voicemail_webhook(handler)
+
+            response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                draft = webhook_server.sms_approval.get_draft(conn, response["auto_reply_draft_id"])
+            finally:
+                conn.close()
+
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(response["auto_reply_status"], "draft_created")
+        self.assertEqual(draft["risk_state"], webhook_server.sms_approval.RISK_RISKY)
 
 
 if __name__ == "__main__":

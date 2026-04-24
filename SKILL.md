@@ -31,6 +31,12 @@ Use this skill to:
 bin/send_sms.py --to "+14155551234" --from "+14155201316" --message 'Hello from OpenClaw!'
 ```
 
+**Create/approve an SMS draft (human approval path):**
+```bash
+bin/create_sms_draft.py --thread-key "manual:thread" --to "+14155551234" --from "+14155201316" --message 'Exact draft text' --json
+bin/approve_sms_draft.py smsdraft_abc123 --actor-id "telegram-user-123" --actor-username "operator" --approval-token "$DIALPAD_SMS_APPROVAL_TOKEN" --json
+```
+
 **Group Intro (mirrored fallback):**
 ```bash
 bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
@@ -78,6 +84,8 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 10. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
 11. **Current-turn verification:** "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory. If the current turn has not verified the action yet, say that plainly and run the tool now.
 12. **Identity guardrail:** For first-contact work, soft signals like first name, area code, industry, or job title are not enough to merge or update a contact. Keep uncertain identity `draft-only` and let the CRM layer prove the match before mutating anything.
+13. **Inbound automation guardrail:** Dialpad inbound hooks may create SMS approval drafts, but they must not send customer SMS directly. Use `bin/approve_sms_draft.py` only with a real human actor id and an operator-only `DIALPAD_SMS_APPROVAL_TOKEN`; agent/bot actors are rejected by the approval ledger.
+14. **Opt-out guardrail:** Explicit opt-out language is a hard stop. Do not create override drafts or send follow-ups on those threads unless a human operator handles the conversation outside automation.
 
 ## Reference Documentation
 

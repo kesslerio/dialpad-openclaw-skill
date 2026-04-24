@@ -20,7 +20,7 @@ This repo does not validate:
 - downstream OpenClaw prompt quality
 - autonomous enrichment quality
 - session semantics or dedupe behavior inside OpenClaw
-- whether OpenClaw should auto-send without approval
+- autonomous outbound sending; SMS send authority stays in the deterministic approval ledger
 
 ## Default Operating Model
 
@@ -28,7 +28,7 @@ Recommended OpenClaw policy:
 - proactively enrich inbound events
 - generate a summary and recommended next action
 - draft a response
-- require human approval before any outbound send
+- require deterministic human approval before any outbound send
 
 Recommended default:
 
@@ -45,9 +45,8 @@ Recommended default:
 Suggested `sendMode` values:
 - `draft_only`
 - `approval_required`
-- `auto_send`
 
-`approval_required` should be the default.
+`approval_required` should be the default. `auto_send` is intentionally unsupported for inbound Dialpad-triggered SMS.
 
 ## Dialpad-Side Environment
 
@@ -63,16 +62,20 @@ export OPENCLAW_HOOKS_PATH="/hooks/agent"
 export OPENCLAW_HOOKS_NAME="Dialpad SMS"
 export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
 export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
-export OPENCLAW_HOOKS_SMS_ENABLED="1"
-export OPENCLAW_HOOKS_CALL_ENABLED="1"
-export DIALPAD_AUTO_REPLY_ENABLED="1"
+export OPENCLAW_HOOKS_SMS_ENABLED="0"
+export OPENCLAW_HOOKS_CALL_ENABLED="0"
+export DIALPAD_AUTO_REPLY_ENABLED="0"
+export DIALPAD_SMS_APPROVAL_DB="/home/art/clawd/logs/sms_approvals.db"
+export DIALPAD_SMS_APPROVAL_TOKEN="operator-only-random-token"
 ```
 
 Behavior:
-- when `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS forwarding is enabled by default unless `OPENCLAW_HOOKS_SMS_ENABLED=0`
-- when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding is enabled by default unless `OPENCLAW_HOOKS_CALL_ENABLED=0`
-- when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, first-contact messages on the sales line `(415) 520-1316` get an automatic SMS acknowledgment before the hook handoff continues
-- voicemail remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails also get the SMS acknowledgment when auto-replies are enabled
+- when `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS forwarding still requires `OPENCLAW_HOOKS_SMS_ENABLED=1`
+- when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding still requires `OPENCLAW_HOOKS_CALL_ENABLED=1`
+- when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, first-contact messages on the sales line `(415) 520-1316` create exact-text approval drafts instead of sending SMS directly
+- voicemail remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
+- explicit opt-out language creates no draft, invalidates pending drafts for that customer, and emits only a human-only Telegram notice
+- CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied by the operator approval surface
 - if your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly
 - the local gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
 
@@ -84,13 +87,15 @@ Relevant endpoints in `scripts/webhook_server.py`:
   - stores SMS
   - optionally forwards eligible inbound SMS to OpenClaw
   - optionally sends Telegram SMS alerts
+  - creates approval drafts for eligible first-contact sales-line replies, but does not send SMS directly
 - `POST /webhook/dialpad-call`
   - detects inbound missed calls
   - optionally forwards missed calls to OpenClaw
   - optionally sends Telegram missed-call alerts using the event timestamp when available
   - escapes dynamic Telegram fields before sending
+  - creates approval drafts for eligible first-contact sales-line missed-call acknowledgments, but does not send SMS directly
 - `POST /webhook/dialpad-voicemail`
-  - Telegram-only in this repo
+  - Telegram notification plus optional approval-draft creation for eligible first-contact sales-line voicemails
 
 ## OpenClaw Receiver Contract
 
@@ -117,6 +122,7 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
 - `to`
 - `agentId`
 - `firstContact`
+- `autoReply`
 
 ### First-Contact Assist Hint
 
@@ -153,7 +159,9 @@ Interpretation:
 - if the match is clear, suggest Dialpad contact normalization or update
 - if the evidence is only first name, area code, industry, or job title, keep the lead ambiguous and draft-only until stronger proof appears
 - if `keepBrief` is `true`, skip the long background pass and stay short
-- if `autoReply` is present, the webhook server already sent the sales-line acknowledgment and downstream automation should not send the same reply again
+- if `autoReply` is present, treat it as approval-draft metadata. `sent: false` means the webhook created or attempted a draft and downstream automation must not send the same reply directly.
+- if `autoReply.replyPolicy.state` is `risky`, the approval path must require a second confirmation.
+- if opt-out language is detected, the event is not forwarded as a normal hook payload; automation must remain human-only.
 
 ### SMS Example
 
@@ -186,8 +194,15 @@ Interpretation:
   },
   "autoReply": {
     "eligible": true,
-    "sent": true,
-    "status": "accepted/queued",
+    "sent": false,
+    "draftCreated": true,
+    "draftId": "smsdraft_abc123",
+    "status": "draft_created",
+    "replyPolicy": {
+      "state": "normal",
+      "reason_code": "eligible",
+      "risk_reason": null
+    },
     "message": "Hi there, thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly."
   }
 }
@@ -221,8 +236,15 @@ Interpretation:
   },
   "autoReply": {
     "eligible": true,
-    "sent": true,
-    "status": "accepted/queued",
+    "sent": false,
+    "draftCreated": true,
+    "draftId": "smsdraft_def456",
+    "status": "draft_created",
+    "replyPolicy": {
+      "state": "normal",
+      "reason_code": "eligible",
+      "risk_reason": null
+    },
     "message": "Hi there, you've reached ShapeScale for Business Sales. Sorry we missed your call. How can we help?"
   }
 }
@@ -291,8 +313,15 @@ SMS:
   },
   "autoReply": {
     "eligible": true,
-    "sent": true,
-    "status": "accepted/queued",
+    "sent": false,
+    "draftCreated": true,
+    "draftId": "smsdraft_abc123",
+    "status": "draft_created",
+    "replyPolicy": {
+      "state": "normal",
+      "reason_code": "eligible",
+      "risk_reason": null
+    },
     "message": "Hi there, thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly."
   }
 }
@@ -419,7 +448,7 @@ OpenClaw should:
 - require current-turn verification before any success claim about sending or updating
 - treat stale context as non-evidence for "Already sent" or "Already updated"
 
-Outbound send must always enforce `sendMode`.
+Outbound send must always go through `scripts/approve_sms_draft.py` or an equivalent deterministic approval handler with a real human actor id plus a trusted approval token/callback. The agent or bot must not approve its own draft.
 
 ## Rollout Plan
 
@@ -430,7 +459,7 @@ Recommended rollout:
 3. verify real SMS and missed-call payloads
 4. add normalization and proactive enrichment
 5. ship `approval_required` mode first
-6. only enable `auto_send` if explicitly desired later
+6. re-enable hook classes only after approval drafts and stale/opt-out behavior are verified
 
 ## Validation Checklist
 
@@ -445,7 +474,7 @@ OpenClaw-side:
 - payloads are logged with secret redaction
 - `sessionKey` is persisted for dedupe
 - review items are created for inbound SMS and missed calls
-- outbound replies require approval by default
+- outbound replies require approval; autonomous SMS send is not supported for inbound Dialpad-triggered events
 
 ## Monitoring
 

@@ -1376,7 +1376,7 @@ def mark_opt_out_fail_closed(customer_number, *, reason="customer_opt_out", sour
     except Exception as exc:  # noqa: BLE001 - explicit opt-outs must fail closed.
         print(f"⚠️  Failed to persist opt-out ({type(exc).__name__})")
 
-    invalidated = invalidate_pending_sms_drafts(customer_number=customer_number, reason=reason)
+    invalidate_pending_sms_drafts(customer_number=customer_number, reason=reason)
     try:
         sms_approval.record_emergency_opt_out(
             customer_number=customer_number,
@@ -1386,7 +1386,7 @@ def mark_opt_out_fail_closed(customer_number, *, reason="customer_opt_out", sour
         return True
     except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
         print(f"⚠️  Failed to record emergency opt-out ({type(exc).__name__})")
-        return invalidated
+        return False
 
 
 def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_display=None):
@@ -1396,11 +1396,16 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
     thread_key = build_hook_session_key(normalized_event)
     reply_policy = classify_sms_reply_policy(normalized_event.get("text") or "")
     if reply_policy["state"] == "blocked_opt_out":
-        mark_opt_out_fail_closed(
+        opt_out_blocked = mark_opt_out_fail_closed(
             recipient_number,
             reason="customer_opt_out",
             source=normalized_event.get("event_type"),
         )
+        if not opt_out_blocked:
+            return False, "opt_out_persistence_failed", None, None, {
+                **reply_policy,
+                "risk_reason": "explicit opt-out could not be made durable",
+            }
         return False, "blocked_opt_out", None, None, reply_policy
 
     if not should_send_proactive_reply(

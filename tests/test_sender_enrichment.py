@@ -13,6 +13,13 @@ sys.path.insert(0, str(ROOT))
 import webhook_server
 
 
+@pytest.fixture(autouse=True)
+def _clear_emergency_opt_out_memory():
+    webhook_server.sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear()
+    yield
+    webhook_server.sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear()
+
+
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload

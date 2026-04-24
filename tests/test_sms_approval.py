@@ -21,13 +21,26 @@ class SmsApprovalTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.original_db_path = sms_approval.DB_PATH
+        self.original_emergency_path = os.environ.get("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH")
         sms_approval.DB_PATH = Path(self.temp_dir.name) / "approvals.db"
+        os.environ["DIALPAD_SMS_APPROVAL_EMERGENCY_PATH"] = str(
+            Path(self.temp_dir.name) / "emergency-opt-outs.jsonl"
+        )
+        sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear()
         self.addCleanup(self._restore_db_path)
+        self.addCleanup(self._restore_emergency_path)
         self.conn = sms_approval.init_db()
         self.addCleanup(self.conn.close)
 
     def _restore_db_path(self):
         sms_approval.DB_PATH = self.original_db_path
+
+    def _restore_emergency_path(self):
+        sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear()
+        if self.original_emergency_path is None:
+            os.environ.pop("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH", None)
+        else:
+            os.environ["DIALPAD_SMS_APPROVAL_EMERGENCY_PATH"] = self.original_emergency_path
 
     def _draft(self, **kwargs):
         params = {
@@ -320,20 +333,6 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertFalse(result["sent"])
 
     def test_emergency_opt_out_blocks_new_and_existing_drafts(self):
-        emergency_path = Path(self.temp_dir.name) / "emergency-opt-outs.jsonl"
-        original_emergency_path = os.environ.get("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH")
-        os.environ["DIALPAD_SMS_APPROVAL_EMERGENCY_PATH"] = str(emergency_path)
-        self.addCleanup(
-            lambda: (
-                os.environ.pop("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH", None)
-                if original_emergency_path is None
-                else os.environ.__setitem__(
-                    "DIALPAD_SMS_APPROVAL_EMERGENCY_PATH",
-                    original_emergency_path,
-                )
-            )
-        )
-
         draft = self._draft()
         sms_approval.record_emergency_opt_out(
             customer_number="+15125550100",

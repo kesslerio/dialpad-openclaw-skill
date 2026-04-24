@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 DB_PATH = Path(os.environ.get("DIALPAD_SMS_APPROVAL_DB", "/home/art/clawd/logs/sms_approvals.db"))
 DEFAULT_EMERGENCY_OPT_OUT_PATH = Path("/tmp/dialpad_sms_approval_emergency_opt_outs.jsonl")
+_EMERGENCY_OPT_OUT_MEMORY: set[str] = set()
 
 STATUS_PENDING = "pending"
 STATUS_RISK_PENDING = "risk_pending"
@@ -76,6 +77,7 @@ def record_emergency_opt_out(
     normalized = normalize_phone_number(customer_number)
     if not normalized:
         raise ValueError("customer_number is required")
+    _EMERGENCY_OPT_OUT_MEMORY.add(normalized)
 
     payload = {
         "customer_number_normalized": normalized,
@@ -102,6 +104,8 @@ def is_emergency_opted_out(customer_number: str | None) -> bool:
     normalized = normalize_phone_number(customer_number)
     if not normalized:
         return False
+    if normalized in _EMERGENCY_OPT_OUT_MEMORY:
+        return True
 
     for path in emergency_opt_out_paths():
         try:

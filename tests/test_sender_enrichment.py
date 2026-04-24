@@ -354,6 +354,7 @@ def test_inbound_sales_sms_creates_approval_draft_on_first_contact(monkeypatch, 
     assert "not sent" in telegram_messages[0]
     assert response["auto_reply_draft_id"] in telegram_messages[0].replace("\\_", "_")
     assert "bin/approve_sms_draft.py" in telegram_messages[0]
+    assert "--approval-token" in telegram_messages[0]
 
 
 def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(monkeypatch, tmp_path):
@@ -623,6 +624,7 @@ def test_risky_inbound_sales_sms_creates_two_step_approval_draft(monkeypatch, tm
     assert hook_calls[0]["auto_reply"]["replyPolicy"]["state"] == "risky"
     assert "Second confirmation required" in telegram_messages[0]
     assert "Risk:" in telegram_messages[0]
+    assert "--approval-token" in telegram_messages[0]
 
     conn = webhook_server.sms_approval.init_db()
     try:
@@ -631,6 +633,60 @@ def test_risky_inbound_sales_sms_creates_two_step_approval_draft(monkeypatch, tm
         conn.close()
     assert draft["risk_state"] == webhook_server.sms_approval.RISK_RISKY
     assert draft["status"] == webhook_server.sms_approval.STATUS_PENDING
+
+
+def test_previously_opted_out_customer_gets_blocked_status_not_persistence_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "first_name": None,
+            "last_name": None,
+            "company": None,
+            "job_title": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        webhook_server.sms_approval.mark_opt_out(
+            conn,
+            customer_number="+14155550123",
+            reason="customer_opt_out",
+            source="test",
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Can you answer one more question?",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert response["auto_reply_status"] == "blocked_opt_out"
+    assert response["auto_reply_draft_id"] is None
 
 
 

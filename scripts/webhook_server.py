@@ -1303,7 +1303,7 @@ def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
         f"*Draft ID:* `{escape_telegram_markdown(draft_id)}`",
         f"*Exact text:*\n{escape_telegram_markdown(draft_message)}",
         "",
-        f"Approve from an operator shell: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --actor-id <human-id> --json`",
+        f"Approve from an operator shell: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --actor-id <human-id> --approval-token \"$DIALPAD_SMS_APPROVAL_TOKEN\" --json`",
     ]
     if risk_state == "risky":
         reason = reply_policy.get("risk_reason") or "risk policy matched"
@@ -1311,7 +1311,7 @@ def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
             [
                 "",
                 f"⚠️ *Risk:* {escape_telegram_markdown(reason)}",
-                f"Second confirmation required: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --action confirm-risk --actor-id <human-id> --json`",
+                f"Second confirmation required: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --action confirm-risk --actor-id <human-id> --approval-token \"$DIALPAD_SMS_APPROVAL_TOKEN\" --json`",
             ]
         )
     return "\n".join(lines)
@@ -1370,6 +1370,12 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
     try:
         conn = sms_approval.init_db()
         try:
+            if sms_approval.is_opted_out(conn, recipient_number):
+                return False, "blocked_opt_out", message, None, {
+                    "state": "blocked_opt_out",
+                    "reason_code": "filtered_opt_out",
+                    "risk_reason": "customer previously opted out",
+                }
             sms_approval.invalidate_pending(
                 conn,
                 thread_key=thread_key,

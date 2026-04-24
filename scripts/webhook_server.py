@@ -1840,7 +1840,13 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 print("   🔒 Sensitive message filtered (not forwarding to OpenClaw hooks)")
             elif hook_status == "filtered_opt_out":
                 print("   🛑 Opt-out message filtered (automation send path blocked)")
-                mark_opt_out_fail_closed(from_num, reason="customer_opt_out", source="sms")
+                opt_out_blocked = mark_opt_out_fail_closed(
+                    from_num,
+                    reason="customer_opt_out",
+                    source="sms",
+                )
+                if not opt_out_blocked:
+                    hook_status = "opt_out_persistence_failed"
         elif direction == "outbound" and sms_approval is not None:
             outbound_customers = to_num if isinstance(to_num, list) else [to_num]
             outbound_customers = [customer for customer in outbound_customers if customer]
@@ -1894,6 +1900,14 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 )
                 telegram_sms_sent = send_to_telegram(tg_text)
                 telegram_status = "human_only_notified" if telegram_sms_sent else TELEGRAM_STATUS_FAILED
+            elif hook_status == "opt_out_persistence_failed":
+                tg_text = (
+                    "🛑 Dialpad SMS opt-out persistence failed / human-only\n"
+                    f"From: {escape_telegram_markdown(str(from_num))}\n"
+                    "Automation did not create a draft, but the opt-out could not be confirmed durable."
+                )
+                telegram_sms_sent = send_to_telegram(tg_text)
+                telegram_status = "opt_out_persistence_failed" if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif not DIALPAD_SMS_TELEGRAM_NOTIFY:
                 telegram_status = "disabled"
             else:

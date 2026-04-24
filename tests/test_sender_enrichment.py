@@ -573,6 +573,78 @@ def test_opt_out_persistence_failure_records_emergency_block(monkeypatch, tmp_pa
     assert result["sent"] is False
 
 
+def test_opt_out_persistence_total_failure_reports_failure_status(monkeypatch, tmp_path):
+    approval_db = tmp_path / "approvals.db"
+    emergency_path = tmp_path / "emergency-opt-outs-dir"
+    emergency_path.mkdir()
+    monkeypatch.setenv("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH", str(emergency_path))
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "first_name": None,
+            "last_name": None,
+            "company": None,
+            "job_title": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        pending = webhook_server.sms_approval.create_draft(
+            conn,
+            thread_key="prior-thread",
+            customer_number="+14155550123",
+            sender_number="+14155201316",
+            draft_text="Prior draft must not remain approvable.",
+        )
+    finally:
+        conn.close()
+
+    def _fail_mark_opt_out(*_args, **_kwargs):
+        raise OSError("simulated read-only approval db")
+
+    monkeypatch.setattr(webhook_server.sms_approval, "mark_opt_out", _fail_mark_opt_out)
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Please stop texting me.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert response["hook_status"] == "opt_out_persistence_failed"
+    assert response["telegram_status"] == "opt_out_persistence_failed"
+    assert "persistence failed" in telegram_messages[0]
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        stale_draft = webhook_server.sms_approval.get_draft(conn, pending["draft_id"])
+        opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+    finally:
+        conn.close()
+    assert stale_draft["status"] == webhook_server.sms_approval.STATUS_STALE
+    assert opted_out is True
+
+
 def test_standard_stop_keyword_blocks_sms_automation(monkeypatch, tmp_path):
     monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
     monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")

@@ -28,8 +28,8 @@ Environment Variables:
 - OPENCLAW_HOOKS_CHANNEL (optional)
 - OPENCLAW_HOOKS_TO (optional)
 - OPENCLAW_HOOKS_AGENT_ID (optional)
-- OPENCLAW_HOOKS_SMS_ENABLED (default: enabled)
-- OPENCLAW_HOOKS_CALL_ENABLED (default: enabled)
+- OPENCLAW_HOOKS_SMS_ENABLED (default: disabled)
+- OPENCLAW_HOOKS_CALL_ENABLED (default: disabled)
 """
 
 import json
@@ -57,6 +57,11 @@ try:
     from send_sms import send_sms as dialpad_send_sms
 except Exception:
     dialpad_send_sms = None
+
+try:
+    import sms_approval
+except Exception:
+    sms_approval = None
 
 
 def parse_bool_env(raw_value, default=True):
@@ -88,12 +93,12 @@ OPENCLAW_HOOKS_CALL_NAME = os.environ.get("OPENCLAW_HOOKS_CALL_NAME", "Dialpad M
 OPENCLAW_HOOKS_CHANNEL = os.environ.get("OPENCLAW_HOOKS_CHANNEL", "")
 OPENCLAW_HOOKS_TO = os.environ.get("OPENCLAW_HOOKS_TO", "")
 OPENCLAW_HOOKS_AGENT_ID = os.environ.get("OPENCLAW_HOOKS_AGENT_ID", "")
-OPENCLAW_HOOKS_SMS_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_SMS_ENABLED"), True)
-OPENCLAW_HOOKS_CALL_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_CALL_ENABLED"), True)
+OPENCLAW_HOOKS_SMS_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_SMS_ENABLED"), False)
+OPENCLAW_HOOKS_CALL_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_CALL_ENABLED"), False)
 DIALPAD_SMS_TELEGRAM_NOTIFY = os.environ.get("DIALPAD_SMS_TELEGRAM_NOTIFY", "1").lower() in {"1", "true", "yes", "on"}
 DIALPAD_PRIORITY_ROUTE_TO = os.environ.get("DIALPAD_PRIORITY_ROUTE_TO", "")
 DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", "")
-DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), True)
+DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), False)
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -147,6 +152,20 @@ SENSITIVE_KEYWORD_PATTERNS = (
 
 CODE_TOKEN_PATTERN = re.compile(r"\b(?:\d[\s-]?){4,8}\b")
 CALLS_ENDPOINT = "https://dialpad.com/api/v2/call"
+
+OPT_OUT_PATTERNS = (
+    re.compile(r"^\s*(stop|stopall|unsubscribe|cancel|end|quit)\s*[.!]?\s*$", re.IGNORECASE),
+    re.compile(r"\b(stop|unsubscribe|remove me|do not contact|don't contact)\b", re.IGNORECASE),
+    re.compile(r"\b(do not|don't|please don't)\s+bother me\b", re.IGNORECASE),
+    re.compile(r"\bleave me alone\b", re.IGNORECASE),
+)
+
+RISKY_REPLY_PATTERNS = (
+    re.compile(r"\b(real person|human|representative|manager)\b", re.IGNORECASE),
+    re.compile(r"\b(lawyer|attorney|legal|complaint|report you)\b", re.IGNORECASE),
+    re.compile(r"\b(confused|confusion|wrong time|already|thought today|when are we)\b", re.IGNORECASE),
+    re.compile(r"\b(angry|upset|frustrated|annoyed)\b", re.IGNORECASE),
+)
 
 
 def log_line(message):
@@ -484,6 +503,30 @@ def is_sensitive_message(text="", sender="", contact_number=""):
     return has_code and has_security_context
 
 
+def classify_sms_reply_policy(text):
+    """Classify inbound text for deterministic SMS reply safety."""
+    body = str(text or "")
+    for pattern in OPT_OUT_PATTERNS:
+        if pattern.search(body):
+            return {
+                "state": "blocked_opt_out",
+                "reason_code": "filtered_opt_out",
+                "risk_reason": "explicit opt-out language",
+            }
+    for pattern in RISKY_REPLY_PATTERNS:
+        if pattern.search(body):
+            return {
+                "state": "risky",
+                "reason_code": "risky_confirmation_required",
+                "risk_reason": f"matched risky phrase: {pattern.pattern}",
+            }
+    return {
+        "state": "normal",
+        "reason_code": "eligible",
+        "risk_reason": None,
+    }
+
+
 def first_value(value):
     """Return first item for list-like values, otherwise passthrough."""
     if isinstance(value, (list, tuple)):
@@ -611,11 +654,21 @@ def assess_inbound_sms_alert_eligibility(
             "sensitive_filtered": True,
             "notification_type": resolved_type,
         }
+    reply_policy = classify_sms_reply_policy(text)
+    if reply_policy["state"] == "blocked_opt_out":
+        return {
+            "eligible": False,
+            "reason_code": reply_policy["reason_code"],
+            "sensitive_filtered": False,
+            "notification_type": resolved_type,
+            "reply_policy": reply_policy,
+        }
     return {
         "eligible": True,
         "reason_code": "eligible",
         "sensitive_filtered": False,
         "notification_type": resolved_type,
+        "reply_policy": reply_policy,
     }
 
 
@@ -1225,32 +1278,130 @@ def summarize_message_status(result):
 
 
 def send_proactive_reply(normalized_event, sender_enrichment=None, line_display=None):
-    """Send the sales-line auto-reply SMS for eligible first-contact inbound events."""
-    if dialpad_send_sms is None:
-        return False, "sender_unavailable", None
-
+    """Deprecated direct-send path retained as a safe no-op."""
     if not should_send_proactive_reply(
         normalized_event,
         sender_enrichment=sender_enrichment,
         line_display=line_display,
     ):
         return False, "not_eligible", None
-
-    recipient_number = normalized_event.get("sender_number")
-    sender_number = normalized_event.get("recipient_number")
     message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
+    return False, "approval_required", message
 
-    try:
-        result = dialpad_send_sms(
-            [recipient_number],
-            message,
-            from_number=sender_number,
+
+def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
+    """Build Telegram review text for an approval draft without implying a send."""
+    if not draft_id or not draft_message:
+        return ""
+
+    reply_policy = reply_policy or {}
+    risk_state = reply_policy.get("state")
+    lines = [
+        "",
+        "",
+        "📝 *SMS approval draft \\(not sent\\)*",
+        f"*Draft ID:* `{escape_telegram_markdown(draft_id)}`",
+        f"*Exact text:*\n{escape_telegram_markdown(draft_message)}",
+        "",
+        f"Approve from an operator shell: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --actor-id <human-id> --json`",
+    ]
+    if risk_state == "risky":
+        reason = reply_policy.get("risk_reason") or "risk policy matched"
+        lines.extend(
+            [
+                "",
+                f"⚠️ *Risk:* {escape_telegram_markdown(reason)}",
+                f"Second confirmation required: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --action confirm-risk --actor-id <human-id> --json`",
+            ]
         )
-        status_label, _raw_status = summarize_message_status(result)
-        return True, status_label, message
-    except Exception as e:
-        print(f"⚠️  Proactive auto-reply failed ({type(e).__name__})")
-        return False, "failed", message
+    return "\n".join(lines)
+
+
+def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_display=None):
+    """Create an approval-gated proactive reply draft instead of sending SMS."""
+    if not should_send_proactive_reply(
+        normalized_event,
+        sender_enrichment=sender_enrichment,
+        line_display=line_display,
+    ):
+        return False, "not_eligible", None, None, None
+
+    thread_key = build_hook_session_key(normalized_event)
+    sender_number = normalized_event.get("recipient_number")
+    recipient_number = normalized_event.get("sender_number")
+    message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
+    reply_policy = classify_sms_reply_policy(normalized_event.get("text") or "")
+    if reply_policy["state"] == "blocked_opt_out":
+        if sms_approval is not None and recipient_number:
+            try:
+                conn = sms_approval.init_db()
+                try:
+                    sms_approval.mark_opt_out(
+                        conn,
+                        customer_number=recipient_number,
+                        reason="customer_opt_out",
+                        source=normalized_event.get("event_type"),
+                    )
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
+                print(f"⚠️  Failed to persist opt-out ({type(exc).__name__})")
+        return False, "blocked_opt_out", message, None, reply_policy
+    if sms_approval is None:
+        return False, "approval_unavailable", message, None, reply_policy
+    if not sender_number or not recipient_number:
+        return False, "missing_sender_or_recipient", message, None, reply_policy
+
+    risk_state = (
+        sms_approval.RISK_RISKY
+        if reply_policy["state"] == "risky"
+        else sms_approval.RISK_NORMAL
+    )
+    context_fingerprint = sms_approval.build_context_fingerprint(
+        {
+            "thread_key": thread_key,
+            "sender": sender_number,
+            "recipient": recipient_number,
+            "message_id": normalized_event.get("message_id") or normalized_event.get("call_id"),
+            "line_display": line_display or normalized_event.get("line_display"),
+            "first_contact": normalized_event.get("first_contact"),
+        }
+    )
+    try:
+        conn = sms_approval.init_db()
+        try:
+            sms_approval.invalidate_pending(
+                conn,
+                thread_key=thread_key,
+                reason="superseded_by_new_draft",
+            )
+            sms_approval.invalidate_pending(
+                conn,
+                customer_number=recipient_number,
+                reason="superseded_by_new_draft",
+            )
+            draft = sms_approval.create_draft(
+                conn,
+                thread_key=thread_key,
+                customer_number=recipient_number,
+                sender_number=sender_number,
+                draft_text=message,
+                source_inbound_id=normalized_event.get("message_id") or normalized_event.get("call_id"),
+                risk_state=risk_state,
+                risk_reason=reply_policy.get("risk_reason"),
+                context_fingerprint=context_fingerprint,
+                metadata={
+                    "event_type": normalized_event.get("event_type"),
+                    "line_display": line_display or normalized_event.get("line_display"),
+                },
+            )
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - webhook should not fail because approval storage is down.
+        print(f"⚠️  Approval draft persistence failed ({type(exc).__name__})")
+        return False, "approval_persistence_failed", message, None, reply_policy
+
+    return True, "draft_created", message, draft.get("draft_id"), reply_policy
 
 
 def build_hook_session_key(normalized_event):
@@ -1271,12 +1422,13 @@ def build_hook_session_key(normalized_event):
             return f"hook:dialpad:call:{sender_number}"
         return "hook:dialpad:call:unknown"
 
-    candidate = (
-        normalized_event.get("conversation_id")
-        or normalized_event.get("message_id")
-        or normalize_phone_number(normalized_event.get("sender_number"))
-        or "unknown"
-    )
+    sender_number = normalize_phone_number(normalized_event.get("sender_number"))
+    recipient_number = normalize_phone_number(normalized_event.get("recipient_number"))
+    candidate = normalized_event.get("conversation_id")
+    if not candidate and sender_number and recipient_number:
+        candidate = f"{sender_number}:{recipient_number}"
+    if not candidate:
+        candidate = normalized_event.get("message_id") or sender_number or "unknown"
     return f"hook:dialpad:sms:{candidate}"
 
 
@@ -1538,6 +1690,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         hook_status = None
         auto_reply_sent = False
         auto_reply_status = None
+        auto_reply_draft_id = None
         sensitive_filtered = False
         inbound_alert_decision = {
             "eligible": False,
@@ -1584,28 +1737,60 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     sender_enrichment=sender_enrichment,
                     line_display=line_display,
                 )
-                auto_reply_sent, auto_reply_status, auto_reply_message = send_proactive_reply(
+                auto_reply_draft_created, auto_reply_status, auto_reply_message, auto_reply_draft_id, reply_policy = create_proactive_reply_draft(
                     normalized_sms,
                     sender_enrichment=sender_enrichment,
                     line_display=line_display,
                 )
                 normalized_sms["auto_reply"] = {
                     "eligible": auto_reply_eligible,
-                    "sent": auto_reply_sent,
+                    "sent": False,
+                    "draftCreated": auto_reply_draft_created,
+                    "draftId": auto_reply_draft_id,
                     "status": auto_reply_status,
                     "message": auto_reply_message,
+                    "replyPolicy": reply_policy,
                 }
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(
                     normalized_sms, line_display=line_display
                 )
-                if auto_reply_sent:
-                    print(f"   🤖 Auto Reply: ✓ ({auto_reply_status})")
-                elif auto_reply_status:
-                    print(f"   🤖 Auto Reply: ✗ ({auto_reply_status})")
+                if auto_reply_status:
+                    print(f"   🤖 Auto Reply Draft: {'✓' if auto_reply_draft_created else '✗'} ({auto_reply_status})")
             elif hook_status == "filtered_shortcode":
                 print("   🔒 Short-code message filtered (not forwarding to OpenClaw hooks)")
             elif hook_status == "filtered_sensitive":
                 print("   🔒 Sensitive message filtered (not forwarding to OpenClaw hooks)")
+            elif hook_status == "filtered_opt_out":
+                print("   🛑 Opt-out message filtered (automation send path blocked)")
+                if sms_approval is not None:
+                    try:
+                        conn = sms_approval.init_db()
+                        try:
+                            sms_approval.mark_opt_out(
+                                conn,
+                                customer_number=from_num,
+                                reason="customer_opt_out",
+                                source="sms",
+                            )
+                        finally:
+                            conn.close()
+                    except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
+                        print(f"⚠️  Failed to persist opt-out ({type(exc).__name__})")
+        elif direction == "outbound" and sms_approval is not None:
+            outbound_customer = first_value(to_num)
+            if outbound_customer:
+                try:
+                    conn = sms_approval.init_db()
+                    try:
+                        sms_approval.invalidate_pending(
+                            conn,
+                            customer_number=outbound_customer,
+                            reason="manual_outbound",
+                        )
+                    finally:
+                        conn.close()
+                except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
+                    print(f"⚠️  Failed to invalidate approvals after outbound SMS ({type(exc).__name__})")
         # Optional immediate Telegram notification for inbound SMS
         telegram_sms_sent = None
         telegram_status = TELEGRAM_STATUS_NOT_APPLICABLE
@@ -1626,8 +1811,21 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"Time: {escape_telegram_markdown(time_display)}\n\n"
                     f"Message: {escape_telegram_markdown(text)}"
                 )
+                tg_text += build_approval_review_suffix(
+                    auto_reply_draft_id,
+                    auto_reply_message,
+                    reply_policy,
+                )
                 telegram_sms_sent = send_to_telegram(tg_text)
                 telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
+            elif hook_status == "filtered_opt_out":
+                tg_text = (
+                    "🛑 Dialpad SMS opt-out / human-only\n"
+                    f"From: {escape_telegram_markdown(str(from_num))}\n"
+                    "Automation is not allowed to send on this thread."
+                )
+                telegram_sms_sent = send_to_telegram(tg_text)
+                telegram_status = "human_only_notified" if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif not DIALPAD_SMS_TELEGRAM_NOTIFY:
                 telegram_status = "disabled"
             else:
@@ -1684,6 +1882,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             "telegram_status": telegram_status if direction == "inbound" else None,
             "auto_reply_sent": auto_reply_sent if direction == "inbound" else None,
             "auto_reply_status": auto_reply_status if direction == "inbound" else None,
+            "auto_reply_draft_id": auto_reply_draft_id if direction == "inbound" else None,
             "sender_enrichment_degraded": (
                 sender_enrichment.get("degraded") if direction == "inbound" else None
             ),
@@ -1740,6 +1939,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         telegram_sent = False
         auto_reply_sent = False
         auto_reply_status = None
+        auto_reply_draft_id = None
         if should_notify:
             resolved = resolve_missed_call_context(data)
             from_num = resolved["from_number"]
@@ -1798,20 +1998,28 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 sender_enrichment=sender_enrichment,
                 line_display=line_display,
             )
-            auto_reply_sent, auto_reply_status, auto_reply_message = send_proactive_reply(
+            auto_reply_draft_created, auto_reply_status, auto_reply_message, auto_reply_draft_id, reply_policy = create_proactive_reply_draft(
                 normalized_event,
                 sender_enrichment=sender_enrichment,
                 line_display=line_display,
             )
             normalized_event["auto_reply"] = {
                 "eligible": auto_reply_eligible,
-                "sent": auto_reply_sent,
+                "sent": False,
+                "draftCreated": auto_reply_draft_created,
+                "draftId": auto_reply_draft_id,
                 "status": auto_reply_status,
                 "message": auto_reply_message,
+                "replyPolicy": reply_policy,
             }
             hook_sent, hook_status = send_to_openclaw_hooks(
                 normalized_event,
                 line_display=line_display,
+            )
+            tg_text += build_approval_review_suffix(
+                auto_reply_draft_id,
+                auto_reply_message,
+                reply_policy,
             )
             telegram_sent = send_to_telegram(tg_text)
 
@@ -1849,6 +2057,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             "hook_status": hook_status if should_notify else None,
             "auto_reply_sent": auto_reply_sent if should_notify else None,
             "auto_reply_status": auto_reply_status if should_notify else None,
+            "auto_reply_draft_id": auto_reply_draft_id if should_notify else None,
             "telegram_sent": telegram_sent if should_notify else None
         }
         self.wfile.write(json.dumps(response).encode())
@@ -1858,7 +2067,15 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         # Limit request body size to prevent memory exhaustion (1MB max)
         MAX_BODY_SIZE = 1024 * 1024  # 1MB
         content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
-        body = self.rfile.read(content_length).decode("utf-8")
+        raw_body = self.rfile.read(content_length)
+
+        auth_ok, auth_source = verify_webhook_auth(self.headers, raw_body, WEBHOOK_SECRET)
+        if not auth_ok:
+            log_line("❌ Unauthorized webhook request on /webhook/dialpad-voicemail")
+            self.send_error(401, "Unauthorized")
+            return
+
+        body = raw_body.decode("utf-8")
 
         try:
             data = json.loads(body) if body else {}
@@ -1915,12 +2132,13 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
         auto_reply_sent = False
         auto_reply_status = None
-        telegram_sent = send_to_telegram(tg_text)
+        auto_reply_draft_id = None
         normalized_event = {
             "event_type": "voicemail",
             "sender": contact_info or from_num or "Unknown",
             "sender_number": from_num,
             "recipient_number": to_num,
+            "text": transcription or "",
             "timestamp": data.get("timestamp") or data.get("created_date"),
             "line_display": line_display,
             "direction": "inbound",
@@ -1935,20 +2153,31 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             sender_enrichment=sender_enrichment,
             line_display=line_display,
         )
-        auto_reply_sent, auto_reply_status, auto_reply_message = send_proactive_reply(
+        auto_reply_draft_created, auto_reply_status, auto_reply_message, auto_reply_draft_id, reply_policy = create_proactive_reply_draft(
             normalized_event,
             sender_enrichment=sender_enrichment,
             line_display=line_display,
         )
         normalized_event["auto_reply"] = {
             "eligible": auto_reply_eligible,
-            "sent": auto_reply_sent,
+            "sent": False,
+            "draftCreated": auto_reply_draft_created,
+            "draftId": auto_reply_draft_id,
             "status": auto_reply_status,
             "message": auto_reply_message,
+            "replyPolicy": reply_policy,
         }
+        tg_text += build_approval_review_suffix(
+            auto_reply_draft_id,
+            auto_reply_message,
+            reply_policy,
+        )
+        telegram_sent = send_to_telegram(tg_text)
 
         print(f"[{datetime.now().isoformat()}]")
         print(f"   📬 VOICEMAIL: {from_num} -> {to_display}")
+        if WEBHOOK_SECRET:
+            print(f"   🔐 Auth: ✓ ({auth_source})")
         print(f"   ⏱️  Duration: {duration_display}")
         if transcription:
             trans_preview = transcription[:80] + "..." if len(transcription) > 80 else transcription
@@ -1968,6 +2197,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             "telegram_sent": telegram_sent,
             "auto_reply_sent": auto_reply_sent,
             "auto_reply_status": auto_reply_status,
+            "auto_reply_draft_id": auto_reply_draft_id,
         }
         self.wfile.write(json.dumps(response).encode())
 

@@ -204,8 +204,9 @@ def test_inbound_webhook_hook_uses_enriched_sender(monkeypatch):
             "degraded_reason": None,
         },
     )
-    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
 
     hook_calls = []
 
@@ -252,8 +253,9 @@ def test_inbound_webhook_hook_marks_unknown_sender_first_contact_candidate(monke
             "degraded_reason": None,
         },
     )
-    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
 
     hook_calls = []
 
@@ -280,10 +282,11 @@ def test_inbound_webhook_hook_marks_unknown_sender_first_contact_candidate(monke
     assert hook_calls[0]["normalized_sms"]["first_contact"]["identityState"] == "not_found"
 
 
-def test_inbound_sales_sms_auto_replies_on_first_contact(monkeypatch):
+def test_inbound_sales_sms_creates_approval_draft_on_first_contact(monkeypatch, tmp_path):
     monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
     monkeypatch.setattr(
         webhook_server,
         "handle_sms_webhook",
@@ -303,8 +306,9 @@ def test_inbound_sales_sms_auto_replies_on_first_contact(monkeypatch):
             "degraded_reason": None,
         },
     )
-    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
 
     hook_calls = []
     sms_calls = []
@@ -338,13 +342,296 @@ def test_inbound_sales_sms_auto_replies_on_first_contact(monkeypatch):
 
     response = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert status["code"] == 200
-    assert len(sms_calls) == 1
-    assert sms_calls[0]["to_numbers"] == ["+14155550123"]
-    assert sms_calls[0]["from_number"] == "+14155201316"
-    assert "ShapeScale for Business Sales" in sms_calls[0]["message"]
+    assert sms_calls == []
     assert hook_calls[0]["normalized_sms"]["first_contact"]["identityState"] == "not_found"
-    assert response["auto_reply_sent"] is True
-    assert response["auto_reply_status"] == "accepted/queued"
+    assert hook_calls[0]["normalized_sms"]["auto_reply"]["sent"] is False
+    assert hook_calls[0]["normalized_sms"]["auto_reply"]["draftCreated"] is True
+    assert hook_calls[0]["normalized_sms"]["auto_reply"]["draftId"]
+    assert response["auto_reply_sent"] is False
+    assert response["auto_reply_status"] == "draft_created"
+    assert response["auto_reply_draft_id"]
+    assert "SMS approval draft" in telegram_messages[0]
+    assert "not sent" in telegram_messages[0]
+    assert response["auto_reply_draft_id"] in telegram_messages[0].replace("\\_", "_")
+    assert "bin/approve_sms_draft.py" in telegram_messages[0]
+
+
+def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(monkeypatch, tmp_path):
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "first_name": None,
+            "last_name": None,
+            "company": None,
+            "job_title": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+
+    telegram_messages = []
+    hook_calls = []
+    sms_calls = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *args, **kwargs: hook_calls.append(args) or (True, "http_200"))
+    monkeypatch.setattr(webhook_server, "dialpad_send_sms", lambda *args, **kwargs: sms_calls.append(args) or {"id": "msg-1"})
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        pending = webhook_server.sms_approval.create_draft(
+            conn,
+            thread_key="prior-thread",
+            customer_number="+14155550123",
+            sender_number="+14155201316",
+            draft_text="Prior draft must not remain approvable.",
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "I need a real person. Please don't bother me anymore.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert hook_calls == []
+    assert sms_calls == []
+    assert response["hook_status"] == "filtered_opt_out"
+    assert response["telegram_status"] == "human_only_notified"
+    assert response["auto_reply_draft_id"] is None
+    assert "human-only" in telegram_messages[0]
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        stale_draft = webhook_server.sms_approval.get_draft(conn, pending["draft_id"])
+        opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+    finally:
+        conn.close()
+    assert stale_draft["status"] == webhook_server.sms_approval.STATUS_STALE
+    assert stale_draft["invalidated_reason"] == "customer_opt_out"
+    assert opted_out is True
+
+
+def test_standard_stop_keyword_blocks_sms_automation(monkeypatch, tmp_path):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "STOPALL",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert response["hook_status"] == "filtered_opt_out"
+
+
+def test_second_inbound_without_conversation_id_invalidates_previous_draft(monkeypatch, tmp_path):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "first_name": None,
+            "last_name": None,
+            "company": None,
+            "job_title": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
+
+    first = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "message_id": "msg-1",
+        "text": "First question.",
+    }
+    first_handler, _first_status = _build_handler(first)
+    webhook_server.DialpadWebhookHandler.handle_webhook(first_handler)
+    first_response = json.loads(first_handler.wfile.getvalue().decode("utf-8"))
+
+    second = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "message_id": "msg-2",
+        "text": "Second question.",
+    }
+    second_handler, status = _build_handler(second)
+    webhook_server.DialpadWebhookHandler.handle_webhook(second_handler)
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        stale = webhook_server.sms_approval.get_draft(conn, first_response["auto_reply_draft_id"])
+    finally:
+        conn.close()
+    assert status["code"] == 200
+    assert stale["status"] == webhook_server.sms_approval.STATUS_STALE
+    assert stale["invalidated_reason"] == "superseded_by_new_draft"
+
+
+def test_outbound_sms_invalidates_pending_approval_draft(monkeypatch, tmp_path):
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        draft = webhook_server.sms_approval.create_draft(
+            conn,
+            thread_key="thread-1",
+            customer_number="+14155550123",
+            sender_number="+14155201316",
+            draft_text="Pending draft.",
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "direction": "outbound",
+        "from_number": "+14155201316",
+        "to_number": ["+14155550123"],
+        "text": "Human replied.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        stale = webhook_server.sms_approval.get_draft(conn, draft["draft_id"])
+    finally:
+        conn.close()
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert response["hook_forwarded"] is None
+    assert stale["status"] == webhook_server.sms_approval.STATUS_STALE
+    assert stale["invalidated_reason"] == "manual_outbound"
+
+
+def test_risky_inbound_sales_sms_creates_two_step_approval_draft(monkeypatch, tmp_path):
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "first_name": None,
+            "last_name": None,
+            "company": None,
+            "job_title": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+
+    hook_calls = []
+    sms_calls = []
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text: telegram_messages.append(text) or True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_calls.append(normalized_sms) or (True, "http_200"),
+    )
+    monkeypatch.setattr(webhook_server, "dialpad_send_sms", lambda *args, **kwargs: sms_calls.append(args) or {"id": "msg-1"})
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "I need to talk to a real person about the meeting time.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert sms_calls == []
+    assert response["auto_reply_status"] == "draft_created"
+    assert response["auto_reply_draft_id"]
+    assert hook_calls[0]["auto_reply"]["replyPolicy"]["state"] == "risky"
+    assert "Second confirmation required" in telegram_messages[0]
+    assert "Risk:" in telegram_messages[0]
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        draft = webhook_server.sms_approval.get_draft(conn, response["auto_reply_draft_id"])
+    finally:
+        conn.close()
+    assert draft["risk_state"] == webhook_server.sms_approval.RISK_RISKY
+    assert draft["status"] == webhook_server.sms_approval.STATUS_PENDING
+
 
 
 @pytest.mark.parametrize("lookup_status", ["disabled", "not_applicable", "resolved"])

@@ -39,6 +39,10 @@ bin/send_sms.py --to "+14155551234" --message 'Hello' --profile work
 printf '%s' 'The premium hardshell travel case is $499.' | \
   bin/send_sms.py --to "+14155551234" --from "+14155201316" --message-stdin --dry-run
 
+# Create and approve an exact-text SMS draft
+bin/create_sms_draft.py --thread-key "hook:dialpad:sms:conv-123" --to "+14155551234" --from "+14155201316" --message 'Draft text' --json
+bin/approve_sms_draft.py smsdraft_abc123 --actor-id "telegram-user-123" --actor-username "operator" --approval-token "$DIALPAD_SMS_APPROVAL_TOKEN" --json
+
 # Make a call with TTS
 bin/make_call.py --to "+14155551234" --text "This is a test call."
 
@@ -68,22 +72,25 @@ export OPENCLAW_HOOKS_NAME="Dialpad SMS"
 export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
 export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 
-# Optional per-event hook controls (enabled by default)
+# Optional per-event hook controls (disabled by default)
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
 
-# Optional sales-line first-contact auto-replies (enabled by default)
+# Optional sales-line first-contact auto-replies (disabled by default)
 export DIALPAD_AUTO_REPLY_ENABLED="1"
+export DIALPAD_SMS_APPROVAL_DB="/home/art/clawd/logs/sms_approvals.db"
+export DIALPAD_SMS_APPROVAL_TOKEN="operator-only-random-token"
 ```
 
-When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are forwarded to OpenClaw by default. Set `OPENCLAW_HOOKS_SMS_ENABLED=0` or `OPENCLAW_HOOKS_CALL_ENABLED=0` to disable one event class without changing the shared destination config.
+When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are only forwarded to OpenClaw when the matching event flag is explicitly enabled. Leave `OPENCLAW_HOOKS_SMS_ENABLED=0` and `OPENCLAW_HOOKS_CALL_ENABLED=0` for notification-only mode.
 If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
 The local gateway allows explicit `niemand-work` routing and `hook:dialpad:` session keys.
 For first-time or unknown inbound contacts, the payload also carries a `firstContact` hint with an explicit `identityState` plus lookup details so OpenClaw can enrich identity, look up business context, draft a reply, and suggest Dialpad contact sync when the match is clear.
 That pattern is CRM-agnostic: Attio is one example, but the same setup works with HubSpot, Pipedrive, Airtable, a spreadsheet, or a custom directory service downstream.
 Current-turn verification still applies: "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory.
 For identity work, treat `resolved` as the only state that is safe to mutate automatically; `not_found`, `ambiguous`, and `degraded` stay draft-only until the CRM layer proves otherwise.
-When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` get a short SMS acknowledgment automatically before the hook handoff continues. Missed calls get a "sorry we missed you" variant; SMS and voicemail get a "we'll be in touch shortly" variant.
+When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` create a short exact-text approval draft instead of sending SMS directly. Missed calls get a "sorry we missed you" draft variant; SMS and voicemail get a "we'll be in touch shortly" draft variant. Explicit opt-out language creates no draft, invalidates pending drafts for that customer, and sends only a human-only Telegram notice.
+CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied to `bin/approve_sms_draft.py`; keep that token out of agent runtime environments.
 
 Create/list webhook subscriptions:
 
@@ -96,7 +103,7 @@ Notes:
 
 - `/webhook/dialpad` handles SMS storage plus optional OpenClaw/Telegram fan-out
 - `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, plus optional OpenClaw hook forwarding
-- `/webhook/dialpad-voicemail` remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails also get the SMS acknowledgment when auto-replies are enabled
+- `/webhook/dialpad-voicemail` sends Telegram alerts and can create first-contact sales-line SMS approval drafts, but does not send SMS directly
 - This repo validates hook request shape, gating, and graceful degradation only. It does not validate downstream OpenClaw proactive enrichment behavior
 
 ## Operational Tools
@@ -106,6 +113,10 @@ These commands are for manual operator workflows, storage inspection, and mainte
 ```bash
 # SMS SQLite history
 python3 scripts/sms_sqlite.py list
+
+# SMS approval drafts
+python3 scripts/create_sms_draft.py --thread-key "manual:test" --to "+14155551234" --from "+14155201316" --message 'Draft text' --json
+python3 scripts/approve_sms_draft.py smsdraft_abc123 --actor-id "telegram-user-123" --approval-token "$DIALPAD_SMS_APPROVAL_TOKEN" --json
 
 # Deep webhook/storage operations
 python3 scripts/webhook_server.py

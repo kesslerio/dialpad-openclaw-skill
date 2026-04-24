@@ -33,6 +33,8 @@ COMMAND_IDS = {
     "create_contact.upsert": "create_contact.upsert",
     "update_contact.update": "update_contact.update",
     "send_group_intro.send": "send_group_intro.send",
+    "create_sms_draft.create": "create_sms_draft.create",
+    "approve_sms_draft.approve": "approve_sms_draft.approve",
     "create_sms_webhook.create": "create_sms_webhook.create",
     "create_sms_webhook.list": "create_sms_webhook.list",
     "create_sms_webhook.delete": "create_sms_webhook.delete",

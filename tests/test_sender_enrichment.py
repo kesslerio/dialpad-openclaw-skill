@@ -466,6 +466,54 @@ def test_standard_stop_keyword_blocks_sms_automation(monkeypatch, tmp_path):
     assert response["hook_status"] == "filtered_opt_out"
 
 
+def test_stop_by_phrase_does_not_create_permanent_opt_out(monkeypatch, tmp_path):
+    hook_calls = []
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_calls.append(normalized_sms) or (True, "http_200"),
+    )
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Can we stop by later?",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+    finally:
+        conn.close()
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert status["code"] == 200
+    assert response["hook_status"] == "http_200"
+    assert hook_calls
+    assert opted_out is False
+
+
 def test_second_inbound_without_conversation_id_invalidates_previous_draft(monkeypatch, tmp_path):
     monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
@@ -545,13 +593,20 @@ def test_outbound_sms_invalidates_pending_approval_draft(monkeypatch, tmp_path):
             sender_number="+14155201316",
             draft_text="Pending draft.",
         )
+        second_draft = webhook_server.sms_approval.create_draft(
+            conn,
+            thread_key="thread-2",
+            customer_number="+14155550124",
+            sender_number="+14155201316",
+            draft_text="Second pending draft.",
+        )
     finally:
         conn.close()
 
     payload = {
         "direction": "outbound",
         "from_number": "+14155201316",
-        "to_number": ["+14155550123"],
+        "to_number": ["+14155550123", "+14155550124"],
         "text": "Human replied.",
     }
     handler, status = _build_handler(payload)
@@ -560,6 +615,7 @@ def test_outbound_sms_invalidates_pending_approval_draft(monkeypatch, tmp_path):
     conn = webhook_server.sms_approval.init_db()
     try:
         stale = webhook_server.sms_approval.get_draft(conn, draft["draft_id"])
+        second_stale = webhook_server.sms_approval.get_draft(conn, second_draft["draft_id"])
     finally:
         conn.close()
     response = json.loads(handler.wfile.getvalue().decode("utf-8"))
@@ -567,6 +623,8 @@ def test_outbound_sms_invalidates_pending_approval_draft(monkeypatch, tmp_path):
     assert response["hook_forwarded"] is None
     assert stale["status"] == webhook_server.sms_approval.STATUS_STALE
     assert stale["invalidated_reason"] == "manual_outbound"
+    assert second_stale["status"] == webhook_server.sms_approval.STATUS_STALE
+    assert second_stale["invalidated_reason"] == "manual_outbound"
 
 
 def test_risky_inbound_sales_sms_creates_two_step_approval_draft(monkeypatch, tmp_path):

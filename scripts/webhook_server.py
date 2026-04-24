@@ -155,7 +155,8 @@ CALLS_ENDPOINT = "https://dialpad.com/api/v2/call"
 
 OPT_OUT_PATTERNS = (
     re.compile(r"^\s*(stop|stopall|unsubscribe|cancel|end|quit)\s*[.!]?\s*$", re.IGNORECASE),
-    re.compile(r"\b(stop|unsubscribe|remove me|do not contact|don't contact)\b", re.IGNORECASE),
+    re.compile(r"\bstop\s+(texting|messaging|calling|contacting|reaching out|sending)\b", re.IGNORECASE),
+    re.compile(r"\b(unsubscribe|remove me|do not contact|don't contact)\b", re.IGNORECASE),
     re.compile(r"\b(do not|don't|please don't)\s+bother me\b", re.IGNORECASE),
     re.compile(r"\bleave me alone\b", re.IGNORECASE),
 )
@@ -1783,16 +1784,18 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
                         print(f"⚠️  Failed to persist opt-out ({type(exc).__name__})")
         elif direction == "outbound" and sms_approval is not None:
-            outbound_customer = first_value(to_num)
-            if outbound_customer:
+            outbound_customers = to_num if isinstance(to_num, list) else [to_num]
+            outbound_customers = [customer for customer in outbound_customers if customer]
+            if outbound_customers:
                 try:
                     conn = sms_approval.init_db()
                     try:
-                        sms_approval.invalidate_pending(
-                            conn,
-                            customer_number=outbound_customer,
-                            reason="manual_outbound",
-                        )
+                        for outbound_customer in outbound_customers:
+                            sms_approval.invalidate_pending(
+                                conn,
+                                customer_number=outbound_customer,
+                                reason="manual_outbound",
+                            )
                     finally:
                         conn.close()
                 except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.

@@ -759,8 +759,13 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(response["auto_reply_status"], "blocked_opt_out")
         self.assertIsNone(response["auto_reply_draft_id"])
         self.assertTrue(opted_out)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertIn("Automation blocked", telegram_messages[0])
+        self.assertIn("human", telegram_messages[0])
+        self.assertIn("No SMS approval draft", telegram_messages[0])
 
     def test_known_contact_voicemail_opt_out_persists_even_when_reply_not_eligible(self):
+        telegram_messages = []
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             webhook_server.sms_approval,
             "DB_PATH",
@@ -782,7 +787,11 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
                 "degraded": False,
                 "degraded_reason": None,
             },
-        ), patch.object(webhook_server, "send_to_telegram", return_value=True):
+        ), patch.object(
+            webhook_server,
+            "send_to_telegram",
+            side_effect=lambda text: telegram_messages.append(text) or True,
+        ):
             payload = {
                 "from_number": "+14155550123",
                 "to_number": ["+14155201316"],
@@ -803,6 +812,9 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(response["auto_reply_status"], "blocked_opt_out")
         self.assertIsNone(response["auto_reply_draft_id"])
         self.assertTrue(opted_out)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertIn("Automation blocked", telegram_messages[0])
+        self.assertIn("No SMS approval draft", telegram_messages[0])
 
     def test_voicemail_risky_transcription_creates_risky_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(

@@ -1319,6 +1319,23 @@ def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
     return "\n".join(lines)
 
 
+def build_human_only_blocked_suffix(reply_policy=None):
+    """Build Telegram text when policy blocks SMS automation outright."""
+    reply_policy = reply_policy or {}
+    if reply_policy.get("state") != "blocked_opt_out":
+        return ""
+
+    reason = reply_policy.get("risk_reason") or "automation is blocked for this thread"
+    lines = [
+        "",
+        "",
+        f"🛑 *{escape_telegram_markdown('Automation blocked / human-only')}*",
+        escape_telegram_markdown("No SMS approval draft was created."),
+        f"*Reason:* {escape_telegram_markdown(reason)}",
+    ]
+    return "\n".join(lines)
+
+
 def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_display=None):
     """Create an approval-gated proactive reply draft instead of sending SMS."""
     sender_number = normalized_event.get("recipient_number")
@@ -2032,6 +2049,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 auto_reply_message,
                 reply_policy,
             )
+            tg_text += build_human_only_blocked_suffix(reply_policy)
             telegram_sent = send_to_telegram(tg_text)
 
             print(f"[{datetime.now().isoformat()}]")
@@ -2183,6 +2201,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             auto_reply_message,
             reply_policy,
         )
+        tg_text += build_human_only_blocked_suffix(reply_policy)
         telegram_sent = send_to_telegram(tg_text)
 
         print(f"[{datetime.now().isoformat()}]")

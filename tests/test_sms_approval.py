@@ -319,6 +319,40 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertEqual(result["status"], "stale")
         self.assertFalse(result["sent"])
 
+    def test_emergency_opt_out_blocks_new_and_existing_drafts(self):
+        emergency_path = Path(self.temp_dir.name) / "emergency-opt-outs.jsonl"
+        original_emergency_path = os.environ.get("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH")
+        os.environ["DIALPAD_SMS_APPROVAL_EMERGENCY_PATH"] = str(emergency_path)
+        self.addCleanup(
+            lambda: (
+                os.environ.pop("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH", None)
+                if original_emergency_path is None
+                else os.environ.__setitem__(
+                    "DIALPAD_SMS_APPROVAL_EMERGENCY_PATH",
+                    original_emergency_path,
+                )
+            )
+        )
+
+        draft = self._draft()
+        sms_approval.record_emergency_opt_out(
+            customer_number="+15125550100",
+            reason="customer_opt_out",
+            source="test_failure",
+        )
+
+        result = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *_args, **_kwargs: self.fail("send should not run"),
+        )
+
+        self.assertEqual(result["status"], "blocked_opt_out")
+        self.assertFalse(result["sent"])
+        with self.assertRaisesRegex(ValueError, "opted out"):
+            self._draft(thread_key="thread-2")
+
     def test_create_draft_cli_persists_without_sending(self):
         db_path = Path(self.temp_dir.name) / "cli-approvals.db"
         env = {**os.environ, "DIALPAD_SMS_APPROVAL_DB": str(db_path)}

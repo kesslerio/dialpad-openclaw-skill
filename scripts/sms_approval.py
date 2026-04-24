@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 
 DB_PATH = Path(os.environ.get("DIALPAD_SMS_APPROVAL_DB", "/home/art/clawd/logs/sms_approvals.db"))
+DEFAULT_EMERGENCY_OPT_OUT_PATH = Path("/tmp/dialpad_sms_approval_emergency_opt_outs.jsonl")
 
 STATUS_PENDING = "pending"
 STATUS_RISK_PENDING = "risk_pending"
@@ -52,6 +53,71 @@ def normalize_phone_number(phone_number: str | None) -> str | None:
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
     return digits[-10:] if len(digits) >= 10 else digits or None
+
+
+def emergency_opt_out_paths() -> list[Path]:
+    configured = os.environ.get("DIALPAD_SMS_APPROVAL_EMERGENCY_PATH")
+    if configured:
+        return [Path(configured)]
+    return [
+        DB_PATH.with_name("sms_approval_emergency_opt_outs.jsonl"),
+        DEFAULT_EMERGENCY_OPT_OUT_PATH,
+    ]
+
+
+def record_emergency_opt_out(
+    *,
+    customer_number: str,
+    reason: str = "customer_opt_out",
+    source: str | None = None,
+    created_at_ms: int | None = None,
+) -> Path:
+    """Append a fail-closed opt-out marker outside the approval database."""
+    normalized = normalize_phone_number(customer_number)
+    if not normalized:
+        raise ValueError("customer_number is required")
+
+    payload = {
+        "customer_number_normalized": normalized,
+        "customer_number": customer_number,
+        "reason": reason,
+        "source": source,
+        "created_at_ms": created_at_ms or now_ms(),
+    }
+    last_error: Exception | None = None
+    for path in emergency_opt_out_paths():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            return path
+        except OSError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise OSError("no emergency opt-out path configured")
+
+
+def is_emergency_opted_out(customer_number: str | None) -> bool:
+    normalized = normalize_phone_number(customer_number)
+    if not normalized:
+        return False
+
+    for path in emergency_opt_out_paths():
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if payload.get("customer_number_normalized") == normalized:
+                        return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+    return False
 
 
 def build_context_fingerprint(parts: dict[str, Any]) -> str:
@@ -189,6 +255,8 @@ def is_opted_out(conn: sqlite3.Connection, customer_number: str | None) -> bool:
     normalized = normalize_phone_number(customer_number)
     if not normalized:
         return False
+    if is_emergency_opted_out(customer_number):
+        return True
     row = conn.execute(
         "SELECT 1 FROM sms_approval_opt_outs WHERE customer_number_normalized = ?",
         (normalized,),

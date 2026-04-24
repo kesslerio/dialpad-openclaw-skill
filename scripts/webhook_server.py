@@ -1356,6 +1356,39 @@ def invalidate_pending_sms_drafts(thread_key=None, customer_number=None, reason=
         return False
 
 
+def mark_opt_out_fail_closed(customer_number, *, reason="customer_opt_out", source=None):
+    """Persist opt-out, falling back to an emergency block before returning success."""
+    if sms_approval is None or not customer_number:
+        return False
+
+    try:
+        conn = sms_approval.init_db()
+        try:
+            sms_approval.mark_opt_out(
+                conn,
+                customer_number=customer_number,
+                reason=reason,
+                source=source,
+            )
+        finally:
+            conn.close()
+        return True
+    except Exception as exc:  # noqa: BLE001 - explicit opt-outs must fail closed.
+        print(f"⚠️  Failed to persist opt-out ({type(exc).__name__})")
+
+    invalidated = invalidate_pending_sms_drafts(customer_number=customer_number, reason=reason)
+    try:
+        sms_approval.record_emergency_opt_out(
+            customer_number=customer_number,
+            reason=reason,
+            source=source,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
+        print(f"⚠️  Failed to record emergency opt-out ({type(exc).__name__})")
+        return invalidated
+
+
 def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_display=None):
     """Create an approval-gated proactive reply draft instead of sending SMS."""
     sender_number = normalized_event.get("recipient_number")
@@ -1363,20 +1396,11 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
     thread_key = build_hook_session_key(normalized_event)
     reply_policy = classify_sms_reply_policy(normalized_event.get("text") or "")
     if reply_policy["state"] == "blocked_opt_out":
-        if sms_approval is not None and recipient_number:
-            try:
-                conn = sms_approval.init_db()
-                try:
-                    sms_approval.mark_opt_out(
-                        conn,
-                        customer_number=recipient_number,
-                        reason="customer_opt_out",
-                        source=normalized_event.get("event_type"),
-                    )
-                finally:
-                    conn.close()
-            except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
-                print(f"⚠️  Failed to persist opt-out ({type(exc).__name__})")
+        mark_opt_out_fail_closed(
+            recipient_number,
+            reason="customer_opt_out",
+            source=normalized_event.get("event_type"),
+        )
         return False, "blocked_opt_out", None, None, reply_policy
 
     if not should_send_proactive_reply(
@@ -1811,20 +1835,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 print("   🔒 Sensitive message filtered (not forwarding to OpenClaw hooks)")
             elif hook_status == "filtered_opt_out":
                 print("   🛑 Opt-out message filtered (automation send path blocked)")
-                if sms_approval is not None:
-                    try:
-                        conn = sms_approval.init_db()
-                        try:
-                            sms_approval.mark_opt_out(
-                                conn,
-                                customer_number=from_num,
-                                reason="customer_opt_out",
-                                source="sms",
-                            )
-                        finally:
-                            conn.close()
-                    except Exception as exc:  # noqa: BLE001 - webhook must degrade safely.
-                        print(f"⚠️  Failed to persist opt-out ({type(exc).__name__})")
+                mark_opt_out_fail_closed(from_num, reason="customer_opt_out", source="sms")
         elif direction == "outbound" and sms_approval is not None:
             outbound_customers = to_num if isinstance(to_num, list) else [to_num]
             outbound_customers = [customer for customer in outbound_customers if customer]

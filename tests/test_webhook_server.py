@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
+import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -107,6 +108,81 @@ class WebhookNotificationClassificationTests(unittest.TestCase):
     def test_non_sensitive_message_not_detected(self):
         text = "See you at 6pm for dinner."
         self.assertFalse(is_sensitive_message(text=text, sender="Friend"))
+
+    def test_contact_match_requires_exact_phone(self):
+        contact = {
+            "first_name": "Keysha",
+            "last_name": "Griffin",
+            "phones": ["+17202248024"],
+            "primary_phone": "+17202248024",
+        }
+
+        self.assertFalse(webhook_server.contact_contains_phone(contact, "+14782326499"))
+        self.assertTrue(webhook_server.contact_contains_phone(contact, "+17202248024"))
+
+    def test_lookup_ignores_fuzzy_contact_without_matching_phone(self):
+        payload = {
+            "items": [
+                {
+                    "first_name": "Keysha",
+                    "last_name": "Griffin",
+                    "phones": ["+17202248024"],
+                    "primary_phone": "+17202248024",
+                }
+            ]
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode()
+
+        with patch.object(webhook_server, "DIALPAD_API_KEY", "token"), patch.object(
+            urllib.request,
+            "urlopen",
+            return_value=FakeResponse(),
+        ):
+            result = webhook_server.lookup_contact_enrichment("+14782326499")
+
+        self.assertEqual(result["status"], "not_found")
+        self.assertIsNone(result["contact_name"])
+
+    def test_lookup_resolves_contact_with_matching_phone(self):
+        payload = {
+            "items": [
+                {
+                    "first_name": "Nicole",
+                    "last_name": "Roberson",
+                    "phones": ["+14782326499"],
+                    "primary_phone": "+14782326499",
+                }
+            ]
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode()
+
+        with patch.object(webhook_server, "DIALPAD_API_KEY", "token"), patch.object(
+            urllib.request,
+            "urlopen",
+            return_value=FakeResponse(),
+        ):
+            result = webhook_server.lookup_contact_enrichment("+14782326499")
+
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["contact_name"], "Nicole Roberson")
 
     def test_inbound_alert_eligibility_filters_sensitive_sms(self):
         payload = {

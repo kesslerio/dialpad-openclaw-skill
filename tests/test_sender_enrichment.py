@@ -72,6 +72,7 @@ def test_lookup_contact_enrichment_valid_token_path(monkeypatch):
                 "last_name": "Doe",
                 "company": "Acme",
                 "job_title": "VP Sales",
+                "phones": ["+14155550123"],
             }
         ]
     }

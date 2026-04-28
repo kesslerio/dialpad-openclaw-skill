@@ -316,6 +316,46 @@ def _flatten_strings(value, out):
             _flatten_strings(nested, out)
 
 
+def contact_contains_phone(contact, phone_number):
+    """Return True only when a Dialpad contact payload includes the queried phone."""
+    expected = normalize_phone_number(phone_number)
+    if not expected or not isinstance(contact, dict):
+        return False
+
+    values = []
+    for key in ("phones", "phone_numbers", "primary_phone", "phone", "number", "numbers"):
+        _flatten_strings(contact.get(key), values)
+
+    for value in values:
+        if normalize_phone_number(value) == expected:
+            return True
+    return False
+
+
+def format_contact_enrichment(contact):
+    """Build sender enrichment fields from a verified Dialpad contact."""
+    first_name = str(contact.get("first_name", "") or "").strip()
+    last_name = str(contact.get("last_name", "") or "").strip()
+    company = str(contact.get("company", "") or "").strip()
+    title = str(contact.get("job_title", "") or "").strip()
+    name = f"{first_name} {last_name}".strip()
+    info = name or "Known Contact"
+    if company:
+        info += f" ({company})"
+    if title:
+        info = f"{title} | {info}"
+    return {
+        "contact_name": info,
+        "first_name": first_name or None,
+        "last_name": last_name or None,
+        "company": company or None,
+        "job_title": title or None,
+        "status": "resolved",
+        "degraded": False,
+        "degraded_reason": None,
+    }
+
+
 def _extract_unauthorized_hint_text(raw_body):
     """Decode 401 body into searchable hint text (never logged directly)."""
     if not raw_body:
@@ -408,24 +448,10 @@ def lookup_contact_enrichment(phone_number):
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
             items = data.get("items", [])
-            if items:
-                c = items[0]
-                first_name = str(c.get("first_name", "") or "").strip()
-                last_name = str(c.get("last_name", "") or "").strip()
-                company = str(c.get("company", "") or "").strip()
-                title = str(c.get("job_title", "") or "").strip()
-                name = f"{first_name} {last_name}".strip()
-                info = name or "Known Contact"
-                if company:
-                    info += f" ({company})"
-                if title:
-                    info = f"{title} | {info}"
-                result["contact_name"] = info
-                result["first_name"] = first_name or None
-                result["last_name"] = last_name or None
-                result["company"] = company or None
-                result["job_title"] = title or None
-                result["status"] = "resolved"
+            for contact in items:
+                if contact_contains_phone(contact, phone_value):
+                    result.update(format_contact_enrichment(contact))
+                    break
             return result
     except urllib.error.HTTPError as e:
         if e.code == 401:

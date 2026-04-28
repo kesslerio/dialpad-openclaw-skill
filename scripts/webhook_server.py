@@ -18,6 +18,8 @@ Environment Variables:
 - PORT (default: 8081) - HTTP server port
 - DIALPAD_TELEGRAM_BOT_TOKEN - Telegram bot token (required for call/voicemail notifications)
 - DIALPAD_TELEGRAM_CHAT_ID - Telegram chat ID (required for call/voicemail notifications)
+- DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED (default: disabled)
+- TELEGRAM_WEBHOOK_SECRET - Telegram secret_token for inline approval callbacks
 - DIALPAD_API_KEY - Dialpad API key (required for contact lookup)
 - DIALPAD_WEBHOOK_SECRET - webhook auth secret (optional, enables signature/JWT verification)
 - OPENCLAW_GATEWAY_URL (default: http://127.0.0.1:8080)
@@ -83,6 +85,7 @@ PORT = int(os.environ.get("PORT", "8081"))
 WEBHOOK_SECRET = os.environ.get("DIALPAD_WEBHOOK_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("DIALPAD_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("DIALPAD_TELEGRAM_CHAT_ID", "")
+TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 DIALPAD_API_KEY = os.environ.get("DIALPAD_API_KEY", "")
 DIALPAD_LINE_NAMES = os.environ.get("DIALPAD_LINE_NAMES", "")
 OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:8080")
@@ -96,6 +99,10 @@ OPENCLAW_HOOKS_AGENT_ID = os.environ.get("OPENCLAW_HOOKS_AGENT_ID", "")
 OPENCLAW_HOOKS_SMS_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_SMS_ENABLED"), False)
 OPENCLAW_HOOKS_CALL_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_CALL_ENABLED"), False)
 DIALPAD_SMS_TELEGRAM_NOTIFY = os.environ.get("DIALPAD_SMS_TELEGRAM_NOTIFY", "1").lower() in {"1", "true", "yes", "on"}
+DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED = parse_bool_env(
+    os.environ.get("DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED"),
+    False,
+)
 DIALPAD_PRIORITY_ROUTE_TO = os.environ.get("DIALPAD_PRIORITY_ROUTE_TO", "")
 DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", "")
 DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), False)
@@ -124,6 +131,21 @@ TELEGRAM_STATUS_SENT = "sent"
 TELEGRAM_STATUS_FILTERED = "filtered"
 TELEGRAM_STATUS_NOT_APPLICABLE = "not_applicable"
 TELEGRAM_STATUS_FAILED = "failed"
+
+TELEGRAM_CALLBACK_NAMESPACE = "smsa"
+TELEGRAM_CALLBACK_APPROVE = "a"
+TELEGRAM_CALLBACK_REJECT = "r"
+TELEGRAM_CALLBACK_CONFIRM_RISK = "c"
+TELEGRAM_CALLBACK_MAX_BYTES = 64
+TELEGRAM_TERMINAL_APPROVAL_STATUSES = {
+    "already_resolved",
+    "blocked_opt_out",
+    "failed",
+    "not_found",
+    "rejected",
+    "sent",
+    "stale",
+}
 
 SENSITIVE_KEYWORD_PATTERNS = (
     re.compile(
@@ -316,6 +338,46 @@ def _flatten_strings(value, out):
             _flatten_strings(nested, out)
 
 
+def contact_contains_phone(contact, phone_number):
+    """Return True only when a Dialpad contact payload includes the queried phone."""
+    expected = normalize_phone_number(phone_number)
+    if not expected or not isinstance(contact, dict):
+        return False
+
+    values = []
+    for key in ("phones", "phone_numbers", "primary_phone", "phone", "number", "numbers"):
+        _flatten_strings(contact.get(key), values)
+
+    for value in values:
+        if normalize_phone_number(value) == expected:
+            return True
+    return False
+
+
+def format_contact_enrichment(contact):
+    """Build sender enrichment fields from a verified Dialpad contact."""
+    first_name = str(contact.get("first_name", "") or "").strip()
+    last_name = str(contact.get("last_name", "") or "").strip()
+    company = str(contact.get("company", "") or "").strip()
+    title = str(contact.get("job_title", "") or "").strip()
+    name = f"{first_name} {last_name}".strip()
+    info = name or "Known Contact"
+    if company:
+        info += f" ({company})"
+    if title:
+        info = f"{title} | {info}"
+    return {
+        "contact_name": info,
+        "first_name": first_name or None,
+        "last_name": last_name or None,
+        "company": company or None,
+        "job_title": title or None,
+        "status": "resolved",
+        "degraded": False,
+        "degraded_reason": None,
+    }
+
+
 def _extract_unauthorized_hint_text(raw_body):
     """Decode 401 body into searchable hint text (never logged directly)."""
     if not raw_body:
@@ -408,24 +470,10 @@ def lookup_contact_enrichment(phone_number):
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
             items = data.get("items", [])
-            if items:
-                c = items[0]
-                first_name = str(c.get("first_name", "") or "").strip()
-                last_name = str(c.get("last_name", "") or "").strip()
-                company = str(c.get("company", "") or "").strip()
-                title = str(c.get("job_title", "") or "").strip()
-                name = f"{first_name} {last_name}".strip()
-                info = name or "Known Contact"
-                if company:
-                    info += f" ({company})"
-                if title:
-                    info = f"{title} | {info}"
-                result["contact_name"] = info
-                result["first_name"] = first_name or None
-                result["last_name"] = last_name or None
-                result["company"] = company or None
-                result["job_title"] = title or None
-                result["status"] = "resolved"
+            for contact in items:
+                if contact_contains_phone(contact, phone_value):
+                    result.update(format_contact_enrichment(contact))
+                    break
             return result
     except urllib.error.HTTPError as e:
         if e.code == 401:
@@ -684,7 +732,96 @@ def escape_telegram_markdown(text):
     return escaped
 
 
-def send_to_telegram(text):
+def telegram_buttons_available():
+    """Return True when inline approval buttons can be safely rendered."""
+    return bool(
+        DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED
+        and TELEGRAM_BOT_TOKEN
+        and TELEGRAM_CHAT_ID
+        and TELEGRAM_WEBHOOK_SECRET
+    )
+
+
+def build_telegram_callback_data(action, draft_id):
+    """Build compact Telegram callback data and enforce Bot API length limits."""
+    if not action or not draft_id:
+        return None
+    callback_data = f"{TELEGRAM_CALLBACK_NAMESPACE}:{action}:{draft_id}"
+    if len(callback_data.encode("utf-8")) > TELEGRAM_CALLBACK_MAX_BYTES:
+        return None
+    return callback_data
+
+
+def parse_telegram_callback_data(callback_data):
+    """Parse SMS approval callback data into an action and draft id."""
+    parts = str(callback_data or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != TELEGRAM_CALLBACK_NAMESPACE:
+        return None
+    action, draft_id = parts[1], parts[2]
+    if action not in {
+        TELEGRAM_CALLBACK_APPROVE,
+        TELEGRAM_CALLBACK_REJECT,
+        TELEGRAM_CALLBACK_CONFIRM_RISK,
+    }:
+        return None
+    if not draft_id.startswith("smsdraft_"):
+        return None
+    return {"action": action, "draft_id": draft_id}
+
+
+def build_sms_approval_reply_markup(draft_id, reply_policy=None, *, risk_confirmation=False):
+    """Build Telegram InlineKeyboardMarkup for an SMS approval draft."""
+    if not telegram_buttons_available() or not draft_id:
+        return None
+
+    approve_action = TELEGRAM_CALLBACK_CONFIRM_RISK if risk_confirmation else TELEGRAM_CALLBACK_APPROVE
+    approve_data = build_telegram_callback_data(approve_action, draft_id)
+    reject_data = build_telegram_callback_data(TELEGRAM_CALLBACK_REJECT, draft_id)
+    if not approve_data or not reject_data:
+        return None
+
+    reply_policy = reply_policy or {}
+    risk_state = reply_policy.get("state")
+    if risk_confirmation:
+        approve_label = "Confirm send"
+    elif risk_state == "risky":
+        approve_label = "Acknowledge risk"
+    else:
+        approve_label = "Approve send"
+
+    return {
+        "inline_keyboard": [
+            [
+                {"text": approve_label, "callback_data": approve_data},
+                {"text": "Reject", "callback_data": reject_data},
+            ]
+        ]
+    }
+
+
+def call_telegram_api(method, payload, *, timeout=10):
+    """Call Telegram Bot API and return True on success."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("⚠️  Telegram not configured (missing BOT_TOKEN)")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True
+    except Exception as e:
+        print(f"❌ Error calling Telegram {method}: {e}")
+        return False
+
+
+def send_to_telegram(text, reply_markup=None):
     """
     Send a message to the configured Telegram channel.
     Returns True on success, False on failure (non-blocking).
@@ -693,25 +830,190 @@ def send_to_telegram(text):
         print("⚠️  Telegram not configured (missing BOT_TOKEN or CHAT_ID)")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "Markdown"
     }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    return call_telegram_api("sendMessage", payload)
+
+
+def answer_telegram_callback(callback_query_id, text=None, *, show_alert=False):
+    """Stop Telegram's callback spinner and optionally show operator feedback."""
+    if not callback_query_id:
+        return False
+    payload = {
+        "callback_query_id": callback_query_id,
+        "show_alert": show_alert,
+    }
+    if text:
+        payload["text"] = str(text)[:200]
+    return call_telegram_api("answerCallbackQuery", payload, timeout=5)
+
+
+def edit_telegram_message_reply_markup(chat_id, message_id, reply_markup=None):
+    """Replace or remove a Telegram message inline keyboard."""
+    if chat_id is None or message_id is None:
+        return False
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return call_telegram_api("editMessageReplyMarkup", payload, timeout=5)
+
+
+def edit_telegram_message_text(chat_id, message_id, text, reply_markup=None):
+    """Edit Telegram review message text and optional inline keyboard."""
+    if chat_id is None or message_id is None:
+        return False
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return call_telegram_api("editMessageText", payload, timeout=5)
+
+
+def build_telegram_callback_status_message(result, draft_id):
+    """Build visible group status for a Telegram approval callback result."""
+    result = result or {}
+    status = result.get("status") or "unknown"
+    draft = result.get("draft") or {}
+    resolved_draft_id = draft.get("draft_id") or draft_id or "unknown"
+    escaped_draft_id = escape_telegram_markdown(resolved_draft_id)
+
+    if result.get("sent"):
+        sms_id = result.get("dialpad_sms_id") or draft.get("dialpad_sms_id") or "unknown"
+        return (
+            "✅ *SMS approval sent*\n"
+            f"*Draft ID:* `{escaped_draft_id}`\n"
+            f"*Dialpad SMS ID:* `{escape_telegram_markdown(sms_id)}`"
+        )
+    if status == "risky_confirmation_required":
+        reason = result.get("risk_reason") or draft.get("risk_reason") or "risk policy matched"
+        return (
+            "⚠️ *Risk acknowledged \\(not sent\\)*\n"
+            f"*Draft ID:* `{escaped_draft_id}`\n"
+            f"*Risk:* {escape_telegram_markdown(reason)}\n"
+            "Tap *Confirm send* to send this exact draft."
+        )
+    if status == "rejected":
+        return (
+            "🚫 *SMS approval rejected \\(not sent\\)*\n"
+            f"*Draft ID:* `{escaped_draft_id}`"
+        )
+    if status == "already_resolved":
+        return (
+            "ℹ️ *SMS approval already resolved*\n"
+            f"*Draft ID:* `{escaped_draft_id}`"
+        )
+
+    reason = result.get("reason") or result.get("error") or status
+    return (
+        "⛔ *SMS approval not sent*\n"
+        f"*Draft ID:* `{escaped_draft_id}`\n"
+        f"*Reason:* {escape_telegram_markdown(reason)}"
     )
 
+
+def callback_answer_text(result):
+    """Build short Telegram toast text for callback query responses."""
+    result = result or {}
+    if result.get("sent"):
+        return "Sent."
+    status = result.get("status")
+    if status == "risky_confirmation_required":
+        return "Risk acknowledged. Confirm send required."
+    if status == "rejected":
+        return "Rejected. Not sent."
+    if status == "already_resolved":
+        return "Already resolved."
+    reason = result.get("reason") or result.get("error") or status or "Not sent."
+    return f"Not sent: {reason}"
+
+
+def update_telegram_review_after_callback(callback_query, result, draft_id):
+    """Update Telegram controls and post a visible status after a callback."""
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    status = (result or {}).get("status")
+
+    if status == "risky_confirmation_required":
+        reply_markup = build_sms_approval_reply_markup(
+            draft_id,
+            {"state": "risky"},
+            risk_confirmation=True,
+        )
+        edit_telegram_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
+    elif (result or {}).get("sent") or status in TELEGRAM_TERMINAL_APPROVAL_STATUSES:
+        edit_telegram_message_reply_markup(chat_id, message_id, reply_markup=None)
+
+    return send_to_telegram(build_telegram_callback_status_message(result, draft_id))
+
+
+def dispatch_telegram_approval_callback(callback_query, parsed_callback):
+    """Execute an authenticated Telegram approval callback against the approval ledger."""
+    if sms_approval is None:
+        return {
+            "ok": False,
+            "status": "approval_unavailable",
+            "sent": False,
+            "reason": "approval module unavailable",
+        }
+
+    actor = callback_query.get("from") or {}
+    actor_id = str(actor.get("id") or "")
+    actor_username = actor.get("username")
+    actor_is_bot = bool(actor.get("is_bot"))
+    draft_id = parsed_callback["draft_id"]
+    action = parsed_callback["action"]
+
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return True
-    except Exception as e:
-        print(f"❌ Error sending to Telegram: {e}")
-        return False
+        conn = sms_approval.init_db()
+        try:
+            if action == TELEGRAM_CALLBACK_REJECT:
+                return sms_approval.reject_draft(
+                    conn,
+                    draft_id=draft_id,
+                    actor_id=actor_id,
+                    actor_username=actor_username,
+                    actor_is_bot=actor_is_bot,
+                )
+            approval_action = (
+                sms_approval.ACTION_CONFIRM_RISK
+                if action == TELEGRAM_CALLBACK_CONFIRM_RISK
+                else sms_approval.ACTION_APPROVE
+            )
+            return sms_approval.approve_draft(
+                conn,
+                draft_id=draft_id,
+                actor_id=actor_id,
+                actor_username=actor_username,
+                actor_is_bot=actor_is_bot,
+                action=approval_action,
+                send_func=dialpad_send_sms,
+            )
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - callbacks must fail closed.
+        print(f"⚠️  Telegram approval callback failed ({type(exc).__name__})")
+        return {
+            "ok": False,
+            "status": "callback_failed",
+            "sent": False,
+            "reason": str(exc),
+            "draft": {"draft_id": draft_id},
+        }
 
 
 def _get_header(headers, name):
@@ -1298,24 +1600,37 @@ def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
 
     reply_policy = reply_policy or {}
     risk_state = reply_policy.get("state")
+    buttons_enabled = build_sms_approval_reply_markup(draft_id, reply_policy) is not None
     lines = [
         "",
         "",
         "📝 *SMS approval draft \\(not sent\\)*",
         f"*Draft ID:* `{escape_telegram_markdown(draft_id)}`",
         f"*Exact text:*\n{escape_telegram_markdown(draft_message)}",
-        "",
-        f"Approve from an operator shell: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --actor-id <human-id> --approval-token \"$DIALPAD_SMS_APPROVAL_TOKEN\" --json`",
     ]
+    if buttons_enabled:
+        lines.extend(["", "Use the Telegram buttons below to approve or reject this exact draft."])
+    else:
+        lines.extend(
+            [
+                "",
+                f"Approve from an operator shell: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --actor-id <human-id> --approval-token \"$DIALPAD_SMS_APPROVAL_TOKEN\" --json`",
+            ]
+        )
     if risk_state == "risky":
         reason = reply_policy.get("risk_reason") or "risk policy matched"
         lines.extend(
             [
                 "",
                 f"⚠️ *Risk:* {escape_telegram_markdown(reason)}",
-                f"Second confirmation required: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --action confirm-risk --actor-id <human-id> --approval-token \"$DIALPAD_SMS_APPROVAL_TOKEN\" --json`",
             ]
         )
+        if buttons_enabled:
+            lines.append("Approval is two-step: first acknowledge risk, then confirm send.")
+        else:
+            lines.append(
+                f"Second confirmation required: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --action confirm-risk --actor-id <human-id> --approval-token \"$DIALPAD_SMS_APPROVAL_TOKEN\" --json`"
+            )
     return "\n".join(lines)
 
 
@@ -1670,6 +1985,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             self.handle_webhook()
             return
 
+        # /webhook/telegram - Telegram inline approval callbacks
+        if self.path == "/webhook/telegram":
+            self.handle_telegram_webhook()
+            return
+
         # /webhook/dialpad-call - missed call notifications
         if self.path == "/webhook/dialpad-call":
             self.handle_call_webhook()
@@ -1681,6 +2001,93 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error(404, "Not Found")
+
+    def send_json_response(self, status_code, payload):
+        """Send a JSON response."""
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode())
+
+    def read_json_body(self, endpoint_label):
+        """Read a bounded JSON request body."""
+        max_body_size = 1024 * 1024
+        try:
+            requested_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            requested_length = 0
+        content_length = min(requested_length, max_body_size)
+        raw_body = self.rfile.read(content_length)
+        try:
+            return raw_body, json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except json.JSONDecodeError as exc:
+            print(f"❌ Invalid JSON payload on {endpoint_label}: {exc}")
+            return raw_body, None
+
+    def handle_telegram_webhook(self):
+        """Handle Telegram inline button callback updates."""
+        _raw_body, data = self.read_json_body("/webhook/telegram")
+        if data is None:
+            self.send_error(400, "Invalid JSON")
+            return
+
+        if not TELEGRAM_WEBHOOK_SECRET:
+            log_line("❌ Telegram webhook secret is not configured")
+            self.send_json_response(503, {"status": "misconfigured", "reason": "secret_missing"})
+            return
+
+        provided_secret = _get_header(self.headers, "X-Telegram-Bot-Api-Secret-Token")
+        if not provided_secret or not hmac.compare_digest(
+            str(provided_secret),
+            str(TELEGRAM_WEBHOOK_SECRET),
+        ):
+            log_line("❌ Unauthorized Telegram webhook request")
+            self.send_error(401, "Unauthorized")
+            return
+
+        callback_query = data.get("callback_query")
+        if not isinstance(callback_query, dict):
+            self.send_json_response(200, {"status": "ignored", "reason": "not_callback_query"})
+            return
+
+        message = callback_query.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if str(chat_id) != str(TELEGRAM_CHAT_ID):
+            answer_telegram_callback(
+                callback_query.get("id"),
+                "This approval button is not valid in this chat.",
+                show_alert=True,
+            )
+            self.send_error(403, "Forbidden")
+            return
+
+        parsed = parse_telegram_callback_data(callback_query.get("data"))
+        if not parsed:
+            answer_telegram_callback(
+                callback_query.get("id"),
+                "Invalid approval action.",
+                show_alert=True,
+            )
+            self.send_json_response(200, {"status": "invalid_callback"})
+            return
+
+        result = dispatch_telegram_approval_callback(callback_query, parsed)
+        answer_telegram_callback(
+            callback_query.get("id"),
+            callback_answer_text(result),
+            show_alert=not bool(result.get("ok")),
+        )
+        update_telegram_review_after_callback(callback_query, result, parsed["draft_id"])
+        self.send_json_response(
+            200,
+            {
+                "status": "ok",
+                "approval_status": result.get("status"),
+                "sent": bool(result.get("sent")),
+                "draft_id": parsed["draft_id"],
+            },
+        )
 
     def handle_store(self):
         """Handle /store endpoint - stores message in SQLite, called by OpenClaw plugin"""
@@ -1890,7 +2297,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     reply_policy,
                 )
                 tg_text += build_human_only_blocked_suffix(reply_policy)
-                telegram_sms_sent = send_to_telegram(tg_text)
+                reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
+                telegram_sms_sent = (
+                    send_to_telegram(tg_text, reply_markup=reply_markup)
+                    if reply_markup
+                    else send_to_telegram(tg_text)
+                )
                 telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif hook_status == "filtered_opt_out":
                 tg_text = (
@@ -2104,7 +2516,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 reply_policy,
             )
             tg_text += build_human_only_blocked_suffix(reply_policy)
-            telegram_sent = send_to_telegram(tg_text)
+            reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
+            telegram_sent = (
+                send_to_telegram(tg_text, reply_markup=reply_markup)
+                if reply_markup
+                else send_to_telegram(tg_text)
+            )
 
             print(f"[{datetime.now().isoformat()}]")
             print(f"   📞 MISSED CALL: {from_num} -> {to_display}")
@@ -2256,7 +2673,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             reply_policy,
         )
         tg_text += build_human_only_blocked_suffix(reply_policy)
-        telegram_sent = send_to_telegram(tg_text)
+        reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
+        telegram_sent = (
+            send_to_telegram(tg_text, reply_markup=reply_markup)
+            if reply_markup
+            else send_to_telegram(tg_text)
+        )
 
         print(f"[{datetime.now().isoformat()}]")
         print(f"   📬 VOICEMAIL: {from_num} -> {to_display}")
@@ -2300,6 +2722,7 @@ def main():
     print(f"Port: {PORT}")
     print(f"Endpoints:")
     print(f"  - POST /webhook/dialpad (main webhook)")
+    print(f"  - POST /webhook/telegram (Telegram approval callbacks)")
     print(f"  - POST /webhook/dialpad-call (missed call webhook)")
     print(f"  - POST /webhook/dialpad-voicemail (voicemail webhook)")
     print(f"  - GET  /health (health check)")
@@ -2309,6 +2732,7 @@ def main():
     print(f"  - OpenClaw Gateway URL: {OPENCLAW_GATEWAY_URL}")
     print(f"  - OpenClaw Hooks Path: {OPENCLAW_HOOKS_PATH}")
     print(f"  - OpenClaw Hooks Token: {'✓' if OPENCLAW_HOOKS_TOKEN else '✗ (hook forwarding disabled)'}")
+    print(f"  - Telegram Approval Buttons: {'✓' if telegram_buttons_available() else '✗ (disabled or incomplete config)'}")
     print(f"  - OpenClaw Hooks Name: {OPENCLAW_HOOKS_NAME}")
     print(f"  - OpenClaw Call Hooks Name: {OPENCLAW_HOOKS_CALL_NAME}")
     print(f"  - OpenClaw Hooks Channel: {OPENCLAW_HOOKS_CHANNEL or '(unset)'}")

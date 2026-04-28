@@ -90,6 +90,39 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertEqual(result["status"], "stale")
         self.assertEqual(result["reason"], "newer_inbound")
 
+    def test_reject_draft_marks_exact_draft_rejected_without_sending(self):
+        draft = self._draft()
+
+        result = sms_approval.reject_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            actor_username="operator",
+            rejected_at_ms=1000,
+        )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], sms_approval.STATUS_REJECTED)
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_REJECTED)
+        self.assertEqual(stored["invalidated_reason"], "operator_rejected")
+        self.assertEqual(stored["rejected_by"], "12345")
+        self.assertEqual(stored["rejected_username"], "operator")
+        self.assertEqual(stored["rejected_at_ms"], 1000)
+
+    def test_reject_draft_rejects_bot_actor_without_mutating(self):
+        draft = self._draft()
+
+        result = sms_approval.reject_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="bot",
+        )
+
+        self.assertEqual(result["status"], "blocked_actor")
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+
     def test_risky_draft_requires_second_confirmation(self):
         draft = self._draft(
             risk_state=sms_approval.RISK_RISKY,

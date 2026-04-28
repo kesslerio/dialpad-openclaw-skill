@@ -42,3 +42,19 @@ def test_openclaw_docs_require_sms_approval_drafts_not_autonomous_send():
     assert "explicit opt-out language creates no draft" in readme
     assert "explicit opt-out language creates no draft" in api_reference
     assert "autonomous sms send is not supported" in integration
+
+
+def test_openclaw_docs_require_telegram_inline_button_safety_preflight():
+    readme = (ROOT / "README.md").read_text().lower()
+    integration = (ROOT / "references/openclaw-integration.md").read_text().lower()
+
+    assert "dialpad_telegram_approval_buttons_enabled" in readme
+    assert "telegram_webhook_secret" in readme
+    assert "getwebhookinfo" in readme
+    assert "getupdates" in readme
+    assert "x-telegram-bot-api-secret-token" in readme
+    assert "wrong-chat" in integration or "wrong chat" in integration
+    assert "getwebhookinfo" in integration
+    assert "getupdates" in integration
+    assert "x-telegram-bot-api-secret-token" in integration
+    assert "smsdraft_*" in integration

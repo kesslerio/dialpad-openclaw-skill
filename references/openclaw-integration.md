@@ -67,6 +67,8 @@ export OPENCLAW_HOOKS_CALL_ENABLED="0"
 export DIALPAD_AUTO_REPLY_ENABLED="0"
 export DIALPAD_SMS_APPROVAL_DB="/home/art/clawd/logs/sms_approvals.db"
 export DIALPAD_SMS_APPROVAL_TOKEN="operator-only-random-token"
+export DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED="0"
+export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 ```
 
 Behavior:
@@ -76,6 +78,9 @@ Behavior:
 - voicemail remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
 - explicit opt-out language creates no draft, invalidates pending drafts for that customer, and emits only a human-only Telegram notice
 - CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied by the operator approval surface
+- Telegram inline approval buttons are disabled unless `DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED=1`, Telegram bot/chat credentials are configured, and `TELEGRAM_WEBHOOK_SECRET` is set
+- before enabling Telegram buttons, check `getWebhookInfo` and local OpenClaw runtime ownership; do not replace another webhook or `getUpdates` polling owner for the same bot
+- Telegram callback requests must include `X-Telegram-Bot-Api-Secret-Token`, must come from the configured Telegram chat, and must identify a real non-bot actor
 - if your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly
 - the local gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
 
@@ -96,6 +101,11 @@ Relevant endpoints in `scripts/webhook_server.py`:
   - creates approval drafts for eligible first-contact sales-line missed-call acknowledgments, but does not send SMS directly
 - `POST /webhook/dialpad-voicemail`
   - Telegram notification plus optional approval-draft creation for eligible first-contact sales-line voicemails
+- `POST /webhook/telegram`
+  - receives Telegram `callback_query` updates from inline approval buttons
+  - validates `X-Telegram-Bot-Api-Secret-Token`
+  - rejects callbacks outside the configured Telegram chat
+  - dispatches approve, confirm-risk, and reject actions to the deterministic SMS approval ledger
 
 ## OpenClaw Receiver Contract
 
@@ -450,6 +460,14 @@ OpenClaw should:
 
 Outbound send must always go through `scripts/approve_sms_draft.py` or an equivalent deterministic approval handler with a real human actor id plus a trusted approval token/callback. The agent or bot must not approve its own draft.
 
+For Telegram inline approval, the trusted callback path is:
+
+1. the review message shows the exact draft text plus inline approve/reject controls
+2. Telegram sends a `callback_query` to `/webhook/telegram`
+3. the webhook validates `X-Telegram-Bot-Api-Secret-Token`, chat id, callback payload shape, and actor identity
+4. the callback references only the durable `smsdraft_*` id and action; it does not contain draft text or `DIALPAD_SMS_APPROVAL_TOKEN`
+5. normal approvals send the stored exact text, risky approvals require a second `confirm-risk` callback, and reject/stale/failed outcomes remove the active buttons
+
 ## Rollout Plan
 
 Recommended rollout:
@@ -460,6 +478,7 @@ Recommended rollout:
 4. add normalization and proactive enrichment
 5. ship `approval_required` mode first
 6. re-enable hook classes only after approval drafts and stale/opt-out behavior are verified
+7. enable Telegram buttons only after `getWebhookInfo` confirms the bot is unowned by another webhook or deliberately owned by this service; if the bot is consumed through `getUpdates`, route callbacks through that owner or use a separate approval bot
 
 ## Validation Checklist
 
@@ -467,6 +486,8 @@ Dialpad-side:
 - `OPENCLAW_HOOKS_TOKEN` configured
 - `OPENCLAW_HOOKS_PATH` points at a live OpenClaw receiver
 - `DIALPAD_WEBHOOK_SECRET` matches the sender expectations
+- Telegram button rollout preflight checks `getWebhookInfo` and confirms no conflicting `getUpdates` polling owner
+- `/webhook/telegram` validates `X-Telegram-Bot-Api-Secret-Token` and wrong-chat callbacks fail closed
 - test SMS and missed-call webhooks return HTTP 200
 
 OpenClaw-side:

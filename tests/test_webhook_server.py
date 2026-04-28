@@ -659,6 +659,28 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
         self.assertEqual(send_calls, [])
         self.assertEqual(stored["status"], "rejected")
 
+    def test_non_terminal_actor_failure_keeps_existing_approval_buttons(self):
+        callback_query = {
+            "message": {"message_id": 99, "chat": {"id": "-100123"}},
+        }
+
+        with patch.object(webhook_server, "edit_telegram_message_reply_markup") as edit_markup, \
+                patch.object(webhook_server, "send_to_telegram", return_value=True) as send_status:
+            webhook_server.update_telegram_review_after_callback(
+                callback_query,
+                {
+                    "ok": False,
+                    "status": "actor_not_allowed",
+                    "sent": False,
+                    "reason": "actor_not_in_allowlist",
+                    "draft": {"draft_id": "smsdraft_1234567890abcdef"},
+                },
+                "smsdraft_1234567890abcdef",
+            )
+
+        edit_markup.assert_not_called()
+        send_status.assert_called_once()
+
 
 class CallWebhookHandlerTests(unittest.TestCase):
     class _FakeMoment:

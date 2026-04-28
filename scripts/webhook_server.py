@@ -137,6 +137,15 @@ TELEGRAM_CALLBACK_APPROVE = "a"
 TELEGRAM_CALLBACK_REJECT = "r"
 TELEGRAM_CALLBACK_CONFIRM_RISK = "c"
 TELEGRAM_CALLBACK_MAX_BYTES = 64
+TELEGRAM_TERMINAL_APPROVAL_STATUSES = {
+    "already_resolved",
+    "blocked_opt_out",
+    "failed",
+    "not_found",
+    "rejected",
+    "sent",
+    "stale",
+}
 
 SENSITIVE_KEYWORD_PATTERNS = (
     re.compile(
@@ -946,7 +955,7 @@ def update_telegram_review_after_callback(callback_query, result, draft_id):
             risk_confirmation=True,
         )
         edit_telegram_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
-    else:
+    elif (result or {}).get("sent") or status in TELEGRAM_TERMINAL_APPROVAL_STATUSES:
         edit_telegram_message_reply_markup(chat_id, message_id, reply_markup=None)
 
     return send_to_telegram(build_telegram_callback_status_message(result, draft_id))

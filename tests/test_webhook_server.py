@@ -54,6 +54,26 @@ def _build_handler(payload, headers=None):
     return handler, status
 
 
+def _telegram_callback_payload(draft_id, action="a", chat_id="-100123", user_id=42, is_bot=False):
+    return {
+        "update_id": 1,
+        "callback_query": {
+            "id": "callback-1",
+            "from": {
+                "id": user_id,
+                "is_bot": is_bot,
+                "username": "operator",
+            },
+            "message": {
+                "message_id": 99,
+                "chat": {"id": chat_id, "type": "group"},
+                "text": "review",
+            },
+            "data": f"smsa:{action}:{draft_id}",
+        },
+    }
+
+
 class WebhookNotificationClassificationTests(unittest.TestCase):
     def test_normal_inbound_sms_classified_as_sms(self):
         payload = {
@@ -238,6 +258,77 @@ class WebhookNotificationClassificationTests(unittest.TestCase):
         self.assertEqual(extract_message_text(payload), "Real body")
         self.assertEqual(classify_inbound_notification(payload), "sms")
 
+    def test_sms_approval_reply_markup_uses_compact_callback_data(self):
+        with patch.object(webhook_server, "DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED", True), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"):
+            markup = webhook_server.build_sms_approval_reply_markup(
+                "smsdraft_1234567890abcdef",
+                {"state": "normal"},
+            )
+
+        self.assertEqual(markup["inline_keyboard"][0][0]["text"], "Approve send")
+        callback_data = markup["inline_keyboard"][0][0]["callback_data"]
+        self.assertEqual(callback_data, "smsa:a:smsdraft_1234567890abcdef")
+        self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+
+    def test_sms_approval_reply_markup_disabled_without_webhook_secret(self):
+        with patch.object(webhook_server, "DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED", True), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", ""):
+            markup = webhook_server.build_sms_approval_reply_markup(
+                "smsdraft_1234567890abcdef",
+                {"state": "normal"},
+            )
+
+        self.assertIsNone(markup)
+
+    def test_risky_sms_approval_reply_markup_requires_acknowledgement_first(self):
+        with patch.object(webhook_server, "DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED", True), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"):
+            markup = webhook_server.build_sms_approval_reply_markup(
+                "smsdraft_1234567890abcdef",
+                {"state": "risky"},
+            )
+
+        self.assertEqual(markup["inline_keyboard"][0][0]["text"], "Acknowledge risk")
+        self.assertEqual(
+            markup["inline_keyboard"][0][0]["callback_data"],
+            "smsa:a:smsdraft_1234567890abcdef",
+        )
+
+    def test_parse_telegram_callback_data_rejects_unknown_namespace(self):
+        self.assertIsNone(webhook_server.parse_telegram_callback_data("other:a:smsdraft_1"))
+
+    def test_send_to_telegram_includes_reply_markup_payload(self):
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout=10):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse()
+
+        reply_markup = {
+            "inline_keyboard": [[{"text": "Approve send", "callback_data": "smsa:a:smsdraft_1"}]]
+        }
+        with patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            sent = webhook_server.send_to_telegram("Review", reply_markup=reply_markup)
+
+        self.assertTrue(sent)
+        self.assertEqual(requests[0]["reply_markup"], reply_markup)
+
 
 class MissedCallResolutionTests(unittest.TestCase):
     def test_sparse_payload_nested_key_resolution(self):
@@ -390,6 +481,183 @@ class MissedCallResolutionTests(unittest.TestCase):
         resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
         self.assertIsNone(resolved["to_number"])
         self.assertEqual(resolved["line_resolution_path"], "unresolved")
+
+
+class TelegramCallbackHandlerTests(unittest.TestCase):
+    def test_telegram_callback_requires_secret(self):
+        payload = _telegram_callback_payload("smsdraft_1234567890abcdef")
+        with patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"):
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_telegram_webhook(handler)
+
+        self.assertEqual(status["code"], 401)
+
+    def test_telegram_callback_rejects_wrong_chat_without_dispatch(self):
+        payload = _telegram_callback_payload("smsdraft_1234567890abcdef", chat_id="-100999")
+        with patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "answer_telegram_callback", return_value=True) as answer, \
+                patch.object(webhook_server, "dispatch_telegram_approval_callback") as dispatch:
+            handler, status = _build_handler(
+                payload,
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+            )
+            webhook_server.DialpadWebhookHandler.handle_telegram_webhook(handler)
+
+        self.assertEqual(status["code"], 403)
+        answer.assert_called_once()
+        dispatch.assert_not_called()
+
+    def test_telegram_callback_approve_sends_exact_stored_draft(self):
+        send_calls = []
+        telegram_api_calls = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(
+                    webhook_server,
+                    "dialpad_send_sms",
+                    side_effect=lambda to_numbers, message, from_number=None: send_calls.append(
+                        (to_numbers, message, from_number)
+                    ) or {"id": "sms-1", "message_status": "pending"},
+                ), \
+                patch.object(
+                    webhook_server,
+                    "call_telegram_api",
+                    side_effect=lambda method, payload, timeout=10: telegram_api_calls.append(
+                        (method, payload)
+                    ) or True,
+                ):
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                draft = webhook_server.sms_approval.create_draft(
+                    conn,
+                    thread_key="thread-1",
+                    customer_number="+15125550100",
+                    sender_number="+14155201316",
+                    draft_text="Stored exact text.",
+                )
+            finally:
+                conn.close()
+
+            handler, status = _build_handler(
+                _telegram_callback_payload(draft["draft_id"], action="a"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+            )
+            webhook_server.DialpadWebhookHandler.handle_telegram_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertTrue(response["sent"])
+        self.assertEqual(send_calls, [(["+15125550100"], "Stored exact text.", "+14155201316")])
+        self.assertIn("answerCallbackQuery", [method for method, _payload in telegram_api_calls])
+        self.assertIn("editMessageReplyMarkup", [method for method, _payload in telegram_api_calls])
+        self.assertIn("sendMessage", [method for method, _payload in telegram_api_calls])
+
+    def test_telegram_callback_risky_first_click_replaces_markup_without_send(self):
+        send_calls = []
+        telegram_api_calls = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED", True), \
+                patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(
+                    webhook_server,
+                    "dialpad_send_sms",
+                    side_effect=lambda *_args, **_kwargs: send_calls.append(True) or {"id": "sms-1"},
+                ), \
+                patch.object(
+                    webhook_server,
+                    "call_telegram_api",
+                    side_effect=lambda method, payload, timeout=10: telegram_api_calls.append(
+                        (method, payload)
+                    ) or True,
+                ):
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                draft = webhook_server.sms_approval.create_draft(
+                    conn,
+                    thread_key="thread-1",
+                    customer_number="+15125550100",
+                    sender_number="+14155201316",
+                    draft_text="Stored exact text.",
+                    risk_state=webhook_server.sms_approval.RISK_RISKY,
+                    risk_reason="customer asked for a real person",
+                )
+            finally:
+                conn.close()
+
+            handler, status = _build_handler(
+                _telegram_callback_payload(draft["draft_id"], action="a"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+            )
+            webhook_server.DialpadWebhookHandler.handle_telegram_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertFalse(response["sent"])
+        self.assertEqual(response["approval_status"], "risky_confirmation_required")
+        self.assertEqual(send_calls, [])
+        reply_markups = [
+            payload.get("reply_markup")
+            for method, payload in telegram_api_calls
+            if method == "editMessageReplyMarkup"
+        ]
+        self.assertEqual(
+            reply_markups[0]["inline_keyboard"][0][0]["callback_data"],
+            f"smsa:c:{draft['draft_id']}",
+        )
+
+    def test_telegram_callback_reject_marks_draft_rejected_without_send(self):
+        send_calls = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(
+                    webhook_server,
+                    "dialpad_send_sms",
+                    side_effect=lambda *_args, **_kwargs: send_calls.append(True) or {"id": "sms-1"},
+                ), \
+                patch.object(webhook_server, "call_telegram_api", return_value=True):
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                draft = webhook_server.sms_approval.create_draft(
+                    conn,
+                    thread_key="thread-1",
+                    customer_number="+15125550100",
+                    sender_number="+14155201316",
+                    draft_text="Stored exact text.",
+                )
+            finally:
+                conn.close()
+
+            handler, status = _build_handler(
+                _telegram_callback_payload(draft["draft_id"], action="r"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+            )
+            webhook_server.DialpadWebhookHandler.handle_telegram_webhook(handler)
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                stored = webhook_server.sms_approval.get_draft(conn, draft["draft_id"])
+            finally:
+                conn.close()
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertFalse(response["sent"])
+        self.assertEqual(response["approval_status"], "rejected")
+        self.assertEqual(send_calls, [])
+        self.assertEqual(stored["status"], "rejected")
 
 
 class CallWebhookHandlerTests(unittest.TestCase):

@@ -80,6 +80,10 @@ export OPENCLAW_HOOKS_CALL_ENABLED="1"
 export DIALPAD_AUTO_REPLY_ENABLED="1"
 export DIALPAD_SMS_APPROVAL_DB="/home/art/clawd/logs/sms_approvals.db"
 export DIALPAD_SMS_APPROVAL_TOKEN="operator-only-random-token"
+
+# Optional Telegram inline approval buttons (disabled by default)
+export DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED="0"
+export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 ```
 
 When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are only forwarded to OpenClaw when the matching event flag is explicitly enabled. Leave `OPENCLAW_HOOKS_SMS_ENABLED=0` and `OPENCLAW_HOOKS_CALL_ENABLED=0` for notification-only mode.
@@ -92,6 +96,12 @@ For identity work, treat `resolved` as the only state that is safe to mutate aut
 When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` create a short exact-text approval draft instead of sending SMS directly. Missed calls get a "sorry we missed you" draft variant; SMS and voicemail get a "we'll be in touch shortly" draft variant. Explicit opt-out language creates no draft, invalidates pending drafts for that customer, and sends only a human-only Telegram notice.
 CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied to `bin/approve_sms_draft.py`; keep that token out of agent runtime environments.
 
+Telegram inline approval buttons are optional. Before setting `DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED=1`, run a bot-delivery preflight: check Telegram `getWebhookInfo` for the configured bot and confirm no OpenClaw runtime or operator process is already consuming that bot with `getUpdates` polling or another webhook. Telegram webhooks and `getUpdates` polling are mutually exclusive for the same bot. If another owner exists, route callback handling through that owner or use a separate Dialpad approval bot.
+
+When enabled, Telegram buttons call `POST /webhook/telegram` with callback queries. Configure Telegram with `allowed_updates=["callback_query"]`, `drop_pending_updates=true`, and `secret_token="$TELEGRAM_WEBHOOK_SECRET"` so requests include `X-Telegram-Bot-Api-Secret-Token`. The webhook validates that header, the configured Telegram chat id, and the human actor before dispatching to the deterministic SMS approval ledger. The button payload contains only a short draft id/action reference; it never contains the draft text or `DIALPAD_SMS_APPROVAL_TOKEN`.
+
+Live smoke test for buttons: send a harmless fake/test inbound SMS, verify the Telegram review message shows inline buttons, click `Reject`, and confirm the draft is rejected/stale in `sms_approvals.db`. Do not click approve on smoke tests unless the destination is a controlled non-customer number.
+
 Create/list webhook subscriptions:
 
 ```bash
@@ -102,6 +112,7 @@ bin/create_sms_webhook.py list
 Notes:
 
 - `/webhook/dialpad` handles SMS storage plus optional OpenClaw/Telegram fan-out
+- `/webhook/telegram` handles Telegram inline approval button callbacks; it requires `X-Telegram-Bot-Api-Secret-Token` and the configured Telegram chat id
 - `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, plus optional OpenClaw hook forwarding
 - `/webhook/dialpad-voicemail` sends Telegram alerts and can create first-contact sales-line SMS approval drafts, but does not send SMS directly
 - This repo validates hook request shape, gating, and graceful degradation only. It does not validate downstream OpenClaw proactive enrichment behavior

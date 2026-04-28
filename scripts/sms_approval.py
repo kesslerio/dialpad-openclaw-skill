@@ -23,6 +23,7 @@ STATUS_SENDING = "sending"
 STATUS_SENT = "sent"
 STATUS_FAILED = "failed"
 STATUS_STALE = "stale"
+STATUS_REJECTED = "rejected"
 
 RISK_NORMAL = "normal"
 RISK_RISKY = "risky"
@@ -160,10 +161,16 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             dialpad_sms_id TEXT,
             delivery_status TEXT,
             send_error TEXT,
+            rejected_by TEXT,
+            rejected_username TEXT,
+            rejected_at_ms INTEGER,
             metadata_json TEXT
         )
         """
     )
+    ensure_column(conn, "sms_approval_drafts", "rejected_by", "TEXT")
+    ensure_column(conn, "sms_approval_drafts", "rejected_username", "TEXT")
+    ensure_column(conn, "sms_approval_drafts", "rejected_at_ms", "INTEGER")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sms_approval_thread_status "
         "ON sms_approval_drafts(thread_key, status)"
@@ -185,6 +192,16 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
+    """Add a nullable column when opening an older SQLite approval database."""
+    columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute(f"PRAGMA table_info({table_name})")
+    }
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -340,6 +357,70 @@ def invalidate_pending(
     if commit:
         conn.commit()
     return cursor.rowcount
+
+
+def reject_draft(
+    conn: sqlite3.Connection,
+    *,
+    draft_id: str,
+    actor_id: str,
+    actor_username: str | None = None,
+    actor_is_bot: bool = False,
+    rejected_at_ms: int | None = None,
+) -> dict[str, Any]:
+    """Reject one pending draft without sending it."""
+    if _is_bot_actor(actor_id, actor_is_bot=actor_is_bot):
+        return {"ok": False, "status": "blocked_actor", "sent": False, "reason": "agent_or_bot_cannot_reject"}
+    if not _actor_is_allowed(actor_id):
+        return {"ok": False, "status": "actor_not_allowed", "sent": False, "reason": "actor_not_in_allowlist"}
+
+    draft = get_draft(conn, draft_id)
+    if not draft:
+        return {"ok": False, "status": "not_found", "sent": False}
+    if draft.get("status") == STATUS_SENT:
+        return {"ok": True, "status": "already_resolved", "sent": False, "draft": draft}
+    if draft.get("status") not in {STATUS_PENDING, STATUS_RISK_PENDING}:
+        return {
+            "ok": False,
+            "status": draft.get("status") or STATUS_STALE,
+            "sent": False,
+            "reason": draft.get("invalidated_reason") or draft.get("status"),
+            "draft": draft,
+        }
+
+    ts = rejected_at_ms or now_ms()
+    cursor = conn.execute(
+        """
+        UPDATE sms_approval_drafts
+        SET status = ?, invalidated_at_ms = ?, invalidated_reason = ?,
+            rejected_by = ?, rejected_username = ?, rejected_at_ms = ?
+        WHERE draft_id = ?
+          AND status IN (?, ?)
+          AND invalidated_at_ms IS NULL
+        """,
+        (
+            STATUS_REJECTED,
+            ts,
+            "operator_rejected",
+            actor_id,
+            actor_username,
+            ts,
+            draft_id,
+            STATUS_PENDING,
+            STATUS_RISK_PENDING,
+        ),
+    )
+    conn.commit()
+    current = get_draft(conn, draft_id)
+    if cursor.rowcount != 1:
+        return {
+            "ok": False,
+            "status": "stale",
+            "sent": False,
+            "reason": (current or {}).get("invalidated_reason") or (current or {}).get("status") or "not_claimed",
+            "draft": current,
+        }
+    return {"ok": True, "status": STATUS_REJECTED, "sent": False, "draft": current}
 
 
 def create_replacement_draft(

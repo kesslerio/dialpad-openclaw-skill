@@ -1153,6 +1153,81 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertIn("Inbound context", telegram_messages[0])
         self.assertNotIn("SMS approval draft", telegram_messages[0])
 
+    def test_payload_only_contact_name_does_not_create_context_draft(self):
+        hook_calls = []
+        telegram_messages = []
+        event_ts = 1760000000000
+        recent_call = {
+            "external_number": "+14322083277",
+            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+            "date_started": event_ts - (2 * 24 * 60 * 60 * 1000),
+            "direction": "inbound",
+            "state": "hangup",
+            "duration": 120000,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": None,
+                        "first_name": None,
+                        "last_name": None,
+                        "company": None,
+                        "job_title": None,
+                        "status": "not_found",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[recent_call]), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    side_effect=lambda normalized_event, line_display=None: (
+                        hook_calls.append({"normalized_event": normalized_event, "line_display": line_display}) or
+                        (True, "http_200")
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14322083277",
+                "to_number": "+14155201316",
+                "date_started": event_ts,
+                "contact": {"name": "Payload Person"},
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        first_contact = hook_calls[0]["normalized_event"]["first_contact"]
+        inbound_context = hook_calls[0]["normalized_event"]["inbound_context"]
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(first_contact["identityState"], "payload_contact")
+        self.assertFalse(first_contact["knownContact"])
+        self.assertEqual(inbound_context["contactName"], "Payload Person")
+        self.assertEqual(inbound_context["identityConfidence"], "low")
+        self.assertFalse(inbound_context["contextDraftAllowed"])
+        self.assertNotIn("exact_phone_match", inbound_context["evidence"])
+        self.assertEqual(response["auto_reply_status"], "not_eligible")
+        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertIn("Inbound context", telegram_messages[0])
+        self.assertNotIn("SMS approval draft", telegram_messages[0])
+
 
 class VoicemailWebhookHandlerTests(unittest.TestCase):
     def setUp(self):

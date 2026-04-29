@@ -1223,7 +1223,7 @@ def _extract_payload_contact_name(data):
 
 
 def apply_payload_contact_fallback(sender_enrichment, data):
-    """Use webhook contact identity when API lookup has no exact contact name."""
+    """Use webhook contact identity as display-only context when exact lookup has no name."""
     sender_enrichment = dict(sender_enrichment or {})
     if sender_enrichment.get("contact_name"):
         return sender_enrichment
@@ -1238,7 +1238,7 @@ def apply_payload_contact_fallback(sender_enrichment, data):
     sender_enrichment.setdefault("company", None)
     sender_enrichment.setdefault("job_title", None)
     if sender_enrichment.get("status") in {None, "not_found", "not_applicable", "disabled"}:
-        sender_enrichment["status"] = "resolved"
+        sender_enrichment["status"] = "payload_contact"
     sender_enrichment["payload_contact_name"] = payload_name
     sender_enrichment["payload_contact_used"] = True
     return sender_enrichment
@@ -1356,14 +1356,13 @@ def build_inbound_context(normalized_event, sender_enrichment=None, line_display
     contact_name = first_contact.get("contactName") if isinstance(first_contact, dict) else None
     degraded = bool((lookup or {}).get("degraded") or sender_enrichment.get("degraded"))
     identity_state = first_contact.get("identityState") if isinstance(first_contact, dict) else "degraded"
+    payload_contact_only = bool(sender_enrichment.get("payload_contact_used")) and identity_state != "resolved"
 
     evidence = []
     if contact_name:
-        evidence.append("dialpad_contact_name")
-    if known_contact and not degraded:
+        evidence.append("webhook_contact_payload" if payload_contact_only else "dialpad_contact_name")
+    if known_contact and not degraded and not payload_contact_only:
         evidence.append("exact_phone_match")
-    if sender_enrichment.get("payload_contact_used"):
-        evidence.append("webhook_contact_payload")
     if degraded:
         evidence.append("lookup_degraded")
     if not known_contact and identity_state == "not_found":
@@ -1394,7 +1393,7 @@ def build_inbound_context(normalized_event, sender_enrichment=None, line_display
         recency["state"] = "not_applicable"
 
     identity_confidence = "low"
-    if known_contact and not degraded:
+    if known_contact and not degraded and not payload_contact_only:
         identity_confidence = "high"
     elif known_contact:
         identity_confidence = "medium"
@@ -1709,11 +1708,19 @@ def build_first_contact_context(normalized_event, sender_enrichment=None, line_d
     sender_enrichment = sender_enrichment or {}
     contact_name = sender_enrichment.get("contact_name")
     contact_name_text = str(contact_name or "").strip()
-    known_contact = bool(contact_name_text) and contact_name_text.lower() != "unknown"
-    first_contact_candidate = not known_contact
     lookup_status = str(sender_enrichment.get("status") or "not_applicable")
+    payload_contact_only = bool(sender_enrichment.get("payload_contact_used")) and lookup_status != "resolved"
+    known_contact = (
+        bool(contact_name_text)
+        and contact_name_text.lower() != "unknown"
+        and lookup_status == "resolved"
+        and not payload_contact_only
+    )
+    first_contact_candidate = not known_contact
     if sender_enrichment.get("degraded") or lookup_status in {"disabled", "not_applicable"}:
         identity_state = "degraded"
+    elif payload_contact_only:
+        identity_state = "payload_contact"
     elif known_contact:
         identity_state = "resolved"
     else:
@@ -2483,7 +2490,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     sender_enrichment.setdefault("payload_contact_name", cached)
                     sender_enrichment["payload_contact_used"] = True
                     if sender_enrichment.get("status") in {None, "not_found", "not_applicable", "disabled"}:
-                        sender_enrichment["status"] = "resolved"
+                        sender_enrichment["status"] = "payload_contact"
             sender_enrichment["contact_name"] = contact_info
 
             inbound_alert_decision = assess_inbound_sms_alert_eligibility(

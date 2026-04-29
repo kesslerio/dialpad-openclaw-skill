@@ -90,10 +90,11 @@ When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call e
 If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
 The local gateway allows explicit `niemand-work` routing and `hook:dialpad:` session keys.
 For first-time or unknown inbound contacts, the payload also carries a `firstContact` hint with an explicit `identityState` plus lookup details so OpenClaw can enrich identity, look up business context, draft a reply, and suggest Dialpad contact sync when the match is clear.
+For all eligible inbound SMS and missed calls, the payload may also carry `inboundContext`: a compact identity/provenance/recency brief that explains exact phone matches, Dialpad contact evidence, recent SMS/call continuity, and whether a context-aware approval draft is allowed.
 That pattern is CRM-agnostic: Attio is one example, but the same setup works with HubSpot, Pipedrive, Airtable, a spreadsheet, or a custom directory service downstream.
 Current-turn verification still applies: "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory.
 For identity work, treat `resolved` as the only state that is safe to mutate automatically; `not_found`, `ambiguous`, and `degraded` stay draft-only until the CRM layer proves otherwise.
-When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` create a short exact-text approval draft instead of sending SMS directly. Missed calls get a "sorry we missed you" draft variant; SMS and voicemail get a "we'll be in touch shortly" draft variant. Explicit opt-out language creates no draft, invalidates pending drafts for that customer, and sends only a human-only Telegram notice.
+When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` create a short exact-text approval draft instead of sending SMS directly. Known contacts only get context-aware approval drafts when identity confidence is high and recent SMS/call continuity is no older than 14 days; stale or degraded context produces a brief only. Missed calls get a "sorry we missed you" draft variant; SMS and voicemail get a "we'll be in touch shortly" draft variant. Explicit opt-out language creates no draft, invalidates pending drafts for that customer, and sends only a human-only Telegram notice.
 CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied to `bin/approve_sms_draft.py`; keep that token out of agent runtime environments.
 
 Telegram inline approval buttons are optional. Before setting `DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED=1`, run a bot-delivery preflight: check Telegram `getWebhookInfo` for the configured bot and confirm no OpenClaw runtime or operator process is already consuming that bot with `getUpdates` polling or another webhook. Telegram webhooks and `getUpdates` polling are mutually exclusive for the same bot. If another owner exists, route callback handling through that owner or use a separate Dialpad approval bot.
@@ -113,7 +114,7 @@ Notes:
 
 - `/webhook/dialpad` handles SMS storage plus optional OpenClaw/Telegram fan-out
 - `/webhook/telegram` handles Telegram inline approval button callbacks; it requires `X-Telegram-Bot-Api-Secret-Token` and the configured Telegram chat id
-- `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, plus optional OpenClaw hook forwarding
+- `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, compact `inboundContext` briefs, plus optional OpenClaw hook forwarding
 - `/webhook/dialpad-voicemail` sends Telegram alerts and can create first-contact sales-line SMS approval drafts, but does not send SMS directly
 - This repo validates hook request shape, gating, and graceful degradation only. It does not validate downstream OpenClaw proactive enrichment behavior
 

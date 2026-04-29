@@ -190,9 +190,11 @@ Behavior notes:
 - Inbound missed-call forwarding requires `OPENCLAW_HOOKS_TOKEN` and `OPENCLAW_HOOKS_CALL_ENABLED=1`
 - Leave `OPENCLAW_HOOKS_SMS_ENABLED=0` and `OPENCLAW_HOOKS_CALL_ENABLED=0` for notification-only mode
 - First-contact sales-line replies create approval drafts when `DIALPAD_AUTO_REPLY_ENABLED` is truthy; they do not send SMS directly
+- Known contacts may create context-aware approval drafts only when `inboundContext.identityConfidence` is high and recent SMS/call continuity is no older than 14 days
 - Voicemail notifications remain Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
 - The local OpenClaw gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
 - For unknown inbound contacts, the hook may include a `firstContact` hint with lookup and reply-drafting signals; downstream users can map that to Attio, HubSpot, Airtable, or any other source of truth
+- For eligible inbound SMS and missed calls, the hook may include `inboundContext` with identity confidence, evidence, recency, and `contextDraftAllowed` so operators can see why a draft was or was not proposed
 - Identity states are preserved as data, not implied behavior: `resolved` is safe to mutate, while `ambiguous`, `not_found`, and `degraded` should stay non-mutating until the CRM/agent layer proves the identity
 - The webhook server adds `autoReply` metadata for approval drafts. `sent: false` is expected until a deterministic approval command records a Dialpad success result
 - CLI approval requires `DIALPAD_SMS_APPROVAL_TOKEN`; keep that token in the trusted operator surface, not in agent runtime environments

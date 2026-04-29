@@ -1003,6 +1003,156 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertIn(r"Jane\_Doe", telegram_messages[0])
         self.assertNotIn("11:11 PM", telegram_messages[0])
 
+    def test_known_recent_missed_call_creates_context_approval_draft(self):
+        hook_calls = []
+        telegram_messages = []
+        sms_calls = []
+        event_ts = 1760000000000
+        recent_call = {
+            "external_number": "+14322083277",
+            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+            "date_started": event_ts - (2 * 24 * 60 * 60 * 1000),
+            "direction": "inbound",
+            "state": "hangup",
+            "duration": 120000,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": "Ann Harper",
+                        "first_name": "Ann",
+                        "last_name": "Harper",
+                        "company": "Prospect",
+                        "job_title": None,
+                        "status": "resolved",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[recent_call]), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    side_effect=lambda normalized_event, line_display=None: (
+                        hook_calls.append({"normalized_event": normalized_event, "line_display": line_display}) or
+                        (True, "http_200")
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
+                ), \
+                patch.object(
+                    webhook_server,
+                    "dialpad_send_sms",
+                    side_effect=lambda *args, **kwargs: sms_calls.append((args, kwargs)) or {"id": "msg-1", "message_status": "pending"},
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14322083277",
+                "to_number": "+14155201316",
+                "date_started": event_ts,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        inbound_context = hook_calls[0]["normalized_event"]["inbound_context"]
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(sms_calls, [])
+        self.assertEqual(inbound_context["contactName"], "Ann Harper")
+        self.assertEqual(inbound_context["identityConfidence"], "high")
+        self.assertEqual(inbound_context["recency"]["state"], "fresh")
+        self.assertTrue(inbound_context["contextDraftAllowed"])
+        self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
+        self.assertEqual(response["auto_reply_status"], "draft_created")
+        self.assertTrue(response["auto_reply_draft_id"])
+        self.assertIn("Inbound context", telegram_messages[0])
+        self.assertIn("Ann Harper", telegram_messages[0])
+        self.assertIn("SMS approval draft", telegram_messages[0])
+
+    def test_stale_known_missed_call_gets_context_without_draft(self):
+        hook_calls = []
+        telegram_messages = []
+        event_ts = 1760000000000
+        stale_call = {
+            "external_number": "+14322083277",
+            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+            "date_started": event_ts - (16 * 24 * 60 * 60 * 1000),
+            "direction": "inbound",
+            "state": "hangup",
+            "duration": 120000,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": "Ann Harper",
+                        "first_name": "Ann",
+                        "last_name": "Harper",
+                        "company": "Prospect",
+                        "job_title": None,
+                        "status": "resolved",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[stale_call]), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    side_effect=lambda normalized_event, line_display=None: (
+                        hook_calls.append({"normalized_event": normalized_event, "line_display": line_display}) or
+                        (True, "http_200")
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-123",
+                "from_number": "+14322083277",
+                "to_number": "+14155201316",
+                "date_started": event_ts,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        inbound_context = hook_calls[0]["normalized_event"]["inbound_context"]
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(inbound_context["recency"]["state"], "stale")
+        self.assertFalse(inbound_context["contextDraftAllowed"])
+        self.assertFalse(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
+        self.assertEqual(response["auto_reply_status"], "not_eligible")
+        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertIn("Inbound context", telegram_messages[0])
+        self.assertNotIn("SMS approval draft", telegram_messages[0])
+
 
 class VoicemailWebhookHandlerTests(unittest.TestCase):
     def setUp(self):

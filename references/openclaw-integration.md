@@ -132,6 +132,7 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
 - `to`
 - `agentId`
 - `firstContact`
+- `inboundContext`
 - `autoReply`
 
 ### First-Contact Assist Hint
@@ -173,6 +174,41 @@ Interpretation:
 - if `autoReply.replyPolicy.state` is `risky`, the approval path must require a second confirmation.
 - if opt-out language is detected, the event is not forwarded as a normal hook payload; automation must remain human-only.
 
+### Inbound Context Brief
+
+The webhook may include an `inboundContext` object for eligible inbound SMS and missed calls. It is the operator-facing provenance layer for both known and unknown contacts.
+
+```json
+{
+  "identityState": "resolved",
+  "identityConfidence": "high",
+  "knownContact": true,
+  "contactName": "Ann Harper",
+  "senderNumber": "+14322083277",
+  "recipientNumber": "+14155201316",
+  "lineDisplay": "Sales (415) 520-1316",
+  "eventType": "missed_call",
+  "evidence": ["dialpad_contact_name", "exact_phone_match", "dialpad_call_history"],
+  "recency": {
+    "state": "fresh",
+    "source": "dialpad_call_history",
+    "lastActivityAt": 1760000000000,
+    "ageDays": 2.0
+  },
+  "contextDraftAllowed": true,
+  "draftMode": "context_aware"
+}
+```
+
+Interpretation:
+
+- `inboundContext` explains why the webhook trusts or distrusts the identity and draft basis.
+- `identityConfidence: high` requires strong identity evidence such as an exact phone match and no degraded lookup state.
+- `contextDraftAllowed` is true only when identity confidence is high and recent SMS/call continuity is no older than 14 days.
+- `recency.state: stale` or `unknown` means the operator should get context only, not a context-aware draft.
+- Telegram alerts show a compact "Inbound context" block before any approval draft so the operator can reject weak or stale drafts quickly.
+- `inboundContext` does not authorize CRM mutation or SMS send; contact writes remain separate, and SMS still requires the deterministic approval ledger.
+
 ### SMS Example
 
 ```json
@@ -201,6 +237,25 @@ Interpretation:
       "degraded": false,
       "degradedReason": null
     }
+  },
+  "inboundContext": {
+    "identityState": "not_found",
+    "identityConfidence": "low",
+    "knownContact": false,
+    "contactName": null,
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "sms",
+    "evidence": ["no_dialpad_contact_found"],
+    "recency": {
+      "state": "not_applicable",
+      "source": null,
+      "lastActivityAt": null,
+      "ageDays": null
+    },
+    "contextDraftAllowed": false,
+    "draftMode": "deterministic_fallback"
   },
   "autoReply": {
     "eligible": true,
@@ -243,6 +298,25 @@ Interpretation:
       "degraded": false,
       "degradedReason": null
     }
+  },
+  "inboundContext": {
+    "identityState": "not_found",
+    "identityConfidence": "low",
+    "knownContact": false,
+    "contactName": null,
+    "senderNumber": "+14155550123",
+    "recipientNumber": "+14155201316",
+    "lineDisplay": "Sales (415) 520-1316",
+    "eventType": "missed_call",
+    "evidence": ["no_dialpad_contact_found"],
+    "recency": {
+      "state": "not_applicable",
+      "source": null,
+      "lastActivityAt": null,
+      "ageDays": null
+    },
+    "contextDraftAllowed": false,
+    "draftMode": "deterministic_fallback"
   },
   "autoReply": {
     "eligible": true,

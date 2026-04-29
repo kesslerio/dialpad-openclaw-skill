@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 import webhook_server
 from webhook_server import (
+    build_inbound_context,
     build_hook_session_key,
     build_openclaw_hook_payload,
     format_hook_message,
@@ -262,3 +263,93 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
     assert payload["firstContact"]["identityState"] == "resolved"
     assert payload["firstContact"]["keepBrief"] is True
     assert payload["autoReply"]["eligible"] is False
+
+
+def test_hook_payload_includes_inbound_context_for_known_recent_contact():
+    normalized = {
+        "event_type": "missed_call",
+        "sender": "Ann Harper",
+        "sender_number": "+14322083277",
+        "recipient_number": "+14155201316",
+        "line_display": "Sales",
+        "timestamp": 1760000000000,
+        "call_id": "call-123",
+    }
+    first_contact = webhook_server.build_first_contact_context(
+        normalized,
+        sender_enrichment={
+            "contact_name": "Ann Harper",
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+        line_display="Sales",
+    )
+    normalized["first_contact"] = first_contact
+    normalized["inbound_context"] = build_inbound_context(
+        normalized,
+        sender_enrichment={
+            "contact_name": "Ann Harper",
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+        line_display="Sales",
+        recent_context={
+            "source": "dialpad_call_history",
+            "lastActivityAt": 1759913600000,
+        },
+    )
+
+    payload = build_openclaw_hook_payload(normalized, line_display="Sales")
+
+    assert payload["firstContact"]["knownContact"] is True
+    assert payload["inboundContext"]["identityConfidence"] == "high"
+    assert payload["inboundContext"]["contextDraftAllowed"] is True
+    assert "exact_phone_match" in payload["inboundContext"]["evidence"]
+    assert "dialpad_call_history" in payload["inboundContext"]["evidence"]
+
+
+def test_inbound_context_blocks_stale_known_contact_draft():
+    normalized = {
+        "event_type": "sms",
+        "sender": "Ann Harper",
+        "sender_number": "+14322083277",
+        "recipient_number": "+14155201316",
+        "timestamp": 1760000000000,
+    }
+    sender_enrichment = {
+        "contact_name": "Ann Harper",
+        "status": "resolved",
+        "degraded": False,
+        "degraded_reason": None,
+    }
+    normalized["first_contact"] = webhook_server.build_first_contact_context(
+        normalized,
+        sender_enrichment=sender_enrichment,
+        line_display="Sales",
+    )
+
+    context = build_inbound_context(
+        normalized,
+        sender_enrichment=sender_enrichment,
+        line_display="Sales",
+        recent_context={
+            "source": "local_sms_history",
+            "lastActivityAt": 1758617600000,
+        },
+    )
+
+    assert context["knownContact"] is True
+    assert context["identityConfidence"] == "high"
+    assert context["recency"]["state"] == "stale"
+    assert context["contextDraftAllowed"] is False
+
+
+def test_recent_sms_context_does_not_self_match_without_event_identity(monkeypatch):
+    def _fail_if_called():
+        raise AssertionError("history DB should not be opened without event id or timestamp")
+
+    monkeypatch.setattr(webhook_server, "init_sms_history_db", _fail_if_called)
+
+    assert webhook_server.lookup_recent_sms_context("+14322083277") is None

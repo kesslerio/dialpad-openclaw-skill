@@ -56,6 +56,10 @@ sys.path.insert(0, str(skill_dir))
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook
 try:
+    from sms_sqlite import init_db as init_sms_history_db
+except Exception:
+    init_sms_history_db = None
+try:
     from send_sms import send_sms as dialpad_send_sms
 except Exception:
     dialpad_send_sms = None
@@ -217,6 +221,8 @@ def normalize_phone_number(phone_number):
 DIALPAD_AUTO_REPLY_SALES_LINE = normalize_phone_number(
     os.environ.get("DIALPAD_AUTO_REPLY_SALES_LINE", "+14155201316")
 )
+INBOUND_CONTEXT_FRESHNESS_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
+CURRENT_EVENT_EXCLUSION_MS = 60 * 1000
 
 
 def format_phone_number(phone_number):
@@ -1194,6 +1200,227 @@ def _parse_timestamp_ms(value):
     return int(numeric * 1000)
 
 
+def _extract_payload_contact_name(data):
+    """Extract a Dialpad-provided contact display name from webhook payloads."""
+    contact = data.get("contact")
+    if isinstance(contact, dict):
+        for key in ("name", "display_name", "full_name"):
+            value = contact.get(key)
+            if value and str(value).strip() and str(value).strip() != str(data.get("from_number", "")).strip():
+                return str(value).strip()
+
+    for path in (
+        ("customer", "name"),
+        ("caller", "name"),
+        ("from", "name"),
+        ("call", "contact", "name"),
+        ("event", "contact", "name"),
+    ):
+        value = _pick_nested(data, [path])
+        if value and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def apply_payload_contact_fallback(sender_enrichment, data):
+    """Use webhook contact identity when API lookup has no exact contact name."""
+    sender_enrichment = dict(sender_enrichment or {})
+    if sender_enrichment.get("contact_name"):
+        return sender_enrichment
+
+    payload_name = _extract_payload_contact_name(data)
+    if not payload_name:
+        return sender_enrichment
+
+    sender_enrichment["contact_name"] = payload_name
+    sender_enrichment.setdefault("first_name", payload_name.split()[0] if payload_name else None)
+    sender_enrichment.setdefault("last_name", None)
+    sender_enrichment.setdefault("company", None)
+    sender_enrichment.setdefault("job_title", None)
+    if sender_enrichment.get("status") in {None, "not_found", "not_applicable", "disabled"}:
+        sender_enrichment["status"] = "resolved"
+    sender_enrichment["payload_contact_name"] = payload_name
+    sender_enrichment["payload_contact_used"] = True
+    return sender_enrichment
+
+
+def _context_age_days(event_ts_ms, last_activity_ms):
+    if event_ts_ms is None or last_activity_ms is None:
+        return None
+    delta_ms = max(0, event_ts_ms - last_activity_ms)
+    return round(delta_ms / (24 * 60 * 60 * 1000), 1)
+
+
+def lookup_recent_sms_context(customer_number, *, current_dialpad_id=None, current_timestamp_ms=None):
+    """Return the latest prior SMS activity for a customer, if local history exists."""
+    if init_sms_history_db is None or not customer_number:
+        return None
+
+    clauses = ["contact_number = ?"]
+    params = [customer_number]
+    if current_dialpad_id is not None:
+        clauses.append("(dialpad_id IS NULL OR dialpad_id != ?)")
+        params.append(current_dialpad_id)
+    if current_timestamp_ms is not None:
+        clauses.append("(timestamp IS NULL OR timestamp < ?)")
+        params.append(current_timestamp_ms)
+
+    query = (
+        "SELECT direction, timestamp, text FROM messages "
+        f"WHERE {' AND '.join(clauses)} "
+        "ORDER BY timestamp DESC, id DESC LIMIT 1"
+    )
+    try:
+        conn = init_sms_history_db()
+        try:
+            row = conn.execute(query, params).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - context lookup should never break webhooks.
+        print(f"⚠️  Recent SMS context lookup failed ({type(exc).__name__})")
+        return None
+
+    if not row:
+        return None
+
+    return {
+        "source": "local_sms_history",
+        "lastActivityAt": row["timestamp"],
+        "direction": row["direction"],
+        "previewAvailable": bool(row["text"]),
+    }
+
+
+def lookup_recent_call_context(customer_number, line_number=None, event_ts_ms=None, history_fetcher=None):
+    """Return prior Dialpad call continuity inside the freshness window."""
+    normalized_customer = normalize_phone_number(customer_number)
+    if not normalized_customer or event_ts_ms is None:
+        return None
+
+    fetcher = history_fetcher or _fetch_recent_calls_around
+    try:
+        history_rows = fetcher(
+            event_ts_ms,
+            window_ms=INBOUND_CONTEXT_FRESHNESS_WINDOW_MS,
+            limit=100,
+        )
+    except TypeError:
+        history_rows = fetcher(event_ts_ms)
+    normalized_line = normalize_phone_number(line_number)
+    best = None
+    best_ts = None
+    for call in history_rows:
+        row = _extract_call_history_row(call)
+        row_ts = row.get("started_ms")
+        if row_ts is None:
+            continue
+        if abs(event_ts_ms - row_ts) <= CURRENT_EVENT_EXCLUSION_MS:
+            continue
+        if row_ts > event_ts_ms:
+            continue
+
+        row_from = normalize_phone_number(row.get("from_number"))
+        row_to = normalize_phone_number(row.get("to_number"))
+        customer_match = normalized_customer in {row_from, row_to}
+        line_match = not normalized_line or normalized_line in {row_from, row_to}
+        if not customer_match or not line_match:
+            continue
+        if best is None or row_ts > best_ts:
+            best = row
+            best_ts = row_ts
+
+    if not best:
+        return None
+
+    return {
+        "source": "dialpad_call_history",
+        "lastActivityAt": best_ts,
+        "direction": best.get("direction"),
+        "state": best.get("state"),
+    }
+
+
+def build_inbound_context(normalized_event, sender_enrichment=None, line_display=None, recent_context=None):
+    """Build operator-facing identity, provenance, and draft-safety context."""
+    sender_enrichment = sender_enrichment or {}
+    first_contact = normalized_event.get("first_contact") or build_first_contact_context(
+        normalized_event,
+        sender_enrichment=sender_enrichment,
+        line_display=line_display,
+    )
+    event_ts_ms = _parse_timestamp_ms(normalized_event.get("timestamp"))
+    lookup = first_contact.get("lookup") if isinstance(first_contact, dict) else {}
+    known_contact = bool(first_contact and first_contact.get("knownContact"))
+    contact_name = first_contact.get("contactName") if isinstance(first_contact, dict) else None
+    degraded = bool((lookup or {}).get("degraded") or sender_enrichment.get("degraded"))
+    identity_state = first_contact.get("identityState") if isinstance(first_contact, dict) else "degraded"
+
+    evidence = []
+    if contact_name:
+        evidence.append("dialpad_contact_name")
+    if known_contact and not degraded:
+        evidence.append("exact_phone_match")
+    if sender_enrichment.get("payload_contact_used"):
+        evidence.append("webhook_contact_payload")
+    if degraded:
+        evidence.append("lookup_degraded")
+    if not known_contact and identity_state == "not_found":
+        evidence.append("no_dialpad_contact_found")
+
+    recency = {
+        "state": "unknown",
+        "source": None,
+        "lastActivityAt": None,
+        "ageDays": None,
+    }
+    if recent_context and recent_context.get("lastActivityAt") is not None:
+        last_activity_ms = _parse_timestamp_ms(recent_context.get("lastActivityAt"))
+        age_ms = event_ts_ms - last_activity_ms if event_ts_ms is not None and last_activity_ms is not None else None
+        age_days = _context_age_days(event_ts_ms, last_activity_ms)
+        is_fresh = age_ms is not None and 0 <= age_ms <= INBOUND_CONTEXT_FRESHNESS_WINDOW_MS
+        recency = {
+            "state": "fresh" if is_fresh else "stale",
+            "source": recent_context.get("source"),
+            "lastActivityAt": last_activity_ms,
+            "ageDays": age_days,
+        }
+        if recent_context.get("source"):
+            evidence.append(recent_context["source"])
+    elif known_contact:
+        recency["state"] = "unknown"
+    else:
+        recency["state"] = "not_applicable"
+
+    identity_confidence = "low"
+    if known_contact and not degraded:
+        identity_confidence = "high"
+    elif known_contact:
+        identity_confidence = "medium"
+
+    context_draft_allowed = (
+        known_contact
+        and identity_confidence == "high"
+        and recency["state"] == "fresh"
+    )
+
+    return {
+        "identityState": identity_state,
+        "identityConfidence": identity_confidence,
+        "knownContact": known_contact,
+        "contactName": contact_name,
+        "senderNumber": normalized_event.get("sender_number"),
+        "recipientNumber": normalized_event.get("recipient_number"),
+        "lineDisplay": line_display or normalized_event.get("line_display"),
+        "eventType": normalized_event.get("event_type") or "sms",
+        "evidence": sorted(set(evidence)),
+        "recency": recency,
+        "contextDraftAllowed": context_draft_allowed,
+        "draftMode": "context_aware" if context_draft_allowed else (
+            "deterministic_fallback" if first_contact and first_contact.get("needsDraftReply") else "none"
+        ),
+    }
+
+
 def _extract_call_history_row(call):
     from_number = _pick_nested(
         call,
@@ -1514,6 +1741,7 @@ def build_first_contact_context(normalized_event, sender_enrichment=None, line_d
 def build_proactive_reply_message(normalized_event, sender_enrichment=None):
     """Build the sales-line auto-reply message for first-contact inbound events."""
     sender_enrichment = sender_enrichment or {}
+    inbound_context = normalized_event.get("inbound_context") or {}
     contact_name = sender_enrichment.get("first_name") or sender_enrichment.get("contact_name")
     if contact_name:
         greeting_name = str(contact_name).strip().split()[0]
@@ -1521,7 +1749,14 @@ def build_proactive_reply_message(normalized_event, sender_enrichment=None):
         greeting_name = "there"
 
     event_type = normalized_event.get("event_type") or "sms"
-    if event_type == "missed_call":
+    if inbound_context.get("contextDraftAllowed"):
+        if event_type == "missed_call":
+            body = "sorry we missed your call. I saw your recent ShapeScale conversation and can help from here. What would you like to cover?"
+        elif event_type == "voicemail":
+            body = "thanks for the voicemail. I saw your recent ShapeScale conversation and will follow up shortly."
+        else:
+            body = "thanks for reaching out. I saw your recent ShapeScale conversation and will follow up shortly."
+    elif event_type == "missed_call":
         body = "you've reached ShapeScale for Business Sales. Sorry we missed your call. How can we help?"
     elif event_type == "voicemail":
         body = "thanks for the voicemail. We received it and will be in touch shortly."
@@ -1553,9 +1788,20 @@ def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_d
         return False
 
     lookup = first_contact.get("lookup") or {}
-    if first_contact.get("knownContact"):
-        return False
     if lookup.get("degraded"):
+        return False
+
+    inbound_context = normalized_event.get("inbound_context")
+    if inbound_context is None:
+        inbound_context = build_inbound_context(
+            normalized_event,
+            sender_enrichment=sender_enrichment,
+            line_display=line_display,
+        )
+    if inbound_context.get("contextDraftAllowed"):
+        return True
+
+    if first_contact.get("knownContact"):
         return False
     if lookup.get("status") != "not_found":
         return False
@@ -1631,6 +1877,40 @@ def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
             lines.append(
                 f"Second confirmation required: `bin/approve_sms_draft.py {escape_telegram_markdown(draft_id)} --action confirm-risk --actor-id <human-id> --approval-token \"$DIALPAD_SMS_APPROVAL_TOKEN\" --json`"
             )
+    return "\n".join(lines)
+
+
+def build_inbound_context_brief(inbound_context):
+    """Build a compact Telegram context/provenance block."""
+    if not inbound_context:
+        return ""
+
+    contact_name = inbound_context.get("contactName")
+    identity = contact_name or "Unknown / first contact"
+    confidence = inbound_context.get("identityConfidence") or "unknown"
+    evidence = inbound_context.get("evidence") or []
+    recency = inbound_context.get("recency") or {}
+    recency_state = recency.get("state") or "unknown"
+    age_days = recency.get("ageDays")
+    if age_days is not None:
+        recency_text = f"{recency_state} ({age_days} days old)"
+    else:
+        recency_text = recency_state
+
+    draft_allowed = inbound_context.get("contextDraftAllowed")
+    draft_mode = inbound_context.get("draftMode") or "none"
+    draft_text = "context-aware draft allowed" if draft_allowed else f"no context-aware draft ({draft_mode})"
+
+    evidence_text = ", ".join(str(item).replace("_", " ") for item in evidence) or "none"
+    lines = [
+        "",
+        "",
+        "🔎 *Inbound context*",
+        f"*Identity:* {escape_telegram_markdown(identity)} \\({escape_telegram_markdown(confidence)}\\)",
+        f"*Evidence:* {escape_telegram_markdown(evidence_text)}",
+        f"*Recency:* {escape_telegram_markdown(recency_text)}",
+        f"*Draft basis:* {escape_telegram_markdown(draft_text)}",
+    ]
     return "\n".join(lines)
 
 
@@ -1754,6 +2034,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             "message_id": normalized_event.get("message_id") or normalized_event.get("call_id"),
             "line_display": line_display or normalized_event.get("line_display"),
             "first_contact": normalized_event.get("first_contact"),
+            "inbound_context": normalized_event.get("inbound_context"),
         }
     )
     try:
@@ -1780,6 +2061,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                 metadata={
                     "event_type": normalized_event.get("event_type"),
                     "line_display": line_display or normalized_event.get("line_display"),
+                    "draft_mode": (normalized_event.get("inbound_context") or {}).get("draftMode"),
                 },
             )
         finally:
@@ -1898,6 +2180,10 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
         )
     if first_contact is not None:
         payload["firstContact"] = first_contact
+
+    inbound_context = normalized_event.get("inbound_context")
+    if inbound_context is not None:
+        payload["inboundContext"] = inbound_context
 
     auto_reply = normalized_event.get("auto_reply")
     if auto_reply is not None:
@@ -2186,11 +2472,16 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         if direction == "inbound":
             # Resolve contact name before filtering so sender check isn't "Unknown"
             sender_enrichment = lookup_contact_enrichment(from_num)
+            sender_enrichment = apply_payload_contact_fallback(sender_enrichment, data)
             contact_info = sender_enrichment.get("contact_name")
             if not contact_info and result.get("message"):
                 cached = result["message"].get("contact_name", "")
                 if cached and cached != "Unknown":
                     contact_info = cached
+                    sender_enrichment.setdefault("payload_contact_name", cached)
+                    sender_enrichment["payload_contact_used"] = True
+                    if sender_enrichment.get("status") in {None, "not_found", "not_applicable", "disabled"}:
+                        sender_enrichment["status"] = "resolved"
             sender_enrichment["contact_name"] = contact_info
 
             inbound_alert_decision = assess_inbound_sms_alert_eligibility(
@@ -2216,6 +2507,17 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     normalized_sms,
                     sender_enrichment=sender_enrichment,
                     line_display=line_display,
+                )
+                recent_context = lookup_recent_sms_context(
+                    from_num,
+                    current_dialpad_id=normalized_sms.get("message_id"),
+                    current_timestamp_ms=_parse_timestamp_ms(normalized_sms.get("timestamp")),
+                )
+                normalized_sms["inbound_context"] = build_inbound_context(
+                    normalized_sms,
+                    sender_enrichment=sender_enrichment,
+                    line_display=line_display,
+                    recent_context=recent_context,
                 )
                 auto_reply_eligible = should_send_proactive_reply(
                     normalized_sms,
@@ -2291,6 +2593,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"Time: {escape_telegram_markdown(time_display)}\n\n"
                     f"Message: {escape_telegram_markdown(text)}"
                 )
+                tg_text += build_inbound_context_brief(normalized_sms.get("inbound_context"))
                 tg_text += build_approval_review_suffix(
                     auto_reply_draft_id,
                     auto_reply_message,
@@ -2452,6 +2755,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     "degraded_reason": None,
                 }
             )
+            sender_enrichment = apply_payload_contact_fallback(sender_enrichment, data)
             contact_info = sender_enrichment.get("contact_name")
             line_display = resolved["line_display"] or get_line_name(to_num)
             to_display = line_display if line_display else "Unknown"
@@ -2487,6 +2791,17 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 sender_enrichment=sender_enrichment,
                 line_display=line_display,
             )
+            recent_context = lookup_recent_call_context(
+                from_num,
+                line_number=to_num,
+                event_ts_ms=_parse_timestamp_ms(normalized_event.get("timestamp")),
+            )
+            normalized_event["inbound_context"] = build_inbound_context(
+                normalized_event,
+                sender_enrichment=sender_enrichment,
+                line_display=line_display,
+                recent_context=recent_context,
+            )
             auto_reply_eligible = should_send_proactive_reply(
                 normalized_event,
                 sender_enrichment=sender_enrichment,
@@ -2510,6 +2825,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 normalized_event,
                 line_display=line_display,
             )
+            tg_text += build_inbound_context_brief(normalized_event.get("inbound_context"))
             tg_text += build_approval_review_suffix(
                 auto_reply_draft_id,
                 auto_reply_message,

@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
 import webhook_server
+import sms_sqlite
 
 
 @pytest.fixture(autouse=True)
@@ -425,6 +426,96 @@ def test_inbound_sales_sms_creates_approval_draft_on_first_contact(monkeypatch, 
     assert response["auto_reply_draft_id"] in telegram_messages[0].replace("\\_", "_")
     assert "bin/approve_sms_draft.py" in telegram_messages[0]
     assert "--approval-token" in telegram_messages[0]
+
+
+def test_known_recent_sales_sms_creates_context_approval_draft(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": "Ann Harper",
+            "first_name": "Ann",
+            "last_name": "Harper",
+            "company": "Prospect",
+            "job_title": None,
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 1001,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+14322083277"],
+                "text": "Prior ShapeScale follow-up.",
+                "created_date": now_ms - (2 * 24 * 60 * 60 * 1000),
+                "contact": {"name": "Ann Harper"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    hook_calls = []
+    telegram_messages = []
+    sms_calls = []
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: (
+            hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display}) or
+            (True, "http_200")
+        ),
+    )
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_messages.append(text) or True)
+    monkeypatch.setattr(
+        webhook_server,
+        "dialpad_send_sms",
+        lambda *args, **kwargs: sms_calls.append((args, kwargs)) or {"id": "msg-1", "message_status": "pending"},
+    )
+
+    payload = {
+        "id": 1002,
+        "direction": "inbound",
+        "from_number": "+14322083277",
+        "to_number": ["+14155201316"],
+        "text": "Can you call me?",
+        "created_date": now_ms,
+        "contact": {"name": "Ann Harper"},
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    inbound_context = hook_calls[0]["normalized_sms"]["inbound_context"]
+    assert status["code"] == 200
+    assert sms_calls == []
+    assert inbound_context["knownContact"] is True
+    assert inbound_context["identityConfidence"] == "high"
+    assert inbound_context["recency"]["state"] == "fresh"
+    assert inbound_context["contextDraftAllowed"] is True
+    assert "local_sms_history" in inbound_context["evidence"]
+    assert hook_calls[0]["normalized_sms"]["auto_reply"]["draftCreated"] is True
+    assert response["auto_reply_status"] == "draft_created"
+    assert response["auto_reply_draft_id"]
+    assert "Inbound context" in telegram_messages[0]
+    assert "Ann Harper" in telegram_messages[0]
+    assert "SMS approval draft" in telegram_messages[0]
 
 
 def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(monkeypatch, tmp_path):

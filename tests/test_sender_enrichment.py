@@ -150,9 +150,11 @@ def test_lookup_contact_enrichment_401_degraded_and_cached_fallback(monkeypatch)
     assert response["sender_enrichment_degraded"] is True
     assert response["sender_enrichment_degraded_reason"] == "expired_token"
     assert hook_calls[0]["normalized_sms"]["sender"] == "Cached Person"
-    assert hook_calls[0]["normalized_sms"]["first_contact"]["knownContact"] is True
-    assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is True
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["knownContact"] is False
+    assert hook_calls[0]["normalized_sms"]["first_contact"]["keepBrief"] is False
     assert hook_calls[0]["normalized_sms"]["first_contact"]["identityState"] == "degraded"
+    assert hook_calls[0]["normalized_sms"]["inbound_context"]["identityConfidence"] == "low"
+    assert hook_calls[0]["normalized_sms"]["inbound_context"]["contextDraftAllowed"] is False
 
 
 def test_inbound_telegram_uses_enriched_sender(monkeypatch):

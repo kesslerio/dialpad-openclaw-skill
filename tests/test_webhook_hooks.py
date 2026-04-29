@@ -346,6 +346,46 @@ def test_inbound_context_blocks_stale_known_contact_draft():
     assert context["contextDraftAllowed"] is False
 
 
+def test_payload_contact_name_is_not_resolved_identity():
+    sender_enrichment = webhook_server.apply_payload_contact_fallback(
+        {
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+        {"contact": {"name": "Payload Person"}},
+    )
+    normalized = {
+        "event_type": "missed_call",
+        "sender_number": "+14322083277",
+        "recipient_number": "+14155201316",
+        "timestamp": 1760000000000,
+    }
+    normalized["first_contact"] = webhook_server.build_first_contact_context(
+        normalized,
+        sender_enrichment=sender_enrichment,
+        line_display="Sales",
+    )
+    context = build_inbound_context(
+        normalized,
+        sender_enrichment=sender_enrichment,
+        line_display="Sales",
+        recent_context={
+            "source": "dialpad_call_history",
+            "lastActivityAt": 1759913600000,
+        },
+    )
+
+    assert sender_enrichment["status"] == "payload_contact"
+    assert normalized["first_contact"]["identityState"] == "payload_contact"
+    assert normalized["first_contact"]["knownContact"] is False
+    assert context["identityConfidence"] == "low"
+    assert context["contextDraftAllowed"] is False
+    assert "exact_phone_match" not in context["evidence"]
+    assert "webhook_contact_payload" in context["evidence"]
+
+
 def test_recent_sms_context_does_not_self_match_without_event_identity(monkeypatch):
     def _fail_if_called():
         raise AssertionError("history DB should not be opened without event id or timestamp")

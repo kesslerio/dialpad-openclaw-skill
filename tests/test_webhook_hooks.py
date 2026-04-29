@@ -344,3 +344,12 @@ def test_inbound_context_blocks_stale_known_contact_draft():
     assert context["identityConfidence"] == "high"
     assert context["recency"]["state"] == "stale"
     assert context["contextDraftAllowed"] is False
+
+
+def test_recent_sms_context_does_not_self_match_without_event_identity(monkeypatch):
+    def _fail_if_called():
+        raise AssertionError("history DB should not be opened without event id or timestamp")
+
+    monkeypatch.setattr(webhook_server, "init_sms_history_db", _fail_if_called)
+
+    assert webhook_server.lookup_recent_sms_context("+14322083277") is None

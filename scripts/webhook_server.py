@@ -1255,6 +1255,8 @@ def lookup_recent_sms_context(customer_number, *, current_dialpad_id=None, curre
     """Return the latest prior SMS activity for a customer, if local history exists."""
     if init_sms_history_db is None or not customer_number:
         return None
+    if current_dialpad_id is None and current_timestamp_ms is None:
+        return None
 
     clauses = ["contact_number = ?"]
     params = [customer_number]

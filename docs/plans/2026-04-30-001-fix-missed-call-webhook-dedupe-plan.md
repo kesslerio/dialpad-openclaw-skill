@@ -1,7 +1,7 @@
 ---
 title: Fix Missed-Call Webhook Duplicate Notifications
 created: 2026-04-30
-status: active
+status: completed
 origin: user-reported duplicate missed-call Telegram alerts on 2026-04-30
 ---
 

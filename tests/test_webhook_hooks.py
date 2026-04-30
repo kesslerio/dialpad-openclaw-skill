@@ -13,7 +13,9 @@ import webhook_server
 from webhook_server import (
     build_inbound_context,
     build_hook_session_key,
+    build_missed_call_dedupe_key,
     build_openclaw_hook_payload,
+    claim_missed_call_notification,
     format_hook_message,
     normalize_call_hook_payload,
     normalize_sms_payload,
@@ -184,6 +186,72 @@ def test_build_hook_session_key_for_missed_call_fallback_order():
     ) == "hook:dialpad:call:4155550123:1760000000000"
     assert build_hook_session_key({"event_type": "missed_call", "timestamp": 1760000000000}) == "hook:dialpad:call:1760000000000"
     assert build_hook_session_key({"event_type": "missed_call"}) == "hook:dialpad:call:unknown"
+
+
+def test_build_missed_call_dedupe_key_prefers_entry_point_call_id():
+    payload = {
+        "call_id": "child-call",
+        "entry_point_call_id": "root-call",
+        "from_number": "+14155550123",
+        "to_number": "+14155201316",
+        "date_started": 1760000000000,
+    }
+    resolved = {
+        "from_number": "+14155550123",
+        "to_number": "+14155201316",
+        "event_ts_ms": 1760000000000,
+    }
+
+    assert build_missed_call_dedupe_key(payload, resolved) == "missed-call:root:root-call"
+
+
+def test_build_missed_call_dedupe_key_falls_back_to_call_id():
+    payload = {
+        "call_id": "call-1",
+        "from_number": "+14155550123",
+        "to_number": "+14155201316",
+        "date_started": 1760000000000,
+    }
+    resolved = {
+        "from_number": "+14155550123",
+        "to_number": "+14155201316",
+        "event_ts_ms": 1760000000000,
+    }
+
+    assert build_missed_call_dedupe_key(payload, resolved) == "missed-call:root:call-1"
+
+
+def test_build_missed_call_dedupe_key_uses_stable_fingerprint_without_ids():
+    resolved = {
+        "from_number": "+1 (415) 555-0123",
+        "to_number": "+1 (415) 520-1316",
+        "event_ts_ms": 1760000000999,
+    }
+    equivalent = {
+        "from_number": "+14155550123",
+        "to_number": "+14155201316",
+        "event_ts_ms": 1760000001999,
+    }
+    later = {
+        "from_number": "+14155550123",
+        "to_number": "+14155201316",
+        "event_ts_ms": 1760000060000,
+    }
+
+    assert build_missed_call_dedupe_key({}, resolved) == build_missed_call_dedupe_key({}, equivalent)
+    assert build_missed_call_dedupe_key({}, resolved) != build_missed_call_dedupe_key({}, later)
+
+
+def test_claim_missed_call_notification_marks_duplicate(tmp_path):
+    db_path = tmp_path / "approvals.db"
+
+    first = claim_missed_call_notification("missed-call:root:root-call", db_path=db_path)
+    second = claim_missed_call_notification("missed-call:root:root-call", db_path=db_path)
+
+    assert first["claimed"] is True
+    assert first["duplicate"] is False
+    assert second["claimed"] is False
+    assert second["duplicate"] is True
 
 
 def test_normalize_call_payload_and_format_hook_message():

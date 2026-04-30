@@ -705,6 +705,17 @@ class CallWebhookHandlerTests(unittest.TestCase):
         def fromtimestamp(cls, _value):
             return CallWebhookHandlerTests._FakeMoment("9:42 AM")
 
+    def setUp(self):
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_dir.cleanup)
+        self._approval_db_patch = patch.object(
+            webhook_server.sms_approval,
+            "DB_PATH",
+            Path(self._temp_dir.name) / "approvals.db",
+        )
+        self._approval_db_patch.start()
+        self.addCleanup(self._approval_db_patch.stop)
+
     def test_call_webhook_requires_auth_when_secret_configured(self):
         with patch.object(webhook_server, "WEBHOOK_SECRET", "secret-123"):
             payload = {
@@ -743,6 +754,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                         "degraded_reason": None,
                     },
                 ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[]), \
                 patch.object(
                     webhook_server,
                     "send_to_openclaw_hooks",
@@ -800,6 +812,175 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertFalse(response["auto_reply_sent"])
         self.assertEqual(response["auto_reply_status"], "draft_created")
         self.assertTrue(response["auto_reply_draft_id"])
+
+    def test_missed_call_child_duplicate_skips_side_effects(self):
+        hook_calls = []
+        telegram_messages = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", False), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": None,
+                        "first_name": None,
+                        "last_name": None,
+                        "company": None,
+                        "job_title": None,
+                        "status": "not_found",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    side_effect=lambda normalized_event, line_display=None: (
+                        hook_calls.append({"normalized_event": normalized_event, "line_display": line_display}) or
+                        (False, "disabled_by_config")
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
+                ):
+            parent = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "root-call",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000000000,
+            }
+            child = {
+                **parent,
+                "call_id": "child-call",
+                "entry_point_call_id": "root-call",
+                "date_started": 1760000002500,
+                "target": {"name": "Martin Kessler", "phone": "+14153602954"},
+                "entry_point_target": {"name": "Sales", "phone": "+14155201316"},
+            }
+
+            first_handler, first_status = _build_handler(parent)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(first_handler)
+            second_handler, second_status = _build_handler(child)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(second_handler)
+
+        first_response = json.loads(first_handler.wfile.getvalue().decode("utf-8"))
+        second_response = json.loads(second_handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(first_status["code"], 200)
+        self.assertEqual(second_status["code"], 200)
+        self.assertFalse(first_response["duplicate"])
+        self.assertTrue(second_response["duplicate"])
+        self.assertEqual(len(hook_calls), 1)
+        self.assertEqual(len(telegram_messages), 1)
+        self.assertFalse(second_response["telegram_sent"])
+        self.assertIsNone(second_response["auto_reply_draft_id"])
+
+    def test_missed_call_two_child_events_share_entry_point_dedupe(self):
+        hook_calls = []
+        telegram_messages = []
+
+        with patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", False), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": None,
+                        "status": "not_found",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[]), \
+                patch.object(
+                    webhook_server,
+                    "send_to_openclaw_hooks",
+                    side_effect=lambda normalized_event, line_display=None: (
+                        hook_calls.append({"normalized_event": normalized_event, "line_display": line_display}) or
+                        (False, "disabled_by_config")
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
+                ):
+            first_child = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "child-1",
+                "entry_point_call_id": "root-call",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000002500,
+            }
+            second_child = {
+                **first_child,
+                "call_id": "child-2",
+                "date_started": 1760000003500,
+            }
+
+            first_handler, first_status = _build_handler(first_child)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(first_handler)
+            second_handler, second_status = _build_handler(second_child)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(second_handler)
+
+        first_response = json.loads(first_handler.wfile.getvalue().decode("utf-8"))
+        second_response = json.loads(second_handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(first_status["code"], 200)
+        self.assertEqual(second_status["code"], 200)
+        self.assertFalse(first_response["duplicate"])
+        self.assertTrue(second_response["duplicate"])
+        self.assertEqual(len(hook_calls), 1)
+        self.assertEqual(len(telegram_messages), 1)
+
+    def test_missed_call_child_only_first_event_still_notifies(self):
+        telegram_messages = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", False), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": None,
+                        "status": "not_found",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[]), \
+                patch.object(webhook_server, "send_to_openclaw_hooks", return_value=(False, "disabled_by_config")), \
+                patch.object(
+                    webhook_server,
+                    "send_to_telegram",
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "child-call",
+                "entry_point_call_id": "root-call",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1760000002500,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertFalse(response["duplicate"])
+        self.assertTrue(response["telegram_sent"])
+        self.assertEqual(len(telegram_messages), 1)
 
     def test_inbound_missed_call_respects_disabled_hook_config(self):
         telegram_messages = []

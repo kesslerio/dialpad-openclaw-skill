@@ -1218,6 +1218,8 @@ def _clean_identifier(value):
 
 def build_missed_call_dedupe_key(data, resolved_context):
     """Build a stable idempotency key for Dialpad missed-call parent/child events."""
+    data = data or {}
+    resolved_context = resolved_context or {}
     root_call_id = _clean_identifier(data.get("entry_point_call_id"))
     if root_call_id:
         return f"missed-call:root:{root_call_id}"
@@ -1226,9 +1228,9 @@ def build_missed_call_dedupe_key(data, resolved_context):
     if call_id:
         return f"missed-call:root:{call_id}"
 
-    sender_number = normalize_phone_number((resolved_context or {}).get("from_number"))
-    recipient_number = normalize_phone_number((resolved_context or {}).get("to_number"))
-    event_ts_ms = _parse_timestamp_ms((resolved_context or {}).get("event_ts_ms"))
+    sender_number = normalize_phone_number(resolved_context.get("from_number"))
+    recipient_number = normalize_phone_number(resolved_context.get("to_number"))
+    event_ts_ms = _parse_timestamp_ms(resolved_context.get("event_ts_ms"))
     if event_ts_ms is None:
         event_ts_ms = _parse_timestamp_ms(
             _pick_nested(
@@ -1278,7 +1280,7 @@ def claim_missed_call_notification(dedupe_key, *, db_path=None, now_ms=None):
     if not key:
         return {"claimed": True, "duplicate": False, "key": None, "status": "key_missing"}
 
-    timestamp_ms = now_ms or _now_ms()
+    timestamp_ms = _now_ms() if now_ms is None else now_ms
     try:
         conn = _init_missed_call_dedupe_db(db_path=db_path)
         try:

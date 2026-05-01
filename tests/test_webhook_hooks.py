@@ -450,8 +450,8 @@ def test_payload_contact_name_is_not_resolved_identity():
     assert normalized["first_contact"]["knownContact"] is False
     assert context["identityConfidence"] == "low"
     assert context["contextDraftAllowed"] is False
-    assert context["genericDraftAllowed"] is False
-    assert context["draftMode"] == "none"
+    assert context["genericDraftAllowed"] is True
+    assert context["draftMode"] == "deterministic_fallback"
     assert "exact_phone_match" not in context["evidence"]
     assert "webhook_contact_payload" in context["evidence"]
 

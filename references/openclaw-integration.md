@@ -206,7 +206,7 @@ Interpretation:
 - `inboundContext` explains why the webhook trusts or distrusts the identity and draft basis.
 - `identityConfidence: high` requires strong identity evidence such as an exact phone match and no degraded lookup state.
 - `contextDraftAllowed` is true only when identity confidence is high and recent SMS/call continuity is no older than 14 days.
-- `genericDraftAllowed` can be true for low-confidence eligible Sales SMS; it means the webhook may create a generic approval draft, not that the identity is verified.
+- `genericDraftAllowed` can be true for low-confidence eligible Sales SMS or missed calls; it means the webhook may create a generic approval draft, not that the identity is verified.
 - `recency.state: stale` or `unknown` means the operator should get context only, not a context-aware draft.
 - Telegram alerts show a compact "Inbound context" block before any approval draft so the operator can reject weak or stale drafts quickly.
 - `inboundContext` does not authorize CRM mutation or SMS send; contact writes remain separate, and SMS still requires the deterministic approval ledger.

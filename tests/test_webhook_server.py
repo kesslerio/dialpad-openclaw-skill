@@ -1334,7 +1334,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertIn("Inbound context", telegram_messages[0])
         self.assertNotIn("SMS approval draft", telegram_messages[0])
 
-    def test_payload_only_contact_name_does_not_create_context_draft(self):
+    def test_payload_only_missed_call_creates_generic_approval_draft(self):
         hook_calls = []
         telegram_messages = []
         event_ts = 1760000000000
@@ -1403,14 +1403,17 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(inbound_context["contactName"], "Payload Person")
         self.assertEqual(inbound_context["identityConfidence"], "low")
         self.assertFalse(inbound_context["contextDraftAllowed"])
-        self.assertFalse(inbound_context["genericDraftAllowed"])
-        self.assertEqual(inbound_context["draftMode"], "none")
+        self.assertTrue(inbound_context["genericDraftAllowed"])
+        self.assertEqual(inbound_context["draftMode"], "deterministic_fallback")
         self.assertNotIn("exact_phone_match", inbound_context["evidence"])
-        self.assertEqual(response["auto_reply_status"], "not_eligible")
-        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertEqual(response["auto_reply_status"], "draft_created")
+        self.assertTrue(response["auto_reply_draft_id"])
+        self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
+        self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["message"].startswith("Hi there,"))
+        self.assertNotIn("Payload Person", hook_calls[0]["normalized_event"]["auto_reply"]["message"])
         self.assertIn("Inbound context", telegram_messages[0])
-        self.assertIn("no approval draft", telegram_messages[0])
-        self.assertNotIn("SMS approval draft", telegram_messages[0])
+        self.assertIn("approval draft created (generic fallback)", telegram_messages[0])
+        self.assertIn("SMS approval draft", telegram_messages[0])
 
 
 class VoicemailWebhookHandlerTests(unittest.TestCase):

@@ -1474,7 +1474,7 @@ def _generic_fallback_draft_allowed(normalized_event, first_contact):
     if lookup_status == "not_found":
         return True
 
-    return (normalized_event.get("event_type") or "sms") == "sms"
+    return (normalized_event.get("event_type") or "sms") in {"sms", "missed_call"}
 
 
 def build_inbound_context(normalized_event, sender_enrichment=None, line_display=None, recent_context=None):

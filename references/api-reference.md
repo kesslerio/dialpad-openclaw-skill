@@ -190,7 +190,7 @@ Behavior notes:
 - Inbound missed-call forwarding requires `OPENCLAW_HOOKS_TOKEN` and `OPENCLAW_HOOKS_CALL_ENABLED=1`
 - Leave `OPENCLAW_HOOKS_SMS_ENABLED=0` and `OPENCLAW_HOOKS_CALL_ENABLED=0` for notification-only mode
 - First-contact sales-line replies create approval drafts when `DIALPAD_AUTO_REPLY_ENABLED` is truthy; they do not send SMS directly
-- Low-confidence Sales SMS, including payload-only contact names, may create generic approval drafts. Low confidence suppresses personalization and CRM claims; it does not suppress the approval-gated draft by itself.
+- Low-confidence Sales SMS and missed calls, including payload-only contact names, may create generic approval drafts. Low confidence suppresses personalization and CRM claims; it does not suppress the approval-gated draft by itself.
 - Known contacts may create context-aware approval drafts only when `inboundContext.identityConfidence` is high and recent SMS/call continuity is no older than 14 days
 - Voicemail notifications remain Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
 - The local OpenClaw gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace

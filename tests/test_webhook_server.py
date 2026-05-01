@@ -1403,10 +1403,13 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(inbound_context["contactName"], "Payload Person")
         self.assertEqual(inbound_context["identityConfidence"], "low")
         self.assertFalse(inbound_context["contextDraftAllowed"])
+        self.assertFalse(inbound_context["genericDraftAllowed"])
+        self.assertEqual(inbound_context["draftMode"], "none")
         self.assertNotIn("exact_phone_match", inbound_context["evidence"])
         self.assertEqual(response["auto_reply_status"], "not_eligible")
         self.assertIsNone(response["auto_reply_draft_id"])
         self.assertIn("Inbound context", telegram_messages[0])
+        self.assertIn("no approval draft", telegram_messages[0])
         self.assertNotIn("SMS approval draft", telegram_messages[0])
 
 

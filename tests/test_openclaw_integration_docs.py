@@ -26,6 +26,8 @@ def test_openclaw_docs_require_current_turn_verification():
     assert "inboundcontext" in api_reference
     assert "inboundcontext" in integration
     assert "contextdraftallowed" in integration
+    assert "genericdraftallowed" in api_reference
+    assert "genericdraftallowed" in integration
     assert "14 days" in readme
     assert "14 days" in api_reference
     assert "14 days" in integration
@@ -43,6 +45,10 @@ def test_openclaw_docs_require_sms_approval_drafts_not_autonomous_send():
     assert "approval draft" in readme
     assert "approval drafts" in api_reference
     assert "approval drafts" in integration
+    assert "low-confidence sales sms" in readme
+    assert "low-confidence sales sms" in skill
+    assert "low-confidence sales sms" in api_reference
+    assert "generic approval draft" in integration
     assert "inbound hooks may create sms approval drafts" in skill
     assert "must not send customer sms directly" in skill
     assert "intentionally unsupported" in integration

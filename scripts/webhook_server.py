@@ -1458,6 +1458,25 @@ def lookup_recent_call_context(customer_number, line_number=None, event_ts_ms=No
     }
 
 
+def _generic_fallback_draft_allowed(normalized_event, first_contact):
+    if not first_contact or first_contact.get("knownContact"):
+        return False
+    if not first_contact.get("needsDraftReply"):
+        return False
+
+    lookup = first_contact.get("lookup") or {}
+    if lookup.get("degraded"):
+        return False
+
+    lookup_status = str(lookup.get("status") or "")
+    if lookup_status in {"disabled", "not_applicable", "resolved"}:
+        return False
+    if lookup_status == "not_found":
+        return True
+
+    return (normalized_event.get("event_type") or "sms") in {"sms", "missed_call"}
+
+
 def build_inbound_context(normalized_event, sender_enrichment=None, line_display=None, recent_context=None):
     """Build operator-facing identity, provenance, and draft-safety context."""
     sender_enrichment = sender_enrichment or {}
@@ -1519,6 +1538,7 @@ def build_inbound_context(normalized_event, sender_enrichment=None, line_display
         and identity_confidence == "high"
         and recency["state"] == "fresh"
     )
+    generic_draft_allowed = _generic_fallback_draft_allowed(normalized_event, first_contact)
 
     return {
         "identityState": identity_state,
@@ -1532,8 +1552,9 @@ def build_inbound_context(normalized_event, sender_enrichment=None, line_display
         "evidence": sorted(set(evidence)),
         "recency": recency,
         "contextDraftAllowed": context_draft_allowed,
+        "genericDraftAllowed": generic_draft_allowed,
         "draftMode": "context_aware" if context_draft_allowed else (
-            "deterministic_fallback" if first_contact and first_contact.get("needsDraftReply") else "none"
+            "deterministic_fallback" if generic_draft_allowed else "none"
         ),
     }
 
@@ -1867,7 +1888,9 @@ def build_proactive_reply_message(normalized_event, sender_enrichment=None):
     """Build the sales-line auto-reply message for first-contact inbound events."""
     sender_enrichment = sender_enrichment or {}
     inbound_context = normalized_event.get("inbound_context") or {}
-    contact_name = sender_enrichment.get("first_name") or sender_enrichment.get("contact_name")
+    contact_name = None
+    if inbound_context.get("identityConfidence") != "low":
+        contact_name = sender_enrichment.get("first_name") or sender_enrichment.get("contact_name")
     if contact_name:
         greeting_name = str(contact_name).strip().split()[0]
     else:
@@ -1926,11 +1949,7 @@ def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_d
     if inbound_context.get("contextDraftAllowed"):
         return True
 
-    if first_contact.get("knownContact"):
-        return False
-    if lookup.get("status") != "not_found":
-        return False
-    return True
+    return _generic_fallback_draft_allowed(normalized_event, first_contact)
 
 
 def summarize_message_status(result):
@@ -2005,7 +2024,7 @@ def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
     return "\n".join(lines)
 
 
-def build_inbound_context_brief(inbound_context):
+def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_reply_draft_created=False):
     """Build a compact Telegram context/provenance block."""
     if not inbound_context:
         return ""
@@ -2023,8 +2042,19 @@ def build_inbound_context_brief(inbound_context):
         recency_text = recency_state
 
     draft_allowed = inbound_context.get("contextDraftAllowed")
+    generic_draft_allowed = inbound_context.get("genericDraftAllowed")
     draft_mode = inbound_context.get("draftMode") or "none"
-    draft_text = "context-aware draft allowed" if draft_allowed else f"no context-aware draft ({draft_mode})"
+    if auto_reply_draft_created:
+        mode_text = "context-aware" if draft_mode == "context_aware" else "generic fallback"
+        draft_text = f"approval draft created ({mode_text})"
+    elif auto_reply_status and auto_reply_status not in {"draft_created", "approval_required"}:
+        draft_text = f"no approval draft ({auto_reply_status})"
+    elif draft_allowed:
+        draft_text = "context-aware approval draft eligible"
+    elif generic_draft_allowed:
+        draft_text = "generic approval draft eligible"
+    else:
+        draft_text = "no approval draft"
 
     evidence_text = ", ".join(str(item).replace("_", " ") for item in evidence) or "none"
     lines = [
@@ -2718,7 +2748,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"Time: {escape_telegram_markdown(time_display)}\n\n"
                     f"Message: {escape_telegram_markdown(text)}"
                 )
-                tg_text += build_inbound_context_brief(normalized_sms.get("inbound_context"))
+                tg_text += build_inbound_context_brief(
+                    normalized_sms.get("inbound_context"),
+                    auto_reply_status=auto_reply_status,
+                    auto_reply_draft_created=auto_reply_draft_created,
+                )
                 tg_text += build_approval_review_suffix(
                     auto_reply_draft_id,
                     auto_reply_message,
@@ -2988,7 +3022,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 normalized_event,
                 line_display=line_display,
             )
-            tg_text += build_inbound_context_brief(normalized_event.get("inbound_context"))
+            tg_text += build_inbound_context_brief(
+                normalized_event.get("inbound_context"),
+                auto_reply_status=auto_reply_status,
+                auto_reply_draft_created=auto_reply_draft_created,
+            )
             tg_text += build_approval_review_suffix(
                 auto_reply_draft_id,
                 auto_reply_message,

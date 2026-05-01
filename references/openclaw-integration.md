@@ -74,7 +74,7 @@ export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 Behavior:
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS forwarding still requires `OPENCLAW_HOOKS_SMS_ENABLED=1`
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding still requires `OPENCLAW_HOOKS_CALL_ENABLED=1`
-- when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, first-contact messages on the sales line `(415) 520-1316` create exact-text approval drafts instead of sending SMS directly
+- when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, eligible first-contact messages on the sales line `(415) 520-1316` create exact-text approval drafts instead of sending SMS directly, even when identity is low-confidence and the draft must stay generic
 - voicemail remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
 - explicit opt-out language creates no draft, invalidates pending drafts for that customer, and emits only a human-only Telegram notice
 - CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied by the operator approval surface
@@ -196,6 +196,7 @@ The webhook may include an `inboundContext` object for eligible inbound SMS and 
     "ageDays": 2.0
   },
   "contextDraftAllowed": true,
+  "genericDraftAllowed": false,
   "draftMode": "context_aware"
 }
 ```
@@ -205,6 +206,7 @@ Interpretation:
 - `inboundContext` explains why the webhook trusts or distrusts the identity and draft basis.
 - `identityConfidence: high` requires strong identity evidence such as an exact phone match and no degraded lookup state.
 - `contextDraftAllowed` is true only when identity confidence is high and recent SMS/call continuity is no older than 14 days.
+- `genericDraftAllowed` can be true for low-confidence eligible Sales SMS or missed calls; it means the webhook may create a generic approval draft, not that the identity is verified.
 - `recency.state: stale` or `unknown` means the operator should get context only, not a context-aware draft.
 - Telegram alerts show a compact "Inbound context" block before any approval draft so the operator can reject weak or stale drafts quickly.
 - `inboundContext` does not authorize CRM mutation or SMS send; contact writes remain separate, and SMS still requires the deterministic approval ledger.
@@ -255,6 +257,7 @@ Interpretation:
       "ageDays": null
     },
     "contextDraftAllowed": false,
+    "genericDraftAllowed": true,
     "draftMode": "deterministic_fallback"
   },
   "autoReply": {
@@ -316,6 +319,7 @@ Interpretation:
       "ageDays": null
     },
     "contextDraftAllowed": false,
+    "genericDraftAllowed": true,
     "draftMode": "deterministic_fallback"
   },
   "autoReply": {

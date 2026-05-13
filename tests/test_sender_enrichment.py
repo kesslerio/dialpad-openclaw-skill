@@ -555,6 +555,19 @@ def test_recent_thread_link_issue_creates_rich_approval_draft(monkeypatch, tmp_p
             },
             is_new=False,
         )
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 2003,
+                "direction": "inbound",
+                "from_number": "+15109125052",
+                "to_number": ["+14155201316"],
+                "text": "I tried https://customer.example.test/wrong",
+                "created_date": now_ms - 2 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
     finally:
         conn.close()
 
@@ -605,6 +618,7 @@ def test_recent_thread_link_issue_creates_rich_approval_draft(monkeypatch, tmp_p
     assert normalized_sms["auto_reply"]["draftCreated"] is True
     assert normalized_sms["auto_reply"]["richReply"]["basis"] == "recent_thread_link"
     assert "bysha.pe/book-demo" in normalized_sms["auto_reply"]["message"]
+    assert "customer.example.test" not in normalized_sms["auto_reply"]["message"]
     assert response["auto_reply_status"] == "draft_created"
     assert response["auto_reply_draft_id"]
     assert "SMS approval draft" in telegram_messages[0]

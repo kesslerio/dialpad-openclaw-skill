@@ -2133,6 +2133,8 @@ def customer_safe_knowledge_text(output):
 
 def _first_recent_link(recent_thread):
     for item in recent_thread or []:
+        if str(item.get("direction") or "").lower() != "outbound":
+            continue
         match = re.search(r"https?://\S+|(?:bysha\.pe|shape\.scale|shapescale\.com)/\S*", str(item.get("text") or ""))
         if match:
             link = match.group(0).rstrip(".,;)")

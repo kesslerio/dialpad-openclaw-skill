@@ -142,6 +142,58 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(parsed["error"]["code"], "invalid_argument")
         self.assertIn("stripped currency", parsed["error"]["message"])
 
+    def test_send_sms_blocks_suspicious_multidigit_stripped_currency(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.run_generated_json") as run_generated_json, \
+                patch("send_sms.require_api_key"):
+            code, out, err = self._run(
+                send_sms,
+                [
+                    "bin/send_sms.py",
+                    "--to",
+                    "+14155550111",
+                    "--message",
+                    "Your lease buyout: 0,035 after discount.",
+                    "--from",
+                    "+14155201316",
+                    "--json",
+                ],
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        run_generated_json.assert_not_called()
+        parsed = self._parse(out)
+        self._assert_error(parsed, "send_sms.send")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
+    def test_send_sms_blocks_suspicious_large_stripped_currency(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.run_generated_json") as run_generated_json, \
+                patch("send_sms.require_api_key"):
+            code, out, err = self._run(
+                send_sms,
+                [
+                    "bin/send_sms.py",
+                    "--to",
+                    "+14155550111",
+                    "--message",
+                    "Your lease buyout: 20,035 after discount.",
+                    "--from",
+                    "+14155201316",
+                    "--json",
+                ],
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        run_generated_json.assert_not_called()
+        parsed = self._parse(out)
+        self._assert_error(parsed, "send_sms.send")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
     def test_send_sms_allows_valid_currency(self):
         with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
@@ -155,6 +207,78 @@ class JsonContractTests(unittest.TestCase):
                     "+14155550111",
                     "--message",
                     "Your lease buyout: $7,035. Financing: ~$145-156/month. That's about $50 LESS than your current $199/month lease.",
+                    "--from",
+                    "+14155201316",
+                    "--json",
+                ],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        run_generated_json.assert_called_once()
+        self._assert_success(self._parse(out), "send_sms.send")
+
+    def test_send_sms_allows_usd_prefixed_currency(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.run_generated_json", return_value={"id": "msg-usd", "message_status": "pending"}) as run_generated_json, \
+                patch("send_sms.require_api_key"):
+            code, out, err = self._run(
+                send_sms,
+                [
+                    "bin/send_sms.py",
+                    "--to",
+                    "+14155550111",
+                    "--message",
+                    "Quote is USD 20,035 after discount.",
+                    "--from",
+                    "+14155201316",
+                    "--json",
+                ],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        run_generated_json.assert_called_once()
+        self._assert_success(self._parse(out), "send_sms.send")
+
+    def test_send_sms_allows_non_currency_thousands(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.run_generated_json", return_value={"id": "msg-5", "message_status": "pending"}) as run_generated_json, \
+                patch("send_sms.require_api_key"):
+            code, out, err = self._run(
+                send_sms,
+                [
+                    "bin/send_sms.py",
+                    "--to",
+                    "+14155550111",
+                    "--message",
+                    "We had 1,000 attendees and 2,500 check-ins this month.",
+                    "--from",
+                    "+14155201316",
+                    "--json",
+                ],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        run_generated_json.assert_called_once()
+        self._assert_success(self._parse(out), "send_sms.send")
+
+    def test_send_sms_allows_non_currency_lease_and_monthly_thousands(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.run_generated_json", return_value={"id": "msg-6", "message_status": "pending"}) as run_generated_json, \
+                patch("send_sms.require_api_key"):
+            code, out, err = self._run(
+                send_sms,
+                [
+                    "bin/send_sms.py",
+                    "--to",
+                    "+14155550111",
+                    "--message",
+                    "Your lease includes 10,000 annual miles and monthly allowance is 1,000 minutes.",
                     "--from",
                     "+14155201316",
                     "--json",

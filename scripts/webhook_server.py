@@ -1477,6 +1477,16 @@ def _generic_fallback_draft_allowed(normalized_event, first_contact):
     return (normalized_event.get("event_type") or "sms") in {"sms", "missed_call"}
 
 
+def _has_fresh_prior_sms_context(inbound_context):
+    """True when the inbound SMS is part of an active prior SMS thread."""
+    if not isinstance(inbound_context, dict):
+        return False
+    if (inbound_context.get("eventType") or "sms") != "sms":
+        return False
+    recency = inbound_context.get("recency") or {}
+    return recency.get("state") == "fresh" and recency.get("source") == "local_sms_history"
+
+
 def build_inbound_context(normalized_event, sender_enrichment=None, line_display=None, recent_context=None):
     """Build operator-facing identity, provenance, and draft-safety context."""
     sender_enrichment = sender_enrichment or {}
@@ -1538,9 +1548,7 @@ def build_inbound_context(normalized_event, sender_enrichment=None, line_display
         and identity_confidence == "high"
         and recency["state"] == "fresh"
     )
-    generic_draft_allowed = _generic_fallback_draft_allowed(normalized_event, first_contact)
-
-    return {
+    context = {
         "identityState": identity_state,
         "identityConfidence": identity_confidence,
         "knownContact": known_contact,
@@ -1552,11 +1560,16 @@ def build_inbound_context(normalized_event, sender_enrichment=None, line_display
         "evidence": sorted(set(evidence)),
         "recency": recency,
         "contextDraftAllowed": context_draft_allowed,
-        "genericDraftAllowed": generic_draft_allowed,
-        "draftMode": "context_aware" if context_draft_allowed else (
-            "deterministic_fallback" if generic_draft_allowed else "none"
-        ),
     }
+    generic_draft_allowed = (
+        _generic_fallback_draft_allowed(normalized_event, first_contact)
+        and not _has_fresh_prior_sms_context(context)
+    )
+    context["genericDraftAllowed"] = generic_draft_allowed
+    context["draftMode"] = "context_aware" if context_draft_allowed else (
+        "deterministic_fallback" if generic_draft_allowed else "none"
+    )
+    return context
 
 
 def _extract_call_history_row(call):
@@ -1941,13 +1954,23 @@ def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_d
 
     inbound_context = normalized_event.get("inbound_context")
     if inbound_context is None:
+        recent_context = None
+        if (normalized_event.get("event_type") or "sms") == "sms":
+            recent_context = lookup_recent_sms_context(
+                normalized_event.get("sender_number"),
+                current_dialpad_id=normalized_event.get("message_id"),
+                current_timestamp_ms=_parse_timestamp_ms(normalized_event.get("timestamp")),
+            )
         inbound_context = build_inbound_context(
             normalized_event,
             sender_enrichment=sender_enrichment,
             line_display=line_display,
+            recent_context=recent_context,
         )
     if inbound_context.get("contextDraftAllowed"):
         return True
+    if _has_fresh_prior_sms_context(inbound_context):
+        return False
 
     return _generic_fallback_draft_allowed(normalized_event, first_contact)
 

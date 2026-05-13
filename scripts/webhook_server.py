@@ -2767,9 +2767,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 )
                 telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif hook_status == "filtered_opt_out":
+                contact_info = sender_enrichment.get("contact_name")
+                from_display = f"{contact_info} ({from_num})" if contact_info else str(from_num)
                 tg_text = (
                     "🛑 Dialpad SMS opt-out / human-only\n"
-                    f"From: {escape_telegram_markdown(str(from_num))}\n"
+                    f"From: {escape_telegram_markdown(from_display)}\n"
+                    f"Message: {escape_telegram_markdown(text)}\n"
                     "Automation is not allowed to send on this thread."
                 )
                 telegram_sms_sent = send_to_telegram(tg_text)

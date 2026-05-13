@@ -607,12 +607,12 @@ def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(monke
         webhook_server,
         "lookup_contact_enrichment",
         lambda _number: {
-            "contact_name": None,
-            "first_name": None,
-            "last_name": None,
-            "company": None,
+            "contact_name": "Lisa Primps (The Primping Place)",
+            "first_name": "Lisa",
+            "last_name": "Primps",
+            "company": "The Primping Place",
             "job_title": None,
-            "status": "not_found",
+            "status": "resolved",
             "degraded": False,
             "degraded_reason": None,
         },
@@ -655,6 +655,8 @@ def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(monke
     assert response["telegram_status"] == "human_only_notified"
     assert response["auto_reply_draft_id"] is None
     assert "human-only" in telegram_messages[0]
+    assert "Lisa Primps (The Primping Place) (+14155550123)" in telegram_messages[0]
+    assert "Message: I need a real person. Please don't bother me anymore." in telegram_messages[0]
 
     conn = webhook_server.sms_approval.init_db()
     try:

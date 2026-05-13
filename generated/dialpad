@@ -8,6 +8,7 @@ openapi2cli-generated code in generated/dialpad.openapi.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -73,6 +74,24 @@ def _auth_env() -> dict[str, str]:
     return env
 
 
+def _raw_cli_runner() -> list[str]:
+    """Return a Python command that can import generated CLI dependencies."""
+
+    explicit_python = os.environ.get("DIALPAD_OPENAPI_PYTHON")
+    if explicit_python:
+        return [explicit_python]
+
+    try:
+        import click  # noqa: F401
+        import requests  # noqa: F401
+    except ImportError:
+        uv = shutil.which("uv")
+        if uv:
+            return [uv, "run", "--quiet", "--with", "click", "--with", "requests", "python"]
+
+    return [sys.executable]
+
+
 def main() -> int:
     if not RAW_CLI.exists():
         print(f"Error: generated CLI not found: {RAW_CLI}", file=sys.stderr)
@@ -82,12 +101,13 @@ def main() -> int:
         print(_usage(), file=sys.stderr)
         return 2
 
+    runner = _raw_cli_runner()
     if sys.argv[1] in {"-h", "--help"}:
-        proc = subprocess.run([sys.executable, str(RAW_CLI), "--help"], env=_auth_env())
+        proc = subprocess.run([*runner, str(RAW_CLI), "--help"], env=_auth_env())
         return proc.returncode
 
     translated = _translate(sys.argv[1:])
-    proc = subprocess.run([sys.executable, str(RAW_CLI), *translated], env=_auth_env())
+    proc = subprocess.run([*runner, str(RAW_CLI), *translated], env=_auth_env())
     return proc.returncode
 
 

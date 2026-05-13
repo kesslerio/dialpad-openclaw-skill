@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -185,10 +186,32 @@ def _env_with_auth() -> dict[str, str]:
 
 
 
+def _generated_command(args: list[str]) -> list[str]:
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        return [
+            uv_bin,
+            "run",
+            "--quiet",
+            "--with",
+            "click>=8",
+            "--with",
+            "requests>=2",
+            "--with",
+            "rich>=13",
+            "python",
+            str(GENERATED_DIALPAD),
+            *args,
+        ]
+
+    return [str(GENERATED_DIALPAD), *args]
+
+
+
 def run_generated(args: list[str], capture_output: bool = False) -> subprocess.CompletedProcess[str]:
     require_generated_cli()
 
-    cmd = [str(GENERATED_DIALPAD), *args]
+    cmd = _generated_command(args)
     try:
         return subprocess.run(
             cmd,

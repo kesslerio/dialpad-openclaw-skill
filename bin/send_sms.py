@@ -99,7 +99,12 @@ def resolve_message_text(args: argparse.Namespace) -> tuple[str, str]:
 
 def suspicious_currency_reasons(message_text: str) -> list[str]:
     checks = [
-        (r"(?<!\S),\d{3}\b", "comma-prefixed amount like ',035'"),
+        (r"(?<!\S),\d{3}\b", "amount with stripped leading currency like ',035'"),
+        (
+            r"(?i)\b(?:amount|buyout|cost|credit|discount|financing|payment|price|quote|total)"
+            r"\s*(?::|=|-|is|was|of|for|at)?\s*(?<![$\d])\d{1,3},\d{3}\b",
+            "currency-context amount with stripped leading currency like '0,035' or '20,035'",
+        ),
         (r"(?i)(?:about|around|roughly|approx(?:imately)?|~)\s*\d{1,3}\s+(?:less|more|off|credit)\b", "currency word with bare number"),
         (r"~\d{2,4}\s*-\s*\d{2,4}\s*/\s*month\b", "monthly range missing currency symbol"),
         (r"\bcurrent\s+\d{2,4}\s*/\s*month\b", "current monthly amount missing currency symbol"),

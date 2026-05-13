@@ -44,6 +44,7 @@ import base64
 import binascii
 import re
 import sqlite3
+import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -112,6 +113,10 @@ DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED = parse_bool_env(
 DIALPAD_PRIORITY_ROUTE_TO = os.environ.get("DIALPAD_PRIORITY_ROUTE_TO", "")
 DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", "")
 DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), False)
+DIALPAD_RICH_SMS_DRAFTS_ENABLED = parse_bool_env(os.environ.get("DIALPAD_RICH_SMS_DRAFTS_ENABLED"), True)
+DIALPAD_QMD_COMMAND = os.environ.get("DIALPAD_QMD_COMMAND", "qmd")
+DIALPAD_QMD_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_QMD_TIMEOUT_SECONDS", "8"))
+DIALPAD_BOOK_DEMO_URL = os.environ.get("DIALPAD_BOOK_DEMO_URL", "https://bysha.pe/book-demo")
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -1409,6 +1414,71 @@ def lookup_recent_sms_context(customer_number, *, current_dialpad_id=None, curre
     }
 
 
+def lookup_recent_sms_thread(
+    customer_number,
+    *,
+    current_dialpad_id=None,
+    current_timestamp_ms=None,
+    current_line_number=None,
+    limit=5,
+):
+    """Return bounded prior SMS thread text for draft context, if local history exists."""
+    if init_sms_history_db is None or not customer_number:
+        return []
+    if current_dialpad_id is None and current_timestamp_ms is None:
+        return []
+
+    clauses = ["contact_number = ?"]
+    params = [customer_number]
+    if current_dialpad_id is not None:
+        clauses.append("(dialpad_id IS NULL OR dialpad_id != ?)")
+        params.append(current_dialpad_id)
+    if current_timestamp_ms is not None:
+        clauses.append("(timestamp IS NULL OR timestamp < ?)")
+        params.append(current_timestamp_ms)
+        clauses.append("(timestamp IS NULL OR timestamp >= ?)")
+        params.append(max(0, current_timestamp_ms - INBOUND_CONTEXT_FRESHNESS_WINDOW_MS))
+
+    query = (
+        "SELECT direction, timestamp, from_number, to_number, text FROM messages "
+        f"WHERE {' AND '.join(clauses)} "
+        "ORDER BY timestamp DESC, id DESC LIMIT ?"
+    )
+    row_limit = max(1, min(int(limit or 5), 10))
+    params.append(row_limit * 3)
+    try:
+        conn = init_sms_history_db()
+        try:
+            rows = conn.execute(query, params).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - context lookup should never break webhooks.
+        print(f"⚠️  Recent SMS thread lookup failed ({type(exc).__name__})")
+        return []
+
+    thread = []
+    line_norm = normalize_phone_number(current_line_number)
+    for row in rows:
+        if line_norm:
+            from_norm = normalize_phone_number(row["from_number"])
+            to_norm = normalize_phone_number(row["to_number"])
+            if line_norm not in {from_norm, to_norm}:
+                continue
+        text = str(row["text"] or "").strip()
+        if not text:
+            continue
+        thread.append(
+            {
+                "direction": row["direction"],
+                "timestamp": row["timestamp"],
+                "text": text[:500],
+            }
+        )
+        if len(thread) >= row_limit:
+            break
+    return thread
+
+
 def lookup_recent_call_context(customer_number, line_number=None, event_ts_ms=None, history_fetcher=None):
     """Return prior Dialpad call continuity inside the freshness window."""
     normalized_customer = normalize_phone_number(customer_number)
@@ -1900,6 +1970,17 @@ def build_first_contact_context(normalized_event, sender_enrichment=None, line_d
 def build_proactive_reply_message(normalized_event, sender_enrichment=None):
     """Build the sales-line auto-reply message for first-contact inbound events."""
     sender_enrichment = sender_enrichment or {}
+    if "rich_reply" in normalized_event:
+        rich_reply = normalized_event["rich_reply"]
+    else:
+        rich_reply = build_rich_sms_reply(
+            normalized_event,
+            sender_enrichment=sender_enrichment,
+        )
+        normalized_event["rich_reply"] = rich_reply
+    if rich_reply.get("usable") and rich_reply.get("message"):
+        return rich_reply["message"]
+
     inbound_context = normalized_event.get("inbound_context") or {}
     contact_name = None
     if inbound_context.get("identityConfidence") != "low":
@@ -1925,6 +2006,221 @@ def build_proactive_reply_message(normalized_event, sender_enrichment=None):
         body = "thanks for reaching ShapeScale for Business Sales. We got your message and will be in touch shortly."
 
     return f"Hi {greeting_name}, {body}"
+
+
+def classify_rich_sms_question(text, recent_thread=None):
+    """Classify bounded Sales SMS questions that are safe candidates for richer drafts."""
+    body = str(text or "").strip().lower()
+    if not body:
+        return None
+
+    recent_thread = recent_thread or []
+    prior_text = " ".join(str(item.get("text") or "") for item in recent_thread).lower()
+    has_prior_link = bool(re.search(r"https?://|bysha\.pe|shape\.scale|shapescale", prior_text))
+
+    if has_prior_link and re.search(r"\b(link|url|website|site)\b.*\b(doesn'?t|dont|won'?t|not|broken|work|open|load)\b", body):
+        return "link_issue"
+    if re.search(r"\b(book|booking|schedule|demo|appointment|calendar|time)\b", body):
+        return "booking"
+    if re.search(r"\b(price|pricing|cost|quote|lease|buyout|finance|financing|monthly|payment)\b", body):
+        return "pricing"
+    if re.search(r"\b(business|consumer|version|scan|scanner|results|client|clients|how does|how it works)\b", body):
+        return "product"
+    return None
+
+
+def lookup_shapescale_knowledge(query):
+    """Retrieve ShapeScale knowledge for rich SMS drafts; fail closed on any issue."""
+    result = {
+        "usable": False,
+        "status": "disabled",
+        "text": "",
+    }
+    command = str(DIALPAD_QMD_COMMAND or "").strip()
+    if not command:
+        return result
+
+    args = [command, "search", str(query or "").strip()]
+    if not args[-1]:
+        result["status"] = "empty_query"
+        return result
+
+    try:
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=DIALPAD_QMD_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        result["status"] = "unavailable"
+        return result
+    except subprocess.TimeoutExpired:
+        result["status"] = "timeout"
+        return result
+    except Exception as exc:  # noqa: BLE001 - qmd must not break webhook processing.
+        print(f"⚠️  ShapeScale knowledge lookup failed ({type(exc).__name__})")
+        result["status"] = "request_failed"
+        return result
+
+    output = (completed.stdout or "").strip()
+    if completed.returncode != 0:
+        result["status"] = f"exit_{completed.returncode}"
+        return result
+    if not output:
+        result["status"] = "empty"
+        return result
+    safe_output = customer_safe_knowledge_text(extract_qmd_customer_snippet(output))
+    if not safe_output:
+        result["status"] = "unsafe_output"
+        return result
+
+    result.update(
+        {
+            "usable": True,
+            "status": "ok",
+            "text": safe_output[:1200],
+        }
+    )
+    return result
+
+
+def extract_qmd_customer_snippet(output):
+    """Extract candidate snippet text from qmd search output."""
+    lines = []
+    in_snippet = False
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("qmd://"):
+            if lines:
+                break
+            in_snippet = False
+            continue
+        if re.match(r"^(Title|Context|Score):", line, re.IGNORECASE):
+            continue
+        if line.startswith("@@"):
+            in_snippet = True
+            continue
+        if in_snippet:
+            lines.append(line)
+
+    return " ".join(lines) if lines else str(output or "")
+
+
+def customer_safe_knowledge_text(output):
+    """Return customer-ready knowledge text, rejecting raw search result metadata."""
+    text = " ".join(str(output or "").split())
+    if not text:
+        return ""
+    unsafe_patterns = (
+        r"\bqmd://",
+        r"\bScore:\s*\d",
+        r"\bContext:",
+        r"\bTitle:",
+        r"@@\s+-\d",
+        r"/home/",
+        r"\.md\b",
+        r"\.json\b",
+    )
+    for pattern in unsafe_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return ""
+    return text
+
+
+def _first_recent_link(recent_thread):
+    for item in recent_thread or []:
+        if str(item.get("direction") or "").lower() != "outbound":
+            continue
+        match = re.search(r"https?://\S+|(?:bysha\.pe|shape\.scale|shapescale\.com)/\S*", str(item.get("text") or ""))
+        if match:
+            link = match.group(0).rstrip(".,;)")
+            if link.startswith("http"):
+                return link
+            return f"https://{link}"
+    return None
+
+
+def _knowledge_query_for_category(category, text):
+    topic = str(text or "").strip()
+    if category == "booking":
+        return f"ShapeScale book demo booking link sales SMS answer: {topic}"
+    if category == "pricing":
+        return f"ShapeScale pricing lease buyout financing sales SMS answer: {topic}"
+    if category == "product":
+        return f"ShapeScale product business consumer scan results sales SMS answer: {topic}"
+    return f"ShapeScale sales SMS answer: {topic}"
+
+
+def _compose_knowledge_sms(category, knowledge_text):
+    compact = " ".join(str(knowledge_text or "").split())
+    if not compact:
+        return None
+    compact = re.sub(r"\[[^\]]+\]\([^)]+\)", "", compact).strip()
+    compact = re.sub(r"\s+", " ", compact)
+    if len(compact) > 240:
+        compact = compact[:237].rstrip() + "..."
+
+    if category == "booking":
+        return f"Hi there, you can book a ShapeScale demo here: {DIALPAD_BOOK_DEMO_URL}. If that gives you trouble, reply with a few times that work and we'll help schedule it."
+    return f"Hi there, {compact}"
+
+
+def build_rich_sms_reply(normalized_event, sender_enrichment=None):
+    """Build a short knowledge-backed approval draft when confidence is high enough."""
+    if not DIALPAD_RICH_SMS_DRAFTS_ENABLED:
+        return {"usable": False, "status": "disabled"}
+    if (normalized_event.get("event_type") or "sms") != "sms":
+        return {"usable": False, "status": "unsupported_event"}
+
+    sender_number = normalized_event.get("sender_number")
+    timestamp_ms = _parse_timestamp_ms(normalized_event.get("timestamp"))
+    recent_thread = normalized_event.get("recent_sms_thread")
+    if recent_thread is None:
+        recent_thread = lookup_recent_sms_thread(
+            sender_number,
+            current_dialpad_id=normalized_event.get("message_id"),
+            current_timestamp_ms=timestamp_ms,
+            current_line_number=normalized_event.get("recipient_number"),
+        )
+        normalized_event["recent_sms_thread"] = recent_thread
+
+    category = classify_rich_sms_question(normalized_event.get("text"), recent_thread=recent_thread)
+    if not category:
+        return {"usable": False, "status": "not_answerable"}
+
+    if category == "link_issue":
+        link = _first_recent_link(recent_thread) or DIALPAD_BOOK_DEMO_URL
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "recent_thread_link",
+            "category": category,
+            "message": f"Hi there, sorry about that. Try this link instead: {link}. If it still doesn't work, reply with a few times that work and we'll help schedule it.",
+        }
+
+    knowledge = lookup_shapescale_knowledge(_knowledge_query_for_category(category, normalized_event.get("text")))
+    if not knowledge.get("usable"):
+        return {
+            "usable": False,
+            "status": f"knowledge_{knowledge.get('status') or 'unavailable'}",
+            "category": category,
+        }
+
+    message = _compose_knowledge_sms(category, knowledge.get("text"))
+    if not message:
+        return {"usable": False, "status": "empty_draft", "category": category}
+
+    return {
+        "usable": True,
+        "status": "ok",
+        "basis": "shapescale_knowledge",
+        "category": category,
+        "message": message,
+    }
 
 
 def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_display=None):
@@ -1969,6 +2265,16 @@ def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_d
         )
     if inbound_context.get("contextDraftAllowed"):
         return True
+    if "rich_reply" in normalized_event:
+        rich_reply = normalized_event["rich_reply"]
+    else:
+        rich_reply = build_rich_sms_reply(
+            normalized_event,
+            sender_enrichment=sender_enrichment,
+        )
+        normalized_event["rich_reply"] = rich_reply
+    if rich_reply.get("usable"):
+        return True
     if _has_fresh_prior_sms_context(inbound_context):
         return False
 
@@ -2002,6 +2308,14 @@ def send_proactive_reply(normalized_event, sender_enrichment=None, line_display=
         line_display=line_display,
     ):
         return False, "not_eligible", None
+    if "rich_reply" in normalized_event:
+        rich_reply = normalized_event["rich_reply"]
+    else:
+        rich_reply = build_rich_sms_reply(
+            normalized_event,
+            sender_enrichment=sender_enrichment,
+        )
+        normalized_event["rich_reply"] = rich_reply
     message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
     return False, "approval_required", message
 
@@ -2066,14 +2380,22 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
 
     draft_allowed = inbound_context.get("contextDraftAllowed")
     generic_draft_allowed = inbound_context.get("genericDraftAllowed")
+    rich_draft_allowed = inbound_context.get("richDraftAllowed")
     draft_mode = inbound_context.get("draftMode") or "none"
     if auto_reply_draft_created:
-        mode_text = "context-aware" if draft_mode == "context_aware" else "generic fallback"
+        if draft_mode == "knowledge_backed":
+            mode_text = "ShapeScale knowledge-backed"
+        elif draft_mode == "context_aware":
+            mode_text = "context-aware"
+        else:
+            mode_text = "generic fallback"
         draft_text = f"approval draft created ({mode_text})"
     elif auto_reply_status and auto_reply_status not in {"draft_created", "approval_required"}:
         draft_text = f"no approval draft ({auto_reply_status})"
     elif draft_allowed:
         draft_text = "context-aware approval draft eligible"
+    elif rich_draft_allowed:
+        draft_text = "ShapeScale knowledge-backed approval draft eligible"
     elif generic_draft_allowed:
         draft_text = "generic approval draft eligible"
     else:
@@ -2193,6 +2515,15 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
         )
         return False, "not_eligible", None, None, None
 
+    rich_reply = normalized_event.get("rich_reply")
+    if isinstance(rich_reply, dict) and rich_reply.get("usable"):
+        inbound_context = normalized_event.get("inbound_context")
+        if isinstance(inbound_context, dict):
+            inbound_context["richDraftAllowed"] = True
+            inbound_context["richDraftBasis"] = rich_reply.get("basis")
+            inbound_context["richDraftCategory"] = rich_reply.get("category")
+            inbound_context["draftMode"] = "knowledge_backed"
+
     message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
     if sms_approval is None:
         return False, "approval_unavailable", message, None, reply_policy
@@ -2213,6 +2544,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             "line_display": line_display or normalized_event.get("line_display"),
             "first_contact": normalized_event.get("first_contact"),
             "inbound_context": normalized_event.get("inbound_context"),
+            "rich_reply": normalized_event.get("rich_reply"),
         }
     )
     try:
@@ -2240,6 +2572,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "event_type": normalized_event.get("event_type"),
                     "line_display": line_display or normalized_event.get("line_display"),
                     "draft_mode": (normalized_event.get("inbound_context") or {}).get("draftMode"),
+                    "rich_reply": normalized_event.get("rich_reply"),
                 },
             )
         finally:
@@ -2714,6 +3047,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     "draftId": auto_reply_draft_id,
                     "status": auto_reply_status,
                     "message": auto_reply_message,
+                    "richReply": normalized_sms.get("rich_reply"),
                     "replyPolicy": reply_policy,
                 }
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(

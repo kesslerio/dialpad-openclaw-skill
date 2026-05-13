@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -45,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--infer-country-code", action="store_true", help="Infer country code from sender")
     parser.add_argument("--dry-run", action="store_true", help="Print request and selected sender without sending")
+    parser.add_argument(
+        "--allow-suspicious-currency",
+        action="store_true",
+        help="Bypass malformed-currency preflight for intentionally unusual numeric text",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     return parser
 
@@ -89,6 +95,29 @@ def resolve_message_text(args: argparse.Namespace) -> tuple[str, str]:
         raise WrapperError("Message text cannot be empty.", code="invalid_argument", retryable=False)
 
     return message_text, message_source
+
+
+def suspicious_currency_reasons(message_text: str) -> list[str]:
+    checks = [
+        (r"(?<!\S),\d{3}\b", "comma-prefixed amount like ',035'"),
+        (r"(?i)(?:about|around|roughly|approx(?:imately)?|~)\s*\d{1,3}\s+(?:less|more|off|credit)\b", "currency word with bare number"),
+        (r"~\d{2,4}\s*-\s*\d{2,4}\s*/\s*month\b", "monthly range missing currency symbol"),
+        (r"\bcurrent\s+\d{2,4}\s*/\s*month\b", "current monthly amount missing currency symbol"),
+    ]
+    return [reason for pattern, reason in checks if re.search(pattern, message_text)]
+
+
+def validate_message_text(message_text: str, allow_suspicious_currency: bool = False) -> None:
+    reasons = suspicious_currency_reasons(message_text)
+    if reasons and not allow_suspicious_currency:
+        raise WrapperError(
+            "SMS text looks like shell expansion stripped currency symbols: "
+            + "; ".join(reasons)
+            + ". Use --message-file or --message-stdin to preserve '$', or pass "
+            "--allow-suspicious-currency if this formatting is intentional.",
+            code="invalid_argument",
+            retryable=False,
+        )
 
 
 def _build_payload(
@@ -150,6 +179,7 @@ def main() -> int:
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch
         )
         message_text, message_source = resolve_message_text(args)
+        validate_message_text(message_text, args.allow_suspicious_currency)
         payload = _build_payload(args.to, message_text, args.infer_country_code, sender_number)
 
         if args.dry_run:

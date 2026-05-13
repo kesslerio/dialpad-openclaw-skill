@@ -49,6 +49,13 @@ def test_openclaw_docs_require_sms_approval_drafts_not_autonomous_send():
     assert "low-confidence sales sms and missed calls" in skill
     assert "low-confidence sales sms and missed calls" in api_reference
     assert "generic approval draft" in integration
+    assert "shapescale knowledge-backed approval drafts" in readme
+    assert "shapescale knowledge-backed approval drafts" in api_reference
+    assert "shapescale knowledge-backed approval drafts" in integration
+    assert "qmd-backed shapescale knowledge" in readme
+    assert "qmd-backed shapescale knowledge" in api_reference
+    assert "qmd-backed shapescale knowledge" in integration
+    assert "citation-free" in api_reference
     assert "inbound hooks may create sms approval drafts" in skill
     assert "must not send customer sms directly" in skill
     assert "intentionally unsupported" in integration

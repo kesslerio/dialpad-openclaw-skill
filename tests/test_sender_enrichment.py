@@ -504,6 +504,101 @@ def test_inbound_sales_sms_creates_generic_draft_for_payload_contact(monkeypatch
     assert "approval draft created (generic fallback)" in telegram_messages[0]
 
 
+def test_low_confidence_reply_in_active_thread_does_not_create_generic_draft(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Gabriela Valle"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "first_name": None,
+            "last_name": None,
+            "company": None,
+            "job_title": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 2001,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "You can grab a time here: bysha.pe/book-demo",
+                "created_date": now_ms - 5 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    telegram_messages = []
+    hook_calls = []
+    sms_calls = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_messages.append(text) or True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: (
+            hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display}) or
+            (True, "http_200")
+        ),
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "dialpad_send_sms",
+        lambda *args, **kwargs: sms_calls.append((args, kwargs)) or {"id": "msg-1"},
+    )
+
+    payload = {
+        "id": 2002,
+        "direction": "inbound",
+        "from_number": "+15109125052",
+        "to_number": ["+14155201316"],
+        "text": "The link doesn't work",
+        "created_date": now_ms,
+        "contact": {"name": "Gabriela Valle"},
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    normalized_sms = hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    assert status["code"] == 200
+    assert sms_calls == []
+    assert inbound_context["identityConfidence"] == "low"
+    assert inbound_context["recency"]["state"] == "fresh"
+    assert "local_sms_history" in inbound_context["evidence"]
+    assert inbound_context["genericDraftAllowed"] is False
+    assert inbound_context["draftMode"] == "none"
+    assert normalized_sms["auto_reply"]["draftCreated"] is False
+    assert response["auto_reply_status"] == "not_eligible"
+    assert response["auto_reply_draft_id"] is None
+    assert "SMS approval draft" not in telegram_messages[0]
+    assert "no approval draft (not\\_eligible)" in telegram_messages[0]
+    assert "thanks for reaching ShapeScale for Business Sales" not in telegram_messages[0]
+
+
 def test_known_recent_sales_sms_creates_context_approval_draft(monkeypatch, tmp_path):
     sms_db = tmp_path / "sms.db"
     approval_db = tmp_path / "approvals.db"
@@ -1223,6 +1318,49 @@ def test_should_send_proactive_reply_allows_payload_contact_sms_generic_draft(mo
     }
 
     assert webhook_server.should_send_proactive_reply(normalized_event) is True
+
+
+def test_should_send_proactive_reply_suppresses_generic_draft_for_active_thread(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": "prior-outbound",
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "You can grab a time here: bysha.pe/book-demo",
+                "created_date": now_ms - 5 * 60 * 1000,
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    normalized_event = {
+        "event_type": "sms",
+        "message_id": "current-inbound",
+        "timestamp": now_ms,
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "first_contact": {
+            "knownContact": False,
+            "needsDraftReply": True,
+            "lookup": {
+                "status": "payload_contact",
+                "degraded": False,
+                "degradedReason": None,
+            },
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
 
 
 def test_inbound_telegram_escapes_markdown_content(monkeypatch):

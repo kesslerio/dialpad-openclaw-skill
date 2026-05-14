@@ -53,6 +53,12 @@ bin/list_calls.py --today --limit 20
 bin/list_calls.py --hours 6 --missed --json
 ```
 
+**Get Call Transcript:**
+```bash
+bin/get_call_transcript.py --call-id "call_123" --json
+bin/get_call_transcript.py --last --with "+14155551234" --json
+```
+
 **Check SMS Thread History:**
 ```bash
 bin/list_sms_thread.py --phone "+14155551234" --json
@@ -91,14 +97,15 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
    - `--dry-run` prints sender resolution and the exact message/request preview without an API call
 8. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
 9. **Call history:** `bin/list_calls.py` is the supported call-history command for agents. Use `--json` when downstream automation needs a deterministic response envelope.
-10. **SMS thread history:** Before saying a contact was not already messaged, run `bin/list_sms_thread.py --phone PHONE --json` and check `has_outbound` / `outbound_count`. This local SQLite history is the supported current-turn response-state check.
-11. **SMS export sync:** `bin/sync_sms_export.py` imports Dialpad Stats text export metadata into local SQLite for direct Dialpad UI sends and other out-of-band messages. It skips existing message IDs to preserve webhook-captured text.
-12. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
-13. **Current-turn verification:** "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory. If the current turn has not verified the action yet, say that plainly and run the tool now.
-14. **Identity guardrail:** For first-contact work, soft signals like first name, area code, industry, or job title are not enough to merge or update a contact. Keep uncertain identity `draft-only` and let the CRM layer prove the match before mutating anything.
-15. **Inbound context guardrail:** Webhook `inboundContext` briefs explain identity evidence, recent SMS/call continuity, and draft basis. Low-confidence Sales SMS and missed calls may get generic approval drafts, but not personalized claims. Known contacts only get context-aware approval drafts when identity confidence is high and relevant continuity is no older than 14 days; stale or degraded context stays brief-only.
-16. **Inbound automation guardrail:** Dialpad inbound hooks may create SMS approval drafts, but they must not send customer SMS directly. Use `bin/approve_sms_draft.py` only with a real human actor id and an operator-only `DIALPAD_SMS_APPROVAL_TOKEN`; agent/bot actors are rejected by the approval ledger.
-17. **Opt-out guardrail:** Explicit opt-out language is a hard stop. Do not create override drafts or send follow-ups on those threads unless a human operator handles the conversation outside automation.
+10. **Call transcripts:** `bin/get_call_transcript.py` is the supported transcript retrieval command for agents. It uses Dialpad's plural transcript endpoints (`GET /api/v2/transcripts/{call_id}` and optional review URL `GET /api/v2/transcripts/{call_id}/url`); singular `/api/v2/transcript/{id}` is not the supported endpoint. It is transcript-only; AI recap, CRM enrichment, and follow-up drafting are intentionally separate work.
+11. **SMS thread history:** Before saying a contact was not already messaged, run `bin/list_sms_thread.py --phone PHONE --json` and check `has_outbound` / `outbound_count`. This local SQLite history is the supported current-turn response-state check.
+12. **SMS export sync:** `bin/sync_sms_export.py` imports Dialpad Stats text export metadata into local SQLite for direct Dialpad UI sends and other out-of-band messages. It skips existing message IDs to preserve webhook-captured text.
+13. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
+14. **Current-turn verification:** "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory. If the current turn has not verified the action yet, say that plainly and run the tool now.
+15. **Identity guardrail:** For first-contact work, soft signals like first name, area code, industry, or job title are not enough to merge or update a contact. Keep uncertain identity `draft-only` and let the CRM layer prove the match before mutating anything.
+16. **Inbound context guardrail:** Webhook `inboundContext` briefs explain identity evidence, recent SMS/call continuity, and draft basis. Low-confidence Sales SMS and missed calls may get generic approval drafts, but not personalized claims. Known contacts only get context-aware approval drafts when identity confidence is high and relevant continuity is no older than 14 days; stale or degraded context stays brief-only.
+17. **Inbound automation guardrail:** Dialpad inbound hooks may create SMS approval drafts, but they must not send customer SMS directly. Use `bin/approve_sms_draft.py` only with a real human actor id and an operator-only `DIALPAD_SMS_APPROVAL_TOKEN`; agent/bot actors are rejected by the approval ledger.
+18. **Opt-out guardrail:** Explicit opt-out language is a hard stop. Do not create override drafts or send follow-ups on those threads unless a human operator handles the conversation outside automation.
 
 ## Reference Documentation
 

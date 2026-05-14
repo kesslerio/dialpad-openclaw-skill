@@ -1,12 +1,13 @@
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
-from call_lookup import select_call
+from call_lookup import require_api_key, select_call
 
 
 class CallSelectorTests(unittest.TestCase):
@@ -61,6 +62,10 @@ class CallSelectorTests(unittest.TestCase):
         selected = select_call(calls)
         self.assertIsNotNone(selected)
         self.assertEqual(selected["call_id"], "first")
+
+    def test_require_api_key_accepts_token_fallback(self):
+        with patch.dict("call_lookup.os.environ", {"DIALPAD_TOKEN": "token-only"}, clear=True):
+            self.assertEqual(require_api_key(), "token-only")
 
 
 if __name__ == "__main__":

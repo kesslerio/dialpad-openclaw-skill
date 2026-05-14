@@ -27,7 +27,7 @@ class DialpadApiError(Exception):
 
 
 def require_api_key() -> str:
-    api_key = os.environ.get("DIALPAD_API_KEY")
+    api_key = os.environ.get("DIALPAD_API_KEY") or os.environ.get("DIALPAD_TOKEN")
     if not api_key:
         raise DialpadConfigError("DIALPAD_API_KEY environment variable not set")
     return api_key
@@ -189,9 +189,9 @@ def select_call(calls: list[dict[str, Any]], with_value: str | None = None) -> d
     return ranked[0][1] if ranked else None
 
 
-def resolve_call_id(call_id: str | None, use_last: bool, with_value: str | None) -> str:
+def resolve_call(call_id: str | None, use_last: bool, with_value: str | None) -> dict[str, Any]:
     if call_id:
-        return call_id
+        return {"call_id": call_id}
     if not use_last:
         raise DialpadApiError("Either --call-id or --last is required")
 
@@ -204,4 +204,9 @@ def resolve_call_id(call_id: str | None, use_last: bool, with_value: str | None)
     found_call_id = str(call.get("call_id") or call.get("id") or "").strip()
     if not found_call_id:
         raise DialpadApiError("Selected call is missing call_id")
-    return found_call_id
+    return call
+
+
+def resolve_call_id(call_id: str | None, use_last: bool, with_value: str | None) -> str:
+    call = resolve_call(call_id, use_last, with_value)
+    return str(call.get("call_id") or call.get("id") or "").strip()

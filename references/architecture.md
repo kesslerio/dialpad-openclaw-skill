@@ -8,6 +8,7 @@ Dialpad OpenClaw Skill
 │   ├── send_sms.py
 │   ├── send_group_intro.py
 │   ├── make_call.py
+│   ├── get_call_transcript.py
 │   ├── list_calls.py
 │   ├── lookup_contact.py
 │   ├── create_contact.py
@@ -46,7 +47,7 @@ Dialpad OpenClaw Skill
 
 1. Wrapper receives task-oriented arguments.
 2. Wrapper chooses the narrow backend needed for the task.
-3. Most wrappers execute `generated/dialpad` with auth from env, while `bin/list_calls.py` reuses the proven `scripts/list_calls.py` HTTP path for recent call history.
+3. Most wrappers execute `generated/dialpad` with auth from env, while `bin/list_calls.py` and `bin/get_call_transcript.py` reuse proven `scripts/` HTTP helpers for call history and transcripts.
 4. Wrapper normalizes output for downstream workflows.
 
 ## Script Layer

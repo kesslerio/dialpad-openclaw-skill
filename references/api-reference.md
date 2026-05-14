@@ -40,6 +40,7 @@ The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints. It is the
 - `--dry-run` shows resolved sender and the exact message payload without sending.
 - `bin/send_group_intro.py` performs a mirrored fallback (`mode: mirrored_fallback`) by sending two separate one-to-one SMS messages because the wrapper does not guarantee a true group thread.
 - `bin/list_calls.py` provides agent-safe recent call history with `--hours` or `--today`, optional missed-call filtering, and `--json` for a machine-readable envelope. JSON summaries include `contact_phone` when Dialpad exposes the caller number.
+- `bin/get_call_transcript.py` retrieves transcript text for one Dialpad call through the supported agent wrapper surface. It uses `GET /api/v2/transcripts/{call_id}` for transcript text and `GET /api/v2/transcripts/{call_id}/url` for the optional Dialpad web review URL; singular `/api/v2/transcript/{id}` is not a supported transcript endpoint. It returns explicit unavailable results when Dialpad has no transcript instead of treating missing transcript text as a successful transcript.
 - `bin/list_sms_thread.py` provides read-only local SMS history for one phone number. Use it before claiming that a missed-call contact has no visible SMS response.
 - `bin/sync_sms_export.py` imports Dialpad Stats `texts` export metadata into local SQLite. It is the completeness path for direct Dialpad UI sends and skips existing message IDs to avoid replacing webhook-captured message text.
 - `firstContact` includes an explicit `identityState` and raw lookup status so downstream agents can keep weak matches draft-only instead of mutating a contact record too early.
@@ -50,6 +51,8 @@ printf '%s' 'The premium hardshell travel case is $499.' | bin/send_sms.py --to 
 bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
 bin/list_calls.py --today --limit 20
 bin/list_calls.py --hours 6 --missed --json
+bin/get_call_transcript.py --call-id "call_123" --json
+bin/get_call_transcript.py --last --with "+14155550111" --json
 bin/list_sms_thread.py --phone "+14155550111" --json
 bin/sync_sms_export.py --start-date 2026-05-13 --end-date 2026-05-13 --json
 ```

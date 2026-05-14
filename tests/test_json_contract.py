@@ -32,6 +32,14 @@ assert LIST_CALLS_SPEC is not None and LIST_CALLS_SPEC.loader is not None
 list_calls_wrapper = importlib.util.module_from_spec(LIST_CALLS_SPEC)
 LIST_CALLS_SPEC.loader.exec_module(list_calls_wrapper)
 
+GET_CALL_TRANSCRIPT_SPEC = importlib.util.spec_from_file_location(
+    "bin_get_call_transcript_contract",
+    Path(__file__).resolve().parent.parent / "bin" / "get_call_transcript.py",
+)
+assert GET_CALL_TRANSCRIPT_SPEC is not None and GET_CALL_TRANSCRIPT_SPEC.loader is not None
+get_call_transcript_wrapper = importlib.util.module_from_spec(GET_CALL_TRANSCRIPT_SPEC)
+GET_CALL_TRANSCRIPT_SPEC.loader.exec_module(get_call_transcript_wrapper)
+
 
 class JsonContractTests(unittest.TestCase):
     def _run(self, module, argv: list[str]) -> tuple[int, str, str]:
@@ -511,6 +519,43 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(err, "")
         parsed = self._parse(out)
         self._assert_error(parsed, "list_calls.list")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
+    def test_get_call_transcript_json_success_envelope(self):
+        with patch.object(get_call_transcript_wrapper, "require_api_key"), \
+                patch.object(
+                    get_call_transcript_wrapper,
+                    "resolve_call_transcript",
+                    return_value={
+                        "call_id": "call-123",
+                        "available": True,
+                        "transcript_text": "Transcript body",
+                        "transcript_review_url": None,
+                        "source": "transcripts",
+                        "unavailable_reason": None,
+                    },
+                ):
+            code, out, err = self._run(
+                get_call_transcript_wrapper,
+                ["bin/get_call_transcript.py", "--call-id", "call-123", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "get_call_transcript.get")
+        self.assertEqual(parsed["data"]["call_id"], "call-123")
+        self.assertTrue(parsed["data"]["available"])
+
+    def test_get_call_transcript_argparse_failure_is_json_envelope(self):
+        code, out, err = self._run(
+            get_call_transcript_wrapper,
+            ["bin/get_call_transcript.py", "--call-id", "call-123", "--with", "Jane", "--json"],
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "get_call_transcript.get")
         self.assertEqual(parsed["error"]["code"], "invalid_argument")
 
     def test_list_sms_thread_json_success_reports_outbound_state(self):

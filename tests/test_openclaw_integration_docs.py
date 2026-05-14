@@ -78,3 +78,20 @@ def test_openclaw_docs_require_telegram_inline_button_safety_preflight():
     assert "getupdates" in integration
     assert "x-telegram-bot-api-secret-token" in integration
     assert "smsdraft_*" in integration
+
+
+def test_docs_expose_agent_facing_call_transcript_wrapper():
+    readme = (ROOT / "README.md").read_text().lower()
+    skill = (ROOT / "SKILL.md").read_text().lower()
+    api_reference = (ROOT / "references/api-reference.md").read_text().lower()
+    architecture = (ROOT / "references/architecture.md").read_text().lower()
+
+    assert "bin/get_call_transcript.py" in readme
+    assert "bin/get_call_transcript.py" in skill
+    assert "bin/get_call_transcript.py" in api_reference
+    assert "bin/get_call_transcript.py" in architecture
+    assert "transcript-only" in skill
+    assert "explicit unavailable" in api_reference
+    assert "/api/v2/transcripts/{call_id}" in skill
+    assert "/api/v2/transcripts/{call_id}/url" in api_reference
+    assert "/api/v2/transcript/{id}" in api_reference

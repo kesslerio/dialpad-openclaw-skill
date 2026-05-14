@@ -660,6 +660,56 @@ class JsonContractTests(unittest.TestCase):
         self.assertTrue(summary["has_outbound"])
         self.assertEqual(len(summary["messages"]), 5)
 
+    def test_list_sms_thread_filters_messages_before_summary(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                dialpad_id INTEGER,
+                contact_number TEXT,
+                contact_name TEXT,
+                direction TEXT,
+                from_number TEXT,
+                to_number TEXT,
+                text TEXT,
+                message_status TEXT,
+                delivery_result TEXT,
+                timestamp INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+                dialpad_id, contact_number, contact_name, direction,
+                from_number, to_number, text, timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "+14155550123",
+                "Jane Doe",
+                "inbound",
+                "+14155550123",
+                "+14155201316",
+                "raw sensitive text",
+                1770000000000,
+            ),
+        )
+        conn.commit()
+
+        def redact(messages):
+            return [{**message, "text": "[redacted]"} for message in messages]
+
+        with patch("list_sms_thread.filter_messages", side_effect=redact) as filter_messages:
+            summary = list_sms_thread.load_thread_summary(conn, "+14155550123", limit=5)
+
+        filter_messages.assert_called_once()
+        self.assertEqual(summary["messages"][0]["text"], "[redacted]")
+
     def test_sync_sms_export_json_dry_run_imports_export_rows(self):
         class FakeConn:
             def close(self):

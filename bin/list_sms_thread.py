@@ -22,7 +22,7 @@ from _dialpad_compat import (  # noqa: E402
     handle_wrapper_exception,
     print_wrapper_error,
 )
-from sms_sqlite import init_db  # noqa: E402
+from sms_sqlite import filter_messages, init_db  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,7 +92,7 @@ def load_thread_summary(conn: Any, phone: str, limit: int) -> dict[str, Any]:
     outbound_count = int(counts_row["outbound_count"] or 0) if counts_row else 0
     inbound_count = int(counts_row["inbound_count"] or 0) if counts_row else 0
     latest_outbound_timestamp = counts_row["latest_outbound_timestamp"] if counts_row else None
-    messages = [dict(row) for row in reversed(rows)]
+    messages = filter_messages([dict(row) for row in reversed(rows)])
     return {
         "phone": phone,
         "count": count,

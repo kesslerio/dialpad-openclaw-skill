@@ -36,6 +36,8 @@ COMMAND_IDS = {
     "send_group_intro.send": "send_group_intro.send",
     "create_sms_draft.create": "create_sms_draft.create",
     "approve_sms_draft.approve": "approve_sms_draft.approve",
+    "list_sms_thread.list": "list_sms_thread.list",
+    "sync_sms_export.sync": "sync_sms_export.sync",
     "create_sms_webhook.create": "create_sms_webhook.create",
     "create_sms_webhook.list": "create_sms_webhook.list",
     "create_sms_webhook.delete": "create_sms_webhook.delete",

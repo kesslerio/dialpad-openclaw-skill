@@ -50,6 +50,12 @@ bin/make_call.py --to "+14155551234" --text "This is a test call."
 bin/list_calls.py --today --limit 20
 bin/list_calls.py --hours 6 --missed --json
 
+# Check whether a contact already has local SMS replies
+bin/list_sms_thread.py --phone "+14155551234" --json
+
+# Sync Dialpad Stats text export metadata into local SMS SQLite
+bin/sync_sms_export.py --start-date 2026-05-13 --end-date 2026-05-13 --json
+
 # Group intro (mirrored fallback)
 bin/send_group_intro.py --prospect "+14155550111" --reference "+14155550999" --confirm-share --from "+14153602954"
 
@@ -93,6 +99,8 @@ For first-time or unknown inbound contacts, the payload also carries a `firstCon
 For all eligible inbound SMS and missed calls, the payload may also carry `inboundContext`: a compact identity/provenance/recency brief that explains exact phone matches, Dialpad contact evidence, recent SMS/call continuity, whether a context-aware approval draft is allowed, and whether a generic fallback draft is allowed.
 That pattern is CRM-agnostic: Attio is one example, but the same setup works with HubSpot, Pipedrive, Airtable, a spreadsheet, or a custom directory service downstream.
 Current-turn verification still applies: "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory.
+For SMS response checks, use `bin/list_sms_thread.py --phone PHONE --json` before claiming a thread has no visible reply history. The local SQLite store is the first-line operational history; Dialpad Stats export is slower and should be treated as a fallback/export path.
+For completeness after direct Dialpad UI sends or other out-of-band sends, run `bin/sync_sms_export.py` for the relevant date range. The export sync upserts previously unseen message IDs only and skips existing local messages so webhook-captured plaintext is not replaced by export metadata.
 For identity work, treat `resolved` as the only state that is safe to mutate automatically; `not_found`, `ambiguous`, and `degraded` stay draft-only until the CRM layer proves otherwise.
 When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` create a short exact-text approval draft instead of sending SMS directly. Low-confidence Sales SMS and missed calls, including payload-only contact names, may create generic approval drafts; low confidence suppresses personalization and CRM claims, not the approval-gated draft itself. Eligible Sales SMS may also create ShapeScale knowledge-backed approval drafts for obvious product, booking, link, and pricing questions; the webhook uses recent Dialpad SMS history to resolve active-thread references and uses qmd-backed ShapeScale knowledge for factual answers. If knowledge is unavailable or ambiguous, rich drafting fails closed to the existing generic, no-draft, or human-only behavior. Known contacts only get context-aware approval drafts when identity confidence is high and recent SMS/call continuity is no older than 14 days; stale or degraded context produces a brief only. Missed calls get a "sorry we missed you" draft variant; SMS and voicemail get a "we'll be in touch shortly" draft variant. Explicit opt-out language creates no draft, invalidates pending drafts for that customer, and sends only a human-only Telegram notice.
 Missed-call notifications are idempotency-gated before any approval draft, OpenClaw hook, or Telegram side effect. Dialpad can emit parent and per-user child call records for one visible department/office call; the webhook dedupes those by `entry_point_call_id` / `call_id` with a short caller-line-time fallback when IDs are absent.

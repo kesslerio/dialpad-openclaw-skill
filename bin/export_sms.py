@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 import urllib.error
@@ -79,6 +78,25 @@ def build_payload(start_date: str | None, end_date: str | None, office_id: str |
     return payload
 
 
+def build_create_args(start_date: str | None, end_date: str | None, office_id: str | None) -> list[str]:
+    payload = build_payload(start_date, end_date, office_id)
+    args = [
+        "stats",
+        "stats.create",
+        "--export-type",
+        str(payload["export_type"]),
+        "--stat-type",
+        str(payload["stat_type"]),
+    ]
+    if "days_ago_start" in payload:
+        args.extend(["--days-ago-start", str(payload["days_ago_start"])])
+    if "days_ago_end" in payload:
+        args.extend(["--days-ago-end", str(payload["days_ago_end"])])
+    if "office_id" in payload:
+        args.extend(["--office-id", str(payload["office_id"])])
+    return args
+
+
 
 def download_file(url: str, output_path: str) -> None:
     try:
@@ -131,10 +149,9 @@ def main() -> int:
         require_generated_cli()
         require_api_key()
 
-        payload = build_payload(args.start_date, args.end_date, args.office_id)
-        created = run_generated_json(["sms", "export", "--data", json.dumps(payload)])
+        created = run_generated_json(build_create_args(args.start_date, args.end_date, args.office_id))
 
-        request_id = created.get("request_id")
+        request_id = created.get("request_id") or created.get("id")
         if not request_id:
             raise WrapperError(f"Export request did not return request_id: {created}")
 

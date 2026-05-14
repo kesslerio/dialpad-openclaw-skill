@@ -20,6 +20,7 @@ import list_sms_thread
 import lookup_contact
 import make_call
 import send_sms
+import sync_sms_export
 import update_contact
 from _dialpad_compat import ERROR_CODES, WrapperError
 
@@ -658,6 +659,62 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(summary["outbound_count"], 1)
         self.assertTrue(summary["has_outbound"])
         self.assertEqual(len(summary["messages"]), 5)
+
+    def test_sync_sms_export_json_dry_run_imports_export_rows(self):
+        class FakeConn:
+            def close(self):
+                pass
+
+        csv_path = Path("/tmp/test-sync-sms-export.csv")
+        csv_path.write_text(
+            '"date","message_id","name","email","target_type","target_id","sender_id","direction","to_phone","from_phone","encrypted_text","encrypted_aes_text","mms","timezone"\n'
+            '"2026-05-08 03:17:13.418699","6676061264355328","Sales","","department","6500922273529856","6500922273529856","internal","+16694009313","+14155201316","","","","UTC"\n',
+            encoding="utf-8",
+        )
+
+        with patch("sync_sms_export.init_db", return_value=FakeConn()), \
+                patch("sync_sms_export.message_exists", return_value=False), \
+                patch("sync_sms_export.store_message") as store_message:
+            code, out, err = self._run(
+                sync_sms_export,
+                ["bin/sync_sms_export.py", "--input-csv", str(csv_path), "--dry-run", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "sync_sms_export.sync")
+        self.assertEqual(parsed["data"]["rows"], 1)
+        self.assertEqual(parsed["data"]["imported"], 1)
+        store_message.assert_not_called()
+
+    def test_sync_sms_export_skips_existing_rows_to_preserve_webhook_text(self):
+        class FakeConn:
+            def close(self):
+                pass
+
+        csv_path = Path("/tmp/test-sync-sms-export-existing.csv")
+        csv_path.write_text(
+            '"date","message_id","name","email","target_type","target_id","sender_id","direction","to_phone","from_phone","encrypted_text","encrypted_aes_text","mms","timezone"\n'
+            '"2026-05-08 03:17:13.418699","6676061264355328","Sales","","department","6500922273529856","6500922273529856","internal","+16694009313","+14155201316","","","","UTC"\n',
+            encoding="utf-8",
+        )
+
+        with patch("sync_sms_export.init_db", return_value=FakeConn()), \
+                patch("sync_sms_export.message_exists", return_value=True), \
+                patch("sync_sms_export.store_message") as store_message:
+            code, out, err = self._run(
+                sync_sms_export,
+                ["bin/sync_sms_export.py", "--input-csv", str(csv_path), "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "sync_sms_export.sync")
+        self.assertEqual(parsed["data"]["imported"], 0)
+        self.assertEqual(parsed["data"]["skipped_existing"], 1)
+        store_message.assert_not_called()
 
     def test_update_contact_argparse_failure_is_json_envelope(self):
         code, out, err = self._run(update_contact, ["bin/update_contact.py", "--json"])

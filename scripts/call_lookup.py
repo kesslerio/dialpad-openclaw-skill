@@ -27,7 +27,7 @@ class DialpadApiError(Exception):
 
 
 def require_api_key() -> str:
-    api_key = os.environ.get("DIALPAD_API_KEY")
+    api_key = os.environ.get("DIALPAD_API_KEY") or os.environ.get("DIALPAD_TOKEN")
     if not api_key:
         raise DialpadConfigError("DIALPAD_API_KEY environment variable not set")
     return api_key

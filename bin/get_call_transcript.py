@@ -20,6 +20,9 @@ from _dialpad_compat import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "get_transcript.py"
+SCRIPTS_PATH = str(ROOT / "scripts")
+if SCRIPTS_PATH not in sys.path:
+    sys.path.append(SCRIPTS_PATH)
 
 
 def _load_script_module():
@@ -61,6 +64,11 @@ def _wrapper_error_from_dialpad(exc: Exception) -> WrapperError:
     if isinstance(exc, DialpadConfigError):
         return WrapperError(str(exc), code="auth_missing", retryable=False)
     if isinstance(exc, DialpadApiError):
+        lowered = str(exc).lower()
+        if "no calls found" in lowered:
+            return WrapperError(str(exc), code="not_found", retryable=False)
+        if "missing call_id" in lowered or "either --call-id or --last" in lowered:
+            return WrapperError(str(exc), code="validation_failed", retryable=False)
         return WrapperError(str(exc), code="upstream_error", retryable=True)
     return WrapperError(str(exc))
 

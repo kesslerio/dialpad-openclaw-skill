@@ -125,6 +125,21 @@ class GetCallTranscriptWrapperTests(unittest.TestCase):
         self.assertFalse(parsed["ok"])
         self.assertEqual(parsed["error"]["code"], "upstream_error")
 
+    def test_recent_call_selection_failures_are_not_found(self):
+        with patch.object(get_call_transcript_wrapper, "require_api_key"), patch.object(
+            get_call_transcript_wrapper,
+            "resolve_call_transcript",
+            side_effect=get_call_transcript_wrapper.DialpadApiError("No calls found matching --with 'Jane'"),
+        ):
+            code, out, err = self._run(["bin/get_call_transcript.py", "--last", "--with", "Jane", "--json"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = json.loads(out)
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["error"]["code"], "not_found")
+        self.assertFalse(parsed["error"]["retryable"])
+
 
 if __name__ == "__main__":
     unittest.main()

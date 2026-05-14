@@ -79,7 +79,7 @@ class ListCallsTests(unittest.TestCase):
                 "duration": 65000,
                 "direction": "outbound",
                 "state": "completed",
-                "contact": {"name": "Taylor Prospect"},
+                "contact": {"name": "Taylor Prospect", "phone": "+14155550123"},
                 "entry_point_target": {"name": "Sales Line"},
                 "recording_url": "https://example.com/recording.mp3",
                 "disposition_name": "demo_scheduled",
@@ -89,6 +89,7 @@ class ListCallsTests(unittest.TestCase):
         self.assertEqual(summary["call_id"], "call-123")
         self.assertEqual(summary["started_at"], "2025-03-25T11:00:00Z")
         self.assertEqual(summary["contact"], "Taylor Prospect")
+        self.assertEqual(summary["contact_phone"], "+14155550123")
         self.assertEqual(summary["direction"], "outbound")
         self.assertEqual(summary["duration_seconds"], 65)
         self.assertEqual(summary["duration_display"], "1:05")
@@ -96,6 +97,20 @@ class ListCallsTests(unittest.TestCase):
         self.assertEqual(summary["line"], "Sales Line")
         self.assertEqual(summary["recording_url"], "https://example.com/recording.mp3")
         self.assertEqual(summary["outcome"], "demo_scheduled")
+
+    def test_to_call_summary_falls_back_to_external_number_for_contact_phone(self):
+        summary = to_call_summary(
+            {
+                "date_started": 1742900400000,
+                "duration": 0,
+                "direction": "inbound",
+                "state": "hangup",
+                "external_number": "+17276880795",
+            }
+        )
+
+        self.assertEqual(summary["contact"], "+17276880795")
+        self.assertEqual(summary["contact_phone"], "+17276880795")
 
 
 if __name__ == "__main__":

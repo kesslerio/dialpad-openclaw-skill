@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import sqlite3
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import create_contact
 import create_sms_webhook
 import export_sms
+import list_sms_thread
 import lookup_contact
 import make_call
 import send_sms
@@ -431,7 +434,11 @@ class JsonContractTests(unittest.TestCase):
         call_count = {"n": 0}
 
         def fake_run(cmd: list[str]):
-            if cmd[:2] == ["sms", "export"]:
+            if cmd[:2] == ["stats", "stats.create"]:
+                self.assertIn("--export-type", cmd)
+                self.assertIn("records", cmd)
+                self.assertIn("--stat-type", cmd)
+                self.assertIn("texts", cmd)
                 return {"request_id": "r1"}
             if cmd[:2] == ["stats", "stats.get"]:
                 call_count["n"] += 1
@@ -447,6 +454,43 @@ class JsonContractTests(unittest.TestCase):
         parsed = self._parse(out)
         self._assert_success(parsed, "export_sms.export")
         self.assertIn("progress", parsed["meta"])
+
+    def test_export_sms_date_filters_become_stats_cli_options(self):
+        commands = []
+
+        def fake_run(cmd: list[str]):
+            commands.append(cmd)
+            if cmd[:2] == ["stats", "stats.create"]:
+                return {"id": "r1"}
+            if cmd[:2] == ["stats", "stats.get"]:
+                return {"status": "complete"}
+            raise AssertionError(cmd)
+
+        with patch("export_sms.require_generated_cli"), \
+                patch("export_sms.require_api_key"), \
+                patch("export_sms.run_generated_json", side_effect=fake_run), \
+                patch("export_sms.date") as fake_date:
+            fake_date.today.return_value = date(2026, 5, 14)
+            code, out, err = self._run(
+                export_sms,
+                ["bin/export_sms.py", "--start-date", "2026-05-13", "--end-date", "2026-05-14", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self._assert_success(self._parse(out), "export_sms.export")
+        self.assertEqual(commands[0], [
+            "stats",
+            "stats.create",
+            "--export-type",
+            "records",
+            "--stat-type",
+            "texts",
+            "--days-ago-start",
+            "1",
+            "--days-ago-end",
+            "0",
+        ])
 
     def test_export_sms_timeout_maps_to_timeout(self):
         with patch("export_sms.require_generated_cli"), \
@@ -467,6 +511,153 @@ class JsonContractTests(unittest.TestCase):
         parsed = self._parse(out)
         self._assert_error(parsed, "list_calls.list")
         self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
+    def test_list_sms_thread_json_success_reports_outbound_state(self):
+        class FakeConn:
+            def close(self):
+                pass
+
+        messages = [
+            {
+                "dialpad_id": 1,
+                "direction": "inbound",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "contact_name": "Jane Doe",
+                "timestamp": 1770000000000,
+                "text": "Question",
+            },
+            {
+                "dialpad_id": 2,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": "+14155550123",
+                "contact_name": "Jane Doe",
+                "timestamp": 1770000060000,
+                "message_status": "sent",
+                "delivery_result": "success",
+                "text": "Answer",
+            },
+        ]
+
+        with patch("list_sms_thread.init_db", return_value=FakeConn()), \
+                patch(
+                    "list_sms_thread.load_thread_summary",
+                    return_value={
+                        "phone": "+14155550123",
+                        "count": 2,
+                        "outbound_count": 1,
+                        "inbound_count": 1,
+                        "has_outbound": True,
+                        "latest_outbound_timestamp": 1770000060000,
+                        "latest_outbound_timestamp_utc": "2026-02-02T08:41:00Z",
+                        "messages": [list_sms_thread._summarize_message(message) for message in messages],
+                    },
+                ):
+            code, out, err = self._run(
+                list_sms_thread,
+                ["bin/list_sms_thread.py", "--phone", "+14155550123", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "list_sms_thread.list")
+        self.assertEqual(parsed["data"]["phone"], "+14155550123")
+        self.assertEqual(parsed["data"]["count"], 2)
+        self.assertEqual(parsed["data"]["outbound_count"], 1)
+        self.assertTrue(parsed["data"]["has_outbound"])
+
+    def test_list_sms_thread_empty_thread_is_success(self):
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch("list_sms_thread.init_db", return_value=FakeConn()), \
+                patch(
+                    "list_sms_thread.load_thread_summary",
+                    return_value={
+                        "phone": "+14155550123",
+                        "count": 0,
+                        "outbound_count": 0,
+                        "inbound_count": 0,
+                        "has_outbound": False,
+                        "latest_outbound_timestamp": None,
+                        "latest_outbound_timestamp_utc": None,
+                        "messages": [],
+                    },
+                ):
+            code, out, err = self._run(
+                list_sms_thread,
+                ["bin/list_sms_thread.py", "--phone", "+14155550123", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "list_sms_thread.list")
+        self.assertEqual(parsed["data"]["count"], 0)
+        self.assertFalse(parsed["data"]["has_outbound"])
+
+    def test_list_sms_thread_argparse_failure_is_json_envelope(self):
+        code, out, err = self._run(
+            list_sms_thread,
+            ["bin/list_sms_thread.py", "--phone", "+14155550123", "--limit", "0", "--json"],
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "list_sms_thread.list")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
+    def test_list_sms_thread_counts_full_thread_not_only_returned_slice(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                dialpad_id INTEGER,
+                contact_number TEXT,
+                contact_name TEXT,
+                direction TEXT,
+                from_number TEXT,
+                to_number TEXT,
+                text TEXT,
+                message_status TEXT,
+                delivery_result TEXT,
+                timestamp INTEGER
+            )
+            """
+        )
+        for idx in range(25):
+            conn.execute(
+                """
+                INSERT INTO messages (
+                    dialpad_id, contact_number, contact_name, direction,
+                    from_number, to_number, text, timestamp
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    idx + 1,
+                    "+14155550123",
+                    "Jane Doe",
+                    "outbound" if idx == 0 else "inbound",
+                    "+14155201316" if idx == 0 else "+14155550123",
+                    "+14155550123" if idx == 0 else "+14155201316",
+                    f"message {idx}",
+                    1770000000000 + idx,
+                ),
+            )
+        conn.commit()
+
+        summary = list_sms_thread.load_thread_summary(conn, "+14155550123", limit=5)
+
+        self.assertEqual(summary["count"], 25)
+        self.assertEqual(summary["outbound_count"], 1)
+        self.assertTrue(summary["has_outbound"])
+        self.assertEqual(len(summary["messages"]), 5)
 
     def test_update_contact_argparse_failure_is_json_envelope(self):
         code, out, err = self._run(update_contact, ["bin/update_contact.py", "--json"])

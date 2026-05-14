@@ -234,6 +234,19 @@ def get_caller(call: dict[str, Any]) -> str:
     )
 
 
+def get_caller_phone(call: dict[str, Any]) -> str | None:
+    contact = call.get("contact") or {}
+    if not isinstance(contact, dict):
+        contact = {}
+    return pick_optional_string(
+        [
+            contact.get("phone"),
+            call.get("external_number"),
+            call.get("phone_number"),
+        ]
+    )
+
+
 def get_direction(call: dict[str, Any]) -> str:
     direction = str(call.get("direction") or "").strip().lower()
     if direction in {"inbound", "outbound"}:
@@ -285,6 +298,7 @@ def to_call_summary(call: dict[str, Any]) -> dict[str, object]:
         "call_id": get_call_id(call),
         "started_at": get_started_at_iso(call),
         "contact": get_caller(call),
+        "contact_phone": get_caller_phone(call),
         "direction": get_direction(call),
         "duration_seconds": duration_seconds,
         "duration_display": format_duration(duration_seconds),

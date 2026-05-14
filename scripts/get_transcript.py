@@ -86,12 +86,14 @@ def _available_result(
     transcript_text: str,
     *,
     source: str,
+    transcript_review_url: str | None = None,
     call: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "call_id": call_id,
         "available": True,
         "transcript_text": transcript_text,
+        "transcript_review_url": transcript_review_url,
         "source": source,
         "unavailable_reason": None,
     }
@@ -105,18 +107,36 @@ def _unavailable_result(
     *,
     reason: str,
     source: str | None = None,
+    transcript_review_url: str | None = None,
     call: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "call_id": call_id,
         "available": False,
         "transcript_text": None,
+        "transcript_review_url": transcript_review_url,
         "source": source,
         "unavailable_reason": reason,
     }
     if call:
         result["call"] = _call_metadata(call)
     return result
+
+
+def format_transcript_review_url(payload: dict[str, Any]) -> str | None:
+    for key in ("url", "transcript_url", "review_url", "call_review_url", "call_review_share_link"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def get_transcript_review_url(call_id: str) -> str | None:
+    try:
+        payload = api_get(f"/transcripts/{call_id}/url")
+    except DialpadApiError:
+        return None
+    return format_transcript_review_url(payload)
 
 
 def get_call_transcript(call_id: str, call: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -126,6 +146,8 @@ def get_call_transcript(call_id: str, call: dict[str, Any] | None = None) -> dic
     ``available: False`` instead of raising. API/configuration failures still
     raise ``DialpadApiError`` / ``DialpadConfigError``.
     """
+    transcript_review_url = get_transcript_review_url(call_id)
+
     try:
         transcript_payload = api_get(f"/transcripts/{call_id}")
     except DialpadApiError as exc:
@@ -134,20 +156,44 @@ def get_call_transcript(call_id: str, call: dict[str, Any] | None = None) -> dic
     else:
         transcript_text = format_transcript(transcript_payload)
         if transcript_text:
-            return _available_result(call_id, transcript_text, source="transcripts", call=call)
+            return _available_result(
+                call_id,
+                transcript_text,
+                source="transcripts",
+                transcript_review_url=transcript_review_url,
+                call=call,
+            )
 
     try:
         call_payload = api_get(f"/call/{call_id}")
     except DialpadApiError as exc:
         if exc.status_code == 404:
-            return _unavailable_result(call_id, reason="not_found", source="call", call=call)
+            return _unavailable_result(
+                call_id,
+                reason="not_found",
+                source="call",
+                transcript_review_url=transcript_review_url,
+                call=call,
+            )
         raise
 
     transcript_text = format_transcript(call_payload)
     merged_call = call_payload if isinstance(call_payload, dict) else call
     if transcript_text:
-        return _available_result(call_id, transcript_text, source="call", call=merged_call)
-    return _unavailable_result(call_id, reason="no_transcript", source="call", call=merged_call)
+        return _available_result(
+            call_id,
+            transcript_text,
+            source="call",
+            transcript_review_url=transcript_review_url,
+            call=merged_call,
+        )
+    return _unavailable_result(
+        call_id,
+        reason="no_transcript",
+        source="call",
+        transcript_review_url=transcript_review_url,
+        call=merged_call,
+    )
 
 
 def resolve_call_transcript(call_id: str | None, use_last: bool, with_value: str | None) -> dict[str, Any]:

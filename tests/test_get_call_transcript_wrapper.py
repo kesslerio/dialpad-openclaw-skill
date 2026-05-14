@@ -37,6 +37,7 @@ class GetCallTranscriptWrapperTests(unittest.TestCase):
                 "call_id": "call-123",
                 "available": True,
                 "transcript_text": "Transcript body",
+                "transcript_review_url": "https://dialpad.com/review/call-123",
                 "source": "transcripts",
                 "unavailable_reason": None,
                 "call": {"call_id": "call-123", "external_number": "+14155550123"},
@@ -52,6 +53,7 @@ class GetCallTranscriptWrapperTests(unittest.TestCase):
         self.assertEqual(parsed["data"]["call_id"], "call-123")
         self.assertTrue(parsed["data"]["available"])
         self.assertEqual(parsed["data"]["transcript_text"], "Transcript body")
+        self.assertEqual(parsed["data"]["transcript_review_url"], "https://dialpad.com/review/call-123")
         self.assertNotIn("recap", parsed["data"])
         self.assertNotIn("suggested_reply", parsed["data"])
 
@@ -63,6 +65,7 @@ class GetCallTranscriptWrapperTests(unittest.TestCase):
                 "call_id": "call-123",
                 "available": False,
                 "transcript_text": None,
+                "transcript_review_url": None,
                 "source": "call",
                 "unavailable_reason": "no_transcript",
             },
@@ -85,6 +88,7 @@ class GetCallTranscriptWrapperTests(unittest.TestCase):
                 "call_id": "call-123",
                 "available": True,
                 "transcript_text": "Transcript body",
+                "transcript_review_url": None,
                 "source": "transcripts",
                 "unavailable_reason": None,
             },

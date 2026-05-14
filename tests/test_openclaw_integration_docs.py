@@ -92,3 +92,6 @@ def test_docs_expose_agent_facing_call_transcript_wrapper():
     assert "bin/get_call_transcript.py" in architecture
     assert "transcript-only" in skill
     assert "explicit unavailable" in api_reference
+    assert "/api/v2/transcripts/{call_id}" in skill
+    assert "/api/v2/transcripts/{call_id}/url" in api_reference
+    assert "/api/v2/transcript/{id}" in api_reference

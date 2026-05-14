@@ -530,6 +530,7 @@ class JsonContractTests(unittest.TestCase):
                         "call_id": "call-123",
                         "available": True,
                         "transcript_text": "Transcript body",
+                        "transcript_review_url": None,
                         "source": "transcripts",
                         "unavailable_reason": None,
                     },

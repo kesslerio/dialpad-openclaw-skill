@@ -27,6 +27,7 @@ PROFILE_ENV_KEYS = {
     "sales": "DIALPAD_PROFILE_SALES_FROM",
 }
 COMMAND_IDS = {
+    "get_call_transcript.get": "get_call_transcript.get",
     "list_calls.list": "list_calls.list",
     "send_sms.send": "send_sms.send",
     "make_call.call": "make_call.call",

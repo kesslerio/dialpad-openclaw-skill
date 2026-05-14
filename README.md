@@ -50,6 +50,10 @@ bin/make_call.py --to "+14155551234" --text "This is a test call."
 bin/list_calls.py --today --limit 20
 bin/list_calls.py --hours 6 --missed --json
 
+# Get a call transcript
+bin/get_call_transcript.py --call-id "call_123" --json
+bin/get_call_transcript.py --last --with "+14155551234" --json
+
 # Check whether a contact already has local SMS replies
 bin/list_sms_thread.py --phone "+14155551234" --json
 
@@ -160,6 +164,7 @@ dialpad-openclaw-skill/
 ├── SKILL.md
 ├── README.md
 ├── bin/
+│   ├── get_call_transcript.py
 │   ├── list_calls.py
 ├── generated/
 ├── scripts/

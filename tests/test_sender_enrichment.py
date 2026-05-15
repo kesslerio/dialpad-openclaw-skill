@@ -1354,6 +1354,69 @@ def test_sales_crm_context_compacts_scalar_allowlisted_values(monkeypatch):
     assert crm_context["summary"] == "Demo scheduled ShapeScale demo Demo Scheduled Evolve from within medspa"
 
 
+def test_sales_calendar_context_rejects_nested_summary(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "summary": {"raw": "secret-calendar"},
+            "title": ["secret-title"],
+            "startsInMinutes": {"raw": "secret-start"},
+        },
+    )
+
+    calendar_context = webhook_server.lookup_sales_calendar_context(normalized_event)
+
+    assert calendar_context == {"usable": False, "status": "empty"}
+    assert "secret" not in json.dumps(calendar_context)
+
+
+def test_sales_calendar_context_compacts_scalar_summary(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "title": " ShapeScale   Demo ",
+            "startsInMinutes": {"raw": "secret-start"},
+        },
+    )
+
+    calendar_context = webhook_server.lookup_sales_calendar_context(normalized_event)
+
+    assert calendar_context == {
+        "usable": True,
+        "status": "ok",
+        "basis": "google_calendar",
+        "summary": "ShapeScale Demo",
+        "startsInMinutes": None,
+    }
+    assert "secret" not in json.dumps(calendar_context)
+
+
 def test_known_recent_sales_sms_creates_context_approval_draft(monkeypatch, tmp_path):
     sms_db = tmp_path / "sms.db"
     approval_db = tmp_path / "approvals.db"

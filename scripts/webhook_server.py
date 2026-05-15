@@ -2297,17 +2297,20 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
     if result.get("usable") is not True:
         return {"usable": False, "status": result.get("status") or "unavailable"}
 
-    summary = str(result.get("summary") or result.get("title") or "").strip()
+    summary = _compact_context_scalar(result.get("summary"), limit=200) or _compact_context_scalar(result.get("title"), limit=200)
     if not summary:
         return {"usable": False, "status": "empty"}
     if not customer_safe_knowledge_text(summary):
         return {"usable": False, "status": "unsafe_output"}
+    starts_in_minutes = result.get("startsInMinutes")
+    if isinstance(starts_in_minutes, (dict, list, tuple, set)):
+        starts_in_minutes = None
     return {
         "usable": True,
         "status": result.get("status") or "ok",
         "basis": result.get("basis") or "google_calendar",
-        "summary": summary[:200],
-        "startsInMinutes": result.get("startsInMinutes"),
+        "summary": summary,
+        "startsInMinutes": starts_in_minutes,
     }
 
 

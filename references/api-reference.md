@@ -199,6 +199,8 @@ Behavior notes:
 - First-contact sales-line replies create approval drafts when `DIALPAD_AUTO_REPLY_ENABLED` is truthy; they do not send SMS directly
 - Low-confidence Sales SMS and missed calls, including payload-only contact names, may create generic approval drafts. Low confidence suppresses personalization and CRM claims; it does not suppress the approval-gated draft by itself.
 - Eligible Sales SMS may create ShapeScale knowledge-backed approval drafts for obvious product, booking, link, and pricing questions. Recent Dialpad SMS history is used only to resolve active-thread references, qmd-backed ShapeScale knowledge supplies factual answers, customer-facing SMS text stays citation-free, and unavailable or ambiguous knowledge fails closed to existing generic, no-draft, or human-only behavior.
+- High-confidence fresh Sales SMS may create CRM-aware approval drafts from compact Attio context. Calendar lookup is targeted to obvious meeting logistics, such as lateness, joining, rescheduling, or meeting links; it is not run for every inbound SMS.
+- Missing, ambiguous, or unavailable CRM/calendar context fails closed to existing context-aware, generic, no-draft, or human-only behavior and must not produce unsupported meeting, owner, deal, or relationship claims.
 - Known contacts may create context-aware approval drafts only when `inboundContext.identityConfidence` is high and recent SMS/call continuity is no older than 14 days
 - Voicemail notifications remain Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
 - The local OpenClaw gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace

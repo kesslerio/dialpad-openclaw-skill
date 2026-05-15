@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,11 +119,18 @@ def main() -> int:
         if not phone:
             raise WrapperError("--phone is required", code="invalid_argument", retryable=False)
 
-        conn = init_db()
         try:
-            summary = load_thread_summary(conn, phone, limit=limit)
-        finally:
-            conn.close()
+            conn = init_db()
+            try:
+                summary = load_thread_summary(conn, phone, limit=limit)
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error) as exc:
+            raise WrapperError(
+                f"Failed to read local SMS history database: {exc}",
+                code="internal_error",
+                retryable=False,
+            ) from exc
 
         if json_mode:
             emit_success(command, wrapper, summary)
@@ -137,6 +145,11 @@ def main() -> int:
             print(f"[{when}] {arrow}: {preview}")
         return 0
     except WrapperError as err:
+        if json_mode:
+            return handle_wrapper_exception(command, wrapper, err, True)
+        print_wrapper_error(err)
+        return 2
+    except Exception as err:  # noqa: BLE001 - wrappers must return structured JSON in --json mode.
         if json_mode:
             return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import sys
@@ -26,6 +27,13 @@ class SmsSqliteCacheCleanupTests(unittest.TestCase):
 
     def _restore_db_path(self):
         sms_sqlite.DB_PATH = self.original_db_path
+
+    def test_db_path_respects_environment_override(self):
+        custom_path = Path(self.temp_dir.name) / "custom-sms.db"
+        with patch.dict("os.environ", {"DIALPAD_SMS_DB": str(custom_path)}):
+            resolved = sms_sqlite.resolve_db_path()
+
+        self.assertEqual(resolved, custom_path)
 
     def _store(self, dialpad_id: int, phone: str, name: str, ts: int) -> None:
         payload = {

@@ -20,6 +20,9 @@ cd dialpad-openclaw-skill
 # Required auth (canonical)
 export DIALPAD_API_KEY="your-api-key"
 
+# Optional local SMS history DB override
+export DIALPAD_SMS_DB="/home/art/niemand/logs/sms.db"
+
 # Optional premium TTS
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
 ```

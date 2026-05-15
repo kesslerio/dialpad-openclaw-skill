@@ -2247,7 +2247,7 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
 
     summary = " ".join(str(result.get(key) or "").strip() for key in ("summary", "deal", "stage", "company") if result.get(key))
     if not summary:
-        summary = str(result)[:300]
+        return {"usable": False, "status": "empty"}
     if not customer_safe_knowledge_text(summary):
         return {"usable": False, "status": "unsafe_output"}
     return {

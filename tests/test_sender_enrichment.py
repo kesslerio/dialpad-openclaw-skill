@@ -1264,6 +1264,32 @@ def test_sales_context_lookup_failures_store_only_status(monkeypatch):
     assert "secret" not in json.dumps({"crm": crm_context, "calendar": calendar_context})
 
 
+def test_sales_crm_context_without_allowlisted_fields_fails_closed(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "Thanks",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "raw": {"internal_id": "secret-crm-record"},
+        },
+    )
+
+    crm_context = webhook_server.lookup_sales_crm_context(normalized_event)
+
+    assert crm_context == {"usable": False, "status": "empty"}
+    assert "secret" not in json.dumps(crm_context)
+
+
 def test_known_recent_sales_sms_creates_context_approval_draft(monkeypatch, tmp_path):
     sms_db = tmp_path / "sms.db"
     approval_db = tmp_path / "approvals.db"

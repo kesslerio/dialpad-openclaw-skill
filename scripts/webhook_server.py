@@ -2226,6 +2226,15 @@ def meeting_logistics_intent(text):
     return any(re.search(pattern, body) for pattern in patterns)
 
 
+def _compact_context_scalar(value, limit=120):
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return None
+    text = " ".join(str(value).split())
+    if not text:
+        return None
+    return text[:limit]
+
+
 def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
     """Return compact Attio/CRM context for high-confidence Sales SMS drafts."""
     sender_enrichment = sender_enrichment or {}
@@ -2245,7 +2254,11 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
     if result.get("usable") is not True:
         return {"usable": False, "status": result.get("status") or "unavailable"}
 
-    summary = " ".join(str(result.get(key) or "").strip() for key in ("summary", "deal", "stage", "company") if result.get(key))
+    context_fields = {
+        key: _compact_context_scalar(result.get(key), limit=300 if key == "summary" else 120)
+        for key in ("summary", "deal", "stage", "company", "owner")
+    }
+    summary = " ".join(context_fields[key] for key in ("summary", "deal", "stage", "company") if context_fields[key])
     if not summary:
         return {"usable": False, "status": "empty"}
     if not customer_safe_knowledge_text(summary):
@@ -2254,10 +2267,10 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
         "usable": True,
         "status": result.get("status") or "ok",
         "basis": result.get("basis") or "attio",
-        "company": result.get("company"),
-        "deal": result.get("deal"),
-        "stage": result.get("stage"),
-        "owner": result.get("owner"),
+        "company": context_fields["company"],
+        "deal": context_fields["deal"],
+        "stage": context_fields["stage"],
+        "owner": context_fields["owner"],
         "summary": summary[:300],
     }
 

@@ -656,6 +656,23 @@ class JsonContractTests(unittest.TestCase):
         self._assert_error(parsed, "list_sms_thread.list")
         self.assertEqual(parsed["error"]["code"], "invalid_argument")
 
+    def test_list_sms_thread_db_failure_is_json_envelope(self):
+        with patch("list_sms_thread.init_db", side_effect=PermissionError("permission denied")):
+            code, out, err = self._run(
+                list_sms_thread,
+                ["bin/list_sms_thread.py", "--phone", "+14155550123", "--json"],
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "list_sms_thread.list")
+        self.assertEqual(parsed["error"]["code"], "internal_error")
+        self.assertFalse(parsed["error"]["retryable"])
+        self.assertIn("Failed to read local SMS history database", parsed["error"]["message"])
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("Traceback", err)
+
     def test_list_sms_thread_counts_full_thread_not_only_returned_slice(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

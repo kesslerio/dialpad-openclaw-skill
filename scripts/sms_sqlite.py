@@ -5,6 +5,7 @@ Single-file database with full-text search capabilities
 """
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +35,11 @@ def redact_preview(text, **kwargs):
     return text
 
 # Database path
-DB_PATH = Path("/home/art/clawd/logs/sms.db")
+def resolve_db_path() -> Path:
+    return Path(os.environ.get("DIALPAD_SMS_DB", "/home/art/clawd/logs/sms.db")).expanduser()
+
+
+DB_PATH = resolve_db_path()
 LEGACY_THREADS_DIR = Path("/home/art/clawd/logs/sms_threads")
 LEGACY_LOG = Path("/home/art/clawd/logs/dialpad_sms.jsonl")
 

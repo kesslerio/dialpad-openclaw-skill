@@ -896,6 +896,540 @@ def test_failed_rich_lookup_is_cached_for_generic_fallback(monkeypatch):
     assert len(calls) == 1
 
 
+def test_known_sales_sms_creates_crm_aware_approval_draft(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": "Gabriela Valle (Evolve from within medspa)",
+            "first_name": "Gabriela",
+            "last_name": "Valle",
+            "company": "Evolve from within medspa",
+            "job_title": None,
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Evolve from within medspa",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Scheduled",
+            "owner": "Martin",
+            "summary": "Demo Scheduled with Evolve from within medspa",
+        },
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: {"usable": False, "status": "not_applicable"},
+    )
+
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 5001,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "Looking forward to our ShapeScale demo.",
+                "created_date": now_ms - 60 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    telegram_messages = []
+    hook_calls = []
+    sms_calls = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_messages.append(text) or True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: (
+            hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display}) or
+            (True, "http_200")
+        ),
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "dialpad_send_sms",
+        lambda *args, **kwargs: sms_calls.append((args, kwargs)) or {"id": "msg-1"},
+    )
+
+    payload = {
+        "id": 5002,
+        "direction": "inbound",
+        "from_number": "+15109125052",
+        "to_number": ["+14155201316"],
+        "text": "Thanks, sounds good",
+        "created_date": now_ms,
+        "contact": {"name": "Gabriela Valle"},
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    normalized_sms = hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    message = normalized_sms["auto_reply"]["message"]
+    assert status["code"] == 200
+    assert sms_calls == []
+    assert inbound_context["draftMode"] == "crm_aware"
+    assert inbound_context["richDraftBasis"] == "attio_crm"
+    assert inbound_context["richDraftCategory"] == "crm_context"
+    assert normalized_sms["auto_reply"]["draftCreated"] is True
+    assert normalized_sms["auto_reply"]["richReply"]["basis"] == "attio_crm"
+    assert normalized_sms["auto_reply"]["richReply"]["crmContext"]["company"] == "Evolve from within medspa"
+    assert "raw" not in json.dumps(normalized_sms["auto_reply"]["richReply"]).lower()
+    assert "Evolve from within medspa" in message
+    assert "recent ShapeScale conversation" not in message
+    assert response["auto_reply_status"] == "draft_created"
+    assert response["auto_reply_draft_id"]
+    assert "CRM-aware" in telegram_messages[0]
+    assert "SMS approval draft" in telegram_messages[0]
+
+
+def test_running_late_sms_creates_meeting_aware_approval_draft(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": "Gabriela Valle (Evolve from within medspa)",
+            "first_name": "Gabriela",
+            "last_name": "Valle",
+            "company": "Evolve from within medspa",
+            "job_title": None,
+            "status": "resolved",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Evolve from within medspa",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Scheduled",
+            "owner": "Martin",
+            "summary": "Demo Scheduled with Evolve from within medspa",
+        },
+    )
+    calendar_calls = []
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar",
+            "summary": "ShapeScale Demo - Evolve from within medspa",
+            "startsInMinutes": 0,
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 5101,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "See you on the demo shortly.",
+                "created_date": now_ms - 20 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    telegram_messages = []
+    hook_calls = []
+    sms_calls = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_messages.append(text) or True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: (
+            hook_calls.append({"normalized_sms": normalized_sms, "line_display": line_display}) or
+            (True, "http_200")
+        ),
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "dialpad_send_sms",
+        lambda *args, **kwargs: sms_calls.append((args, kwargs)) or {"id": "msg-1"},
+    )
+
+    payload = {
+        "id": 5102,
+        "direction": "inbound",
+        "from_number": "+15109125052",
+        "to_number": ["+14155201316"],
+        "text": "I'm running 5 min late",
+        "created_date": now_ms,
+        "contact": {"name": "Gabriela Valle"},
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    normalized_sms = hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    message = normalized_sms["auto_reply"]["message"]
+    assert status["code"] == 200
+    assert sms_calls == []
+    assert calendar_calls
+    assert inbound_context["draftMode"] == "meeting_aware"
+    assert inbound_context["richDraftBasis"] == "calendar_meeting"
+    assert inbound_context["richDraftCategory"] == "meeting_logistics"
+    assert normalized_sms["auto_reply"]["richReply"]["basis"] == "calendar_meeting"
+    assert normalized_sms["auto_reply"]["richReply"]["calendarContext"]["summary"] == "ShapeScale Demo - Evolve from within medspa"
+    assert "no worries" in message.lower()
+    assert "thanks for letting me know" in message.lower()
+    assert "recent ShapeScale conversation" not in message
+    assert response["auto_reply_status"] == "draft_created"
+    assert "meeting-aware" in telegram_messages[0]
+
+
+def test_meeting_logistics_without_calendar_match_falls_back_safely(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Gabriela Valle",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {"usable": True, "status": "ok", "basis": "attio", "company": "Evolve"},
+    )
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {"usable": False, "status": "not_found"}
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert calendar_calls
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_not_found"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is True
+    assert "recent ShapeScale conversation" in webhook_server.build_proactive_reply_message(normalized_event)
+
+
+def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    sender_enrichment = {
+        "contact_name": "Gabriela Valle",
+        "company": "Evolve from within medspa",
+    }
+    raw_results = [
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Evolve from within medspa",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Scheduled",
+            "owner": "Martin",
+            "summary": "Demo Scheduled",
+            "raw": {"internal_id": "secret-crm-record"},
+        },
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar",
+            "summary": "ShapeScale Demo - Evolve from within medspa",
+            "startsInMinutes": 0,
+            "attendees": ["internal@example.com"],
+            "raw": {"calendar_id": "secret-calendar"},
+        },
+    ]
+
+    monkeypatch.setattr(webhook_server, "_run_context_command", lambda *_args: raw_results.pop(0))
+
+    crm_context = webhook_server.lookup_sales_crm_context(normalized_event, sender_enrichment=sender_enrichment)
+    calendar_context = webhook_server.lookup_sales_calendar_context(
+        normalized_event,
+        crm_context=crm_context,
+        sender_enrichment=sender_enrichment,
+    )
+
+    assert crm_context == {
+        "usable": True,
+        "status": "ok",
+        "basis": "attio",
+        "company": "Evolve from within medspa",
+        "deal": "ShapeScale demo",
+        "stage": "Demo Scheduled",
+        "owner": "Martin",
+        "summary": "Demo Scheduled ShapeScale demo Demo Scheduled Evolve from within medspa",
+    }
+    assert calendar_context == {
+        "usable": True,
+        "status": "ok",
+        "basis": "google_calendar",
+        "summary": "ShapeScale Demo - Evolve from within medspa",
+        "startsInMinutes": 0,
+    }
+    assert "secret" not in json.dumps({"crm": crm_context, "calendar": calendar_context})
+
+
+def test_sales_context_lookup_failures_store_only_status(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    raw_failures = [
+        {"usable": False, "status": "not_found", "raw": {"internal_id": "secret-crm-record"}},
+        {"usable": False, "status": "not_found", "raw": {"calendar_id": "secret-calendar"}},
+    ]
+
+    monkeypatch.setattr(webhook_server, "_run_context_command", lambda *_args: raw_failures.pop(0))
+
+    crm_context = webhook_server.lookup_sales_crm_context(normalized_event)
+    calendar_context = webhook_server.lookup_sales_calendar_context(normalized_event)
+
+    assert crm_context == {"usable": False, "status": "not_found"}
+    assert calendar_context == {"usable": False, "status": "not_found"}
+    assert "secret" not in json.dumps({"crm": crm_context, "calendar": calendar_context})
+
+
+def test_sales_crm_context_without_allowlisted_fields_fails_closed(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "Thanks",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "raw": {"internal_id": "secret-crm-record"},
+        },
+    )
+
+    crm_context = webhook_server.lookup_sales_crm_context(normalized_event)
+
+    assert crm_context == {"usable": False, "status": "empty"}
+    assert "secret" not in json.dumps(crm_context)
+
+
+def test_sales_crm_context_rejects_nested_allowlisted_values(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "Thanks",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "summary": {"raw": "secret-summary"},
+            "company": {"name": "secret-company"},
+            "deal": ["secret-deal"],
+            "stage": {"name": "secret-stage"},
+            "owner": {"name": "secret-owner"},
+        },
+    )
+
+    crm_context = webhook_server.lookup_sales_crm_context(normalized_event)
+
+    assert crm_context == {"usable": False, "status": "empty"}
+    assert "secret" not in json.dumps(crm_context)
+
+
+def test_sales_crm_context_compacts_scalar_allowlisted_values(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "Thanks",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "summary": " Demo   scheduled ",
+            "company": " Evolve from within medspa ",
+            "deal": " ShapeScale demo ",
+            "stage": " Demo Scheduled ",
+            "owner": 12345,
+        },
+    )
+
+    crm_context = webhook_server.lookup_sales_crm_context(normalized_event)
+
+    assert crm_context["usable"] is True
+    assert crm_context["company"] == "Evolve from within medspa"
+    assert crm_context["deal"] == "ShapeScale demo"
+    assert crm_context["stage"] == "Demo Scheduled"
+    assert crm_context["owner"] == "12345"
+    assert crm_context["summary"] == "Demo scheduled ShapeScale demo Demo Scheduled Evolve from within medspa"
+
+
+def test_sales_calendar_context_rejects_nested_summary(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "summary": {"raw": "secret-calendar"},
+            "title": ["secret-title"],
+            "startsInMinutes": {"raw": "secret-start"},
+        },
+    )
+
+    calendar_context = webhook_server.lookup_sales_calendar_context(normalized_event)
+
+    assert calendar_context == {"usable": False, "status": "empty"}
+    assert "secret" not in json.dumps(calendar_context)
+
+
+def test_sales_calendar_context_compacts_scalar_summary(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "title": " ShapeScale   Demo ",
+            "startsInMinutes": {"raw": "secret-start"},
+        },
+    )
+
+    calendar_context = webhook_server.lookup_sales_calendar_context(normalized_event)
+
+    assert calendar_context == {
+        "usable": True,
+        "status": "ok",
+        "basis": "google_calendar",
+        "summary": "ShapeScale Demo",
+        "startsInMinutes": None,
+    }
+    assert "secret" not in json.dumps(calendar_context)
+
+
+def test_context_command_rejects_non_object_json_payload(monkeypatch):
+    class Completed:
+        returncode = 0
+        stdout = '[{"raw":"secret-record"}]'
+
+    monkeypatch.setattr(webhook_server.subprocess, "run", lambda *_args, **_kwargs: Completed())
+
+    result = webhook_server._run_context_command("context-command", "query")
+
+    assert result == {"usable": False, "status": "invalid_payload"}
+    assert "secret" not in json.dumps(result)
+
+
 def test_known_recent_sales_sms_creates_context_approval_draft(monkeypatch, tmp_path):
     sms_db = tmp_path / "sms.db"
     approval_db = tmp_path / "approvals.db"

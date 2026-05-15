@@ -76,6 +76,7 @@ Behavior:
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding still requires `OPENCLAW_HOOKS_CALL_ENABLED=1`
 - when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, eligible first-contact messages on the sales line `(415) 520-1316` create exact-text approval drafts instead of sending SMS directly, even when identity is low-confidence and the draft must stay generic
 - eligible Sales SMS may create ShapeScale knowledge-backed approval drafts for obvious product, booking, link, and pricing questions; recent Dialpad SMS history resolves active-thread references, qmd-backed ShapeScale knowledge supplies factual answers, customer-facing SMS text stays citation-free, and unavailable or ambiguous knowledge fails closed to existing generic, no-draft, or human-only behavior
+- high-confidence fresh Sales SMS may create CRM-aware approval drafts from compact Attio context; targeted calendar lookup is only for obvious meeting logistics such as lateness, joining, rescheduling, or meeting links, and ambiguous CRM/calendar context fails closed without unsupported claims
 - voicemail remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
 - explicit opt-out language creates no draft, invalidates pending drafts for that customer, and emits only a human-only Telegram notice
 - CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied by the operator approval surface

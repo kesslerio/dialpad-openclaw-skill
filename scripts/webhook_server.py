@@ -2177,7 +2177,7 @@ def _run_context_command(command, query):
         return {"usable": True, "status": "ok", "summary": output[:300]}
     if isinstance(payload, dict):
         return payload
-    return {"usable": True, "status": "ok", "summary": str(payload)[:300]}
+    return {"usable": False, "status": "invalid_payload"}
 
 
 def _context_name(sender_enrichment, normalized_event):

@@ -1417,6 +1417,19 @@ def test_sales_calendar_context_compacts_scalar_summary(monkeypatch):
     assert "secret" not in json.dumps(calendar_context)
 
 
+def test_context_command_rejects_non_object_json_payload(monkeypatch):
+    class Completed:
+        returncode = 0
+        stdout = '[{"raw":"secret-record"}]'
+
+    monkeypatch.setattr(webhook_server.subprocess, "run", lambda *_args, **_kwargs: Completed())
+
+    result = webhook_server._run_context_command("context-command", "query")
+
+    assert result == {"usable": False, "status": "invalid_payload"}
+    assert "secret" not in json.dumps(result)
+
+
 def test_known_recent_sales_sms_creates_context_approval_draft(monkeypatch, tmp_path):
     sms_db = tmp_path / "sms.db"
     approval_db = tmp_path / "approvals.db"

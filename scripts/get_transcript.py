@@ -29,10 +29,12 @@ def format_transcript(payload: dict[str, Any]) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
 
+    list_candidate_key = None
     list_candidates = []
-    for key in ("utterances", "segments", "items", "transcript"):
+    for key in ("utterances", "segments", "items", "lines", "transcript"):
         value = payload.get(key)
         if isinstance(value, list):
+            list_candidate_key = key
             list_candidates = value
             break
 
@@ -40,6 +42,9 @@ def format_transcript(payload: dict[str, Any]) -> str:
     for item in list_candidates:
         if not isinstance(item, dict):
             continue
+        if list_candidate_key == "lines" and item.get("type") and item.get("type") != "transcript":
+            continue
+
         text = (
             item.get("text")
             or item.get("transcript")
@@ -51,6 +56,7 @@ def format_transcript(payload: dict[str, Any]) -> str:
         speaker = (
             item.get("speaker")
             or item.get("speaker_name")
+            or item.get("name")
             or item.get("participant")
             or item.get("role")
         )

@@ -30,6 +30,42 @@ class GetTranscriptTests(unittest.TestCase):
             "Agent: Hello\nProspect: I have a question",
         )
 
+    def test_format_transcript_reads_dialpad_lines(self):
+        payload = {
+            "call_id": "call-123",
+            "lines": [
+                {
+                    "type": "moment",
+                    "name": "Agent",
+                    "content": "whole_call_summary_fragment",
+                },
+                {
+                    "type": "transcript",
+                    "name": "Agent",
+                    "content": "Hello.",
+                },
+                {
+                    "type": "transcript",
+                    "name": "Prospect",
+                    "content": "I have a question.",
+                },
+            ],
+        }
+
+        self.assertEqual(
+            get_transcript.format_transcript(payload),
+            "Agent: Hello.\nProspect: I have a question.",
+        )
+
+    def test_format_transcript_keeps_typed_non_line_items(self):
+        payload = {
+            "items": [
+                {"type": "message", "speaker_name": "Agent", "text": "Hello"},
+            ],
+        }
+
+        self.assertEqual(get_transcript.format_transcript(payload), "Agent: Hello")
+
     def test_get_call_transcript_returns_endpoint_transcript(self):
         def fake_api_get(path):
             if path == "/transcripts/call-123/url":

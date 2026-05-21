@@ -17,6 +17,8 @@ In scope:
 - Make recent call JSON expose the caller phone number when Dialpad provides it.
 - Fix the SMS export wrapper so it matches the generated OpenAPI CLI contract.
 - Add a stable `bin/` wrapper for inspecting local SMS threads by phone number.
+- Confirm and document that the legacy `dialpad` skill alias honors `DIALPAD_SMS_DB` so AlphaClaw can read the mounted live SMS DB.
+- Add concise Niemand operating docs for Dialpad SMS-history checks and the AlphaClaw path override.
 - Document the correct response-check workflow for agents.
 
 Out of scope:
@@ -32,6 +34,7 @@ Out of scope:
 - SMS export must no longer fail with `Missing option '--export-type'`.
 - Existing wrapper JSON contracts must stay stable: success/error envelopes remain under `ok`, `command`, `data`, and `meta`.
 - Documentation must make the local SMS thread wrapper the first response-state check before agents claim they cannot see sent messages.
+- AlphaClaw/niemand runtimes must use `/home/art/niemand/logs/sms.db` through `DIALPAD_SMS_DB`; agents must not interpret the missing legacy `/home/art/clawd/logs/sms.db` path as an unmounted SMS database.
 
 ## Existing Patterns
 
@@ -97,16 +100,35 @@ Test scenarios:
 - Empty thread returns success with `count: 0`, not an error.
 - Invalid `--limit` returns the standard wrapper error envelope.
 
+### U4: Align Legacy Alias and Niemand Runtime Docs
+
+Files:
+- Modify: `README.md`
+- Modify: `SKILL.md`
+- Cross-repo docs: `AGENTS.md` and `TOOLS.md` in the durable Niemand Work agent repo.
+
+Approach:
+- Confirm the `dialpad` alias and maintained `dialpad-openclaw-skill` copy both honor `DIALPAD_SMS_DB` so AlphaClaw can read the mounted live SMS DB.
+- Document that AlphaClaw exposes the live DB at `/home/art/niemand/logs/sms.db` and already sets `DIALPAD_SMS_DB`; the correct check is `bin/list_sms_thread.py --phone PHONE --json`.
+- Keep Niemand docs concise: explain what to run, what success/failure means, and that a missing `/home/art/clawd` path is stale-alias/config evidence, not proof that the DB is unavailable.
+
+Test scenarios:
+- In AlphaClaw, `bin/list_sms_thread.py --phone +19852129515 --json` returns the Jenna thread from `/home/art/niemand/logs/sms.db`.
+- Niemand Work docs point to the installed Dialpad wrapper path, not a nonexistent workspace-local command.
+
 ## Verification
 
 Run:
 - `python3 -m pytest tests/test_list_calls.py tests/test_json_contract.py -q`
+- `python3 -m pytest tests/test_sms_sqlite_cache_cleanup.py -q`
 - `python3 -m pytest -q`
 - Manual smoke:
   - `python3 bin/list_sms_thread.py --phone +17144763349 --json`
+  - `DIALPAD_SMS_DB=/home/art/niemand/logs/sms.db python3 bin/list_sms_thread.py --phone +19852129515 --json`
   - `python3 bin/export_sms.py --start-date 2026-05-13 --end-date 2026-05-13 --json --timeout 30 --poll-interval 5`
 
 ## Risks
 
 - Dialpad Stats export may complete slowly or require account permissions even after the wrapper invocation is fixed. The wrapper should report upstream failure honestly.
 - Local SQLite history only contains what webhook/storage ingestion has captured. The docs should distinguish local history from authoritative all-time Dialpad export.
+- There are multiple installed skill aliases in AlphaClaw. If only one copy is patched, agents may still hit stale behavior through the other alias.

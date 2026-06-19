@@ -49,7 +49,10 @@ def init_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA busy_timeout=5000")  # serialize concurrent webhook-thread writers
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")  # best-effort; busy_timeout provides the serialization
+    except sqlite3.OperationalError:
+        pass
     conn.row_factory = sqlite3.Row
     
     # Main messages table

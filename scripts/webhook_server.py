@@ -1262,6 +1262,22 @@ def build_missed_call_dedupe_key(data, resolved_context):
     return f"missed-call:fingerprint:{sender_number or 'unknown'}:{recipient_number or 'unknown'}:{bucket}"
 
 
+def _apply_sqlite_concurrency_pragmas(conn):
+    """Make a connection safe for concurrent webhook threads sharing sms_approvals.db.
+
+    busy_timeout is mandatory — it serializes writers so concurrent claims/draft
+    writes wait instead of raising "database is locked". WAL is a best-effort
+    optimization: setting journal_mode needs a brief header lock that can contend
+    on a fresh/hot DB, so a failure to enable it must not fail the connection (and
+    therefore must not make a dedupe claim fail open)."""
+    conn.execute("PRAGMA busy_timeout=5000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
+    return conn
+
+
 def _missed_call_dedupe_db_path():
     if sms_approval is not None and getattr(sms_approval, "DB_PATH", None):
         return Path(sms_approval.DB_PATH)
@@ -1272,8 +1288,7 @@ def _init_missed_call_dedupe_db(db_path=None):
     path = Path(db_path) if db_path is not None else _missed_call_dedupe_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
-    conn.execute("PRAGMA busy_timeout=5000")  # shares sms_approvals.db with concurrent webhook threads
-    conn.execute("PRAGMA journal_mode=WAL")
+    _apply_sqlite_concurrency_pragmas(conn)
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MISSED_CALL_DEDUPE_TABLE} (
@@ -1340,8 +1355,7 @@ def _init_sms_dedupe_db(db_path=None):
     path = Path(db_path) if db_path is not None else _sms_dedupe_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
-    conn.execute("PRAGMA busy_timeout=5000")  # tolerate concurrent webhook threads
-    conn.execute("PRAGMA journal_mode=WAL")
+    _apply_sqlite_concurrency_pragmas(conn)
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {SMS_DEDUPE_TABLE} (

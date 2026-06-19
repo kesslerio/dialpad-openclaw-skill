@@ -69,9 +69,14 @@ class ClaimSmsWebhookEventTests(unittest.TestCase):
             t.join()
 
         self.assertEqual(errors, [])
-        winners = [r for r in results if r["claimed"] and not r["duplicate"]]
-        self.assertEqual(len(winners), 1)
         self.assertEqual(len(results), 12)
+        # exactly one real claim; the rest are duplicates. No fail-opens
+        # (dedupe_unavailable) should occur under busy_timeout serialization —
+        # a fail-open here means a duplicate could slip through in production.
+        real_claims = [r for r in results if r["status"] == "claimed"]
+        self.assertEqual(len(real_claims), 1)
+        self.assertEqual([r for r in results if r["status"] == "dedupe_unavailable"], [])
+        self.assertEqual(len([r for r in results if r["duplicate"]]), 11)
 
     def test_missing_message_id_fails_open(self):
         for bad in ("", None):

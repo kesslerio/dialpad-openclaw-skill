@@ -134,6 +134,8 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
     db_path = path or DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout=5000")  # serialize concurrent webhook-thread writers
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     conn.execute(
         """

@@ -63,5 +63,41 @@ class ClaimSmsWebhookEventTests(unittest.TestCase):
         self.assertEqual(r["status"], "dedupe_unavailable")
 
 
+class SmsDedupeKeyTests(unittest.TestCase):
+    def test_prefers_message_id(self):
+        self.assertEqual(ws.sms_dedupe_key({"message_id": "M1", "id": "X"}), "M1")
+
+    def test_falls_back_to_id(self):
+        self.assertEqual(ws.sms_dedupe_key({"id": "X9"}), "X9")
+
+    def test_synthesizes_stable_key_when_no_id(self):
+        payload = {"from_number": "+14155550123", "to_number": "+14155201316",
+                   "created_date": "2026-06-19T09:00:00Z", "text": "hello"}
+        k1 = ws.sms_dedupe_key(payload)
+        k2 = ws.sms_dedupe_key(dict(payload))
+        self.assertTrue(k1.startswith("sms-synth:"))
+        self.assertEqual(k1, k2)  # deterministic -> retries of an id-less payload dedupe
+
+    def test_synthesized_key_differs_by_text(self):
+        base = {"from_number": "+1", "to_number": "+2", "created_date": "t"}
+        self.assertNotEqual(
+            ws.sms_dedupe_key({**base, "text": "a"}),
+            ws.sms_dedupe_key({**base, "text": "b"}),
+        )
+
+    def test_synthesized_key_claims_and_dedupes(self):
+        payload = {"from_number": "+1", "to_number": "+2", "created_date": "t", "text": "hi"}
+        key = ws.sms_dedupe_key(payload)
+        import tempfile
+        from pathlib import Path as _Path
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            self.assertTrue(ws.claim_sms_webhook_event(key, db_path=tmp.name)["claimed"])
+            self.assertTrue(ws.claim_sms_webhook_event(key, db_path=tmp.name)["duplicate"])
+        finally:
+            _Path(tmp.name).unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()

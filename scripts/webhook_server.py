@@ -1339,6 +1339,7 @@ def _init_sms_dedupe_db(db_path=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA busy_timeout=5000")  # tolerate concurrent webhook threads
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {SMS_DEDUPE_TABLE} (
@@ -1351,6 +1352,25 @@ def _init_sms_dedupe_db(db_path=None):
     )
     conn.commit()
     return conn
+
+
+def sms_dedupe_key(data):
+    """Stable idempotency key for an inbound SMS webhook payload.
+
+    Prefers the Dialpad message_id (fallback id). When neither is present —
+    Dialpad ships payload variants that can omit the top-level id — synthesize a
+    deterministic key from sender/recipient/timestamp/text so retries still
+    dedupe instead of failing open (mirrors build_missed_call_dedupe_key)."""
+    message_id = data.get("message_id") or data.get("id")
+    if _clean_identifier(message_id):
+        return message_id
+    parts = [
+        str(first_value(data.get("from_number")) or ""),
+        str(first_value(data.get("to_number")) or ""),
+        str(data.get("created_date") or data.get("timestamp") or data.get("date") or ""),
+        hashlib.sha256((extract_message_text(data) or "").encode("utf-8")).hexdigest()[:16],
+    ]
+    return "sms-synth:" + "|".join(parts)
 
 
 def claim_sms_webhook_event(message_id, *, db_path=None, now_ms=None):
@@ -3358,14 +3378,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         # 200 without re-running those side effects (plan U5/U6).
         duplicate_inbound = False
         if direction == "inbound":
-            inbound_message_id = data.get("message_id") or data.get("id")
-            duplicate_inbound = claim_sms_webhook_event(inbound_message_id).get("duplicate", False)
+            inbound_dedupe_key = sms_dedupe_key(data)
+            duplicate_inbound = claim_sms_webhook_event(inbound_dedupe_key).get("duplicate", False)
         self._ack_webhook_200(stored=True, duplicate=duplicate_inbound)
         if duplicate_inbound:
-            print(
-                f"   ♻️  Duplicate inbound SMS message_id="
-                f"{data.get('message_id') or data.get('id')} — skipping reprocessing"
-            )
+            print(f"   ♻️  Duplicate inbound SMS — skipping reprocessing")
             return
 
         # Forward inbound SMS to OpenClaw hooks (non-sensitive only)

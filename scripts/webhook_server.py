@@ -2332,14 +2332,17 @@ def _context_greeting(sender_enrichment, normalized_event):
     return first_name or "there"
 
 
-def _high_confidence_sales_context_allowed(normalized_event):
-    if (normalized_event.get("event_type") or "sms") != "sms":
-        return False
-    inbound_context = normalized_event.get("inbound_context") or {}
-    return bool(
-        inbound_context.get("contextDraftAllowed")
-        and inbound_context.get("identityConfidence") == "high"
-    )
+def _sales_context_draft_allowed(normalized_event):
+    """Allow CRM/calendar enrichment for the operator-approval DRAFT lane on any
+    sales-line SMS, regardless of identity confidence (plan U7 un-gate).
+
+    Drafts are always operator-reviewed — there is no unattended auto-send (that is
+    S4, not yet built) — so enriching at medium/unknown confidence is safe: a wrong
+    Attio match is caught by the operator via the draft's provenance line. The Attio
+    adapter does its own phone lookup, so a high-confidence Dialpad identity is not
+    required. Sales-line/eligibility checks already ran upstream in
+    should_send_proactive_reply before any draft is built."""
+    return (normalized_event.get("event_type") or "sms") == "sms"
 
 
 def meeting_logistics_intent(text):
@@ -2370,7 +2373,7 @@ def _compact_context_scalar(value, limit=120):
 def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
     """Return compact Attio/CRM context for high-confidence Sales SMS drafts."""
     sender_enrichment = sender_enrichment or {}
-    if not _high_confidence_sales_context_allowed(normalized_event):
+    if not _sales_context_draft_allowed(normalized_event):
         return {"usable": False, "status": "not_allowed"}
 
     query_parts = [
@@ -2410,7 +2413,7 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
 def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enrichment=None):
     """Return compact calendar context for meeting-logistics Sales SMS drafts."""
     sender_enrichment = sender_enrichment or {}
-    if not _high_confidence_sales_context_allowed(normalized_event):
+    if not _sales_context_draft_allowed(normalized_event):
         return {"usable": False, "status": "not_allowed"}
     if not meeting_logistics_intent(normalized_event.get("text")):
         return {"usable": False, "status": "not_applicable"}
@@ -2446,16 +2449,32 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
     }
 
 
+def _draft_greeting(normalized_event, sender_enrichment):
+    """Greeting for the un-gated contextual drafts. Suppress the matched name at
+    low confidence — a reused/shared/ported number can carry a stale Dialpad
+    contact name, so 'Hi Wrong,' is a leak. Mirrors the generic fallback, which
+    already drops names at low confidence."""
+    if (normalized_event.get("inbound_context") or {}).get("identityConfidence") == "low":
+        return "there"
+    return _context_greeting(sender_enrichment, normalized_event)
+
+
 def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
-    greeting = _context_greeting(sender_enrichment, normalized_event)
+    greeting = _draft_greeting(normalized_event, sender_enrichment)
+    confidence = (normalized_event.get("inbound_context") or {}).get("identityConfidence")
     company = str(crm_context.get("company") or "").strip()
-    if company:
+    # Name the matched company in the CUSTOMER-facing text ONLY at high confidence.
+    # A low/medium-confidence Attio phone-match may be wrong (reused/ported/shared
+    # number), and naming the wrong company to a customer is a PII leak. At lower
+    # confidence the operator still sees the Attio context via the draft's
+    # provenance line and can personalize manually before approving (U7 decision).
+    if company and confidence == "high":
         return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation with {company} here and will follow up shortly."
     return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation here and will follow up shortly."
 
 
 def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _calendar_context):
-    greeting = _context_greeting(sender_enrichment, normalized_event)
+    greeting = _draft_greeting(normalized_event, sender_enrichment)
     body = str(normalized_event.get("text") or "").lower()
     if re.search(r"\blate\b|\bon my way\b", body):
         return f"Hi {greeting}, no worries, thanks for letting me know. See you shortly."
@@ -2469,7 +2488,7 @@ def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _c
 def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
     """Build CRM-aware or meeting-aware Sales SMS drafts from compact context."""
     sender_enrichment = sender_enrichment or {}
-    if not _high_confidence_sales_context_allowed(normalized_event):
+    if not _sales_context_draft_allowed(normalized_event):
         return {"usable": False, "status": "not_allowed"}
 
     crm_context = normalized_event.get("crm_context")
@@ -2898,6 +2917,32 @@ def mark_opt_out_fail_closed(customer_number, *, reason="customer_opt_out", sour
         return False
 
 
+def _build_draft_provenance(normalized_event):
+    """Operator-facing provenance for the approval card: which enrichment sources
+    fired and what they matched. NEVER added to draft_text (customer-facing) — it
+    lets the operator sanity-check a medium/low-confidence Attio match before
+    approving, which is what makes the U7 un-gate safe."""
+    parts = []
+    crm = normalized_event.get("crm_context") or {}
+    if isinstance(crm, dict) and crm.get("usable"):
+        bits = [crm.get("company"), f"stage: {crm.get('stage')}" if crm.get("stage") else None]
+        detail = " · ".join(str(b) for b in bits if b)
+        parts.append(f"Attio: {detail}" if detail else "Attio: matched")
+    cal = normalized_event.get("calendar_context") or {}
+    if isinstance(cal, dict) and cal.get("usable") and cal.get("summary"):
+        parts.append(f"Calendar: {cal.get('summary')}")
+    rich = normalized_event.get("rich_reply") or {}
+    rich_basis = rich.get("basis") if isinstance(rich, dict) else None
+    if isinstance(rich, dict) and rich.get("usable"):
+        # Label the source accurately — only a shapescale_knowledge reply is QMD;
+        # recent_thread_link is a prior-SMS-history link resend, not QMD.
+        if rich_basis == "shapescale_knowledge":
+            parts.append("QMD knowledge")
+        elif rich_basis == "recent_thread_link":
+            parts.append("Prior-thread link")
+    return " | ".join(parts) if parts else None
+
+
 def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_display=None):
     """Create an approval-gated proactive reply draft instead of sending SMS."""
     sender_number = normalized_event.get("recipient_number")
@@ -2996,6 +3041,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "rich_reply": normalized_event.get("rich_reply"),
                     "crm_context": normalized_event.get("crm_context"),
                     "calendar_context": normalized_event.get("calendar_context"),
+                    "provenance": _build_draft_provenance(normalized_event),
                 },
             )
         finally:
@@ -3602,6 +3648,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     auto_reply_status=auto_reply_status,
                     auto_reply_draft_created=auto_reply_draft_created,
                 )
+                provenance = _build_draft_provenance(normalized_sms)
+                if provenance:
+                    tg_text += f"\n↳ {escape_telegram_markdown(provenance)}"
                 tg_text += build_approval_review_suffix(
                     auto_reply_draft_id,
                     auto_reply_message,

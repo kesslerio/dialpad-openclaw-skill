@@ -50,7 +50,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 # Add skill directory to path for local imports
@@ -1338,6 +1338,7 @@ def _init_sms_dedupe_db(db_path=None):
     path = Path(db_path) if db_path is not None else _sms_dedupe_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
+    conn.execute("PRAGMA busy_timeout=5000")  # tolerate concurrent webhook threads
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {SMS_DEDUPE_TABLE} (
@@ -3174,6 +3175,28 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(payload).encode())
 
+    def _ack_webhook_200(self, *, stored=True, duplicate=False):
+        """ACK Dialpad with a complete 200 before slow processing (ACK-first).
+
+        Dialpad only needs receipt acknowledgement; draft generation, hook
+        delivery, and Telegram notification run after this returns. Each request
+        runs on its own thread (ThreadingHTTPServer), so post-ACK work never
+        blocks other requests or delays this ACK — eliminating the retry storms a
+        24s inline draft lookup would otherwise cause. Content-Length + flush let
+        Dialpad treat the response as complete immediately."""
+        body = json.dumps(
+            {"status": "ok", "stored": stored, "processing": "duplicate" if duplicate else "async"}
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        try:
+            self.wfile.flush()
+        except Exception:  # noqa: BLE001 - ACK already written; flush is best-effort.
+            pass
+
     def read_json_body(self, endpoint_label):
         """Read a bounded JSON request body."""
         max_body_size = 1024 * 1024
@@ -3327,6 +3350,22 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"❌ Storage error: {e}")
             self.send_error(500, f"Storage error: {e}")
+            return
+
+        # ACK-first: acknowledge Dialpad now, then run the slow inbound processing
+        # (enrichment, draft generation, hooks, Telegram) below. Claim the inbound
+        # message_id first so a Dialpad retry of an already-processed message ACKs
+        # 200 without re-running those side effects (plan U5/U6).
+        duplicate_inbound = False
+        if direction == "inbound":
+            inbound_message_id = data.get("message_id") or data.get("id")
+            duplicate_inbound = claim_sms_webhook_event(inbound_message_id).get("duplicate", False)
+        self._ack_webhook_200(stored=True, duplicate=duplicate_inbound)
+        if duplicate_inbound:
+            print(
+                f"   ♻️  Duplicate inbound SMS message_id="
+                f"{data.get('message_id') or data.get('id')} — skipping reprocessing"
+            )
             return
 
         # Forward inbound SMS to OpenClaw hooks (non-sensitive only)
@@ -3546,38 +3585,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"({sender_enrichment.get('degraded_reason')})"
                 )
         print()
-
-        # Always return 200 OK (graceful degradation)
-        # Webhook succeeded even if hook forwarding failed
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        response = {
-            "status": "ok",
-            "stored": True,
-            "hook_forwarded": hook_sent if direction == "inbound" else None,
-            "hook_status": hook_status if direction == "inbound" else None,
-            "inbound_alert_eligible": (
-                inbound_alert_decision.get("eligible") if direction == "inbound" else None
-            ),
-            "inbound_alert_reason": (
-                inbound_alert_decision.get("reason_code") if direction == "inbound" else None
-            ),
-            "telegram_status": telegram_status if direction == "inbound" else None,
-            "auto_reply_sent": auto_reply_sent if direction == "inbound" else None,
-            "auto_reply_status": auto_reply_status if direction == "inbound" else None,
-            "auto_reply_draft_id": auto_reply_draft_id if direction == "inbound" else None,
-            "sender_enrichment_degraded": (
-                sender_enrichment.get("degraded") if direction == "inbound" else None
-            ),
-            "sender_enrichment_degraded_reason": (
-                sender_enrichment.get("degraded_reason") if direction == "inbound" else None
-            ),
-            "sender_enrichment_status": (
-                sender_enrichment.get("status") if direction == "inbound" else None
-            ),
-        }
-        self.wfile.write(json.dumps(response).encode())
+        # 200 ACK was already sent (ACK-first) right after storage above.
 
     def handle_call_webhook(self):
         """Handle /webhook/dialpad-call endpoint - missed call notifications"""
@@ -3969,7 +3977,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
 def main():
     """Start the webhook server"""
-    server = HTTPServer(("0.0.0.0", PORT), DialpadWebhookHandler)
+    # ThreadingHTTPServer: each request runs on its own thread so the ACK-first
+    # handlers' post-ACK work (draft generation, hooks, Telegram) never blocks or
+    # delays other inbound webhooks.
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), DialpadWebhookHandler)
 
     log_line("=" * 60)
     print("🚀 Dialpad SMS Webhook Server (OpenClaw Hooks)")

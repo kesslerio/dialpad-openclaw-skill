@@ -1272,6 +1272,8 @@ def _init_missed_call_dedupe_db(db_path=None):
     path = Path(db_path) if db_path is not None else _missed_call_dedupe_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
+    conn.execute("PRAGMA busy_timeout=5000")  # shares sms_approvals.db with concurrent webhook threads
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MISSED_CALL_DEDUPE_TABLE} (
@@ -3411,11 +3413,14 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 data, result, from_num, to_num, text, direction, notification_type, timestamp, auth_source
             )
         except Exception as exc:  # noqa: BLE001 - 200 already sent; never crash the thread.
-            print(
-                f"❌ Post-ACK inbound processing failed ({type(exc).__name__}) — "
-                "releasing dedupe claim so a Dialpad retry can recover"
-            )
-            release_sms_webhook_event(inbound_dedupe_key)
+            # Do NOT release the dedupe claim here. By this point storage + the 200
+            # ACK have succeeded and user-visible side effects (draft, OpenClaw
+            # hook, Telegram review card) may already have fired. Releasing would
+            # let a Dialpad retry replay them — duplicate operator cards / duplicate
+            # customer SMS — which the product-security invariant forbids. Accept
+            # the rarer partial-processing gap: the inbound is stored, only the
+            # auto-draft may be missing. Redacted log (no payload PII).
+            print(f"❌ Post-ACK inbound processing failed ({type(exc).__name__}); stored, not retried")
 
     def _process_inbound_post_ack(
         self, data, result, from_num, to_num, text, direction, notification_type, timestamp, auth_source

@@ -144,16 +144,17 @@ class AckFirstIdempotencyTests(unittest.TestCase):
         self.assertIn('"processing": "async"', handler.wfile.getvalue().decode())
         self.assertEqual(self.assess.call_count, 1)  # fail-open -> processing runs
 
-    def test_post_ack_exception_releases_claim_for_retry(self):
-        # A post-ACK failure must release the claim so a Dialpad retry recovers.
+    def test_post_ack_exception_keeps_claim_to_prevent_replay(self):
+        # Invariant: never replay user-visible output. A post-ACK failure (which
+        # may be AFTER a draft/hook/Telegram card already fired) must NOT release
+        # the claim, so a Dialpad retry is suppressed rather than re-emitting.
         handler, status = _build_handler(_inbound("pa-1"))
         with patch.object(ws, "assess_inbound_sms_alert_eligibility",
                           MagicMock(side_effect=RuntimeError("boom"))):
             handler.handle_webhook()  # must not raise; 200 already sent
         self.assertEqual(status["code"], 200)
         again = ws.claim_sms_webhook_event(ws.sms_dedupe_key(_inbound("pa-1")), db_path=self.db)
-        self.assertTrue(again["claimed"])
-        self.assertFalse(again["duplicate"])
+        self.assertTrue(again["duplicate"])  # claim kept -> retry suppressed (no replay)
 
 
 class ServerConfigTests(unittest.TestCase):

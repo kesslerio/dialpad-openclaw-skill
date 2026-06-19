@@ -1278,6 +1278,39 @@ def _apply_sqlite_concurrency_pragmas(conn):
     return conn
 
 
+def _claim_dedupe_row(conn, table, retention_ms, key, timestamp_ms):
+    """Atomically claim `key` in a dedupe `table`; return True if this is the first
+    claim (new row), False if it is a duplicate. Prunes rows past the retention
+    window. The single source of the INSERT-OR-IGNORE claim transaction shared by
+    the SMS and missed-call dedupe paths; the caller owns the connection lifecycle
+    and the fail-open wrapper."""
+    conn.execute(
+        f"DELETE FROM {table} WHERE first_seen_at_ms < ?",
+        (timestamp_ms - retention_ms,),
+    )
+    cursor = conn.execute(
+        f"""
+        INSERT OR IGNORE INTO {table}
+            (dedupe_key, first_seen_at_ms, last_seen_at_ms, duplicate_count)
+        VALUES (?, ?, ?, 0)
+        """,
+        (key, timestamp_ms, timestamp_ms),
+    )
+    if cursor.rowcount == 1:
+        conn.commit()
+        return True
+    conn.execute(
+        f"""
+        UPDATE {table}
+        SET last_seen_at_ms = ?, duplicate_count = duplicate_count + 1
+        WHERE dedupe_key = ?
+        """,
+        (timestamp_ms, key),
+    )
+    conn.commit()
+    return False
+
+
 def _missed_call_dedupe_db_path():
     if sms_approval is not None and getattr(sms_approval, "DB_PATH", None):
         return Path(sms_approval.DB_PATH)
@@ -1313,33 +1346,14 @@ def claim_missed_call_notification(dedupe_key, *, db_path=None, now_ms=None):
     try:
         conn = _init_missed_call_dedupe_db(db_path=db_path)
         try:
-            conn.execute(
-                f"DELETE FROM {MISSED_CALL_DEDUPE_TABLE} WHERE first_seen_at_ms < ?",
-                (timestamp_ms - MISSED_CALL_DEDUPE_RETENTION_MS,),
+            claimed = _claim_dedupe_row(
+                conn, MISSED_CALL_DEDUPE_TABLE, MISSED_CALL_DEDUPE_RETENTION_MS, key, timestamp_ms
             )
-            cursor = conn.execute(
-                f"""
-                INSERT OR IGNORE INTO {MISSED_CALL_DEDUPE_TABLE}
-                    (dedupe_key, first_seen_at_ms, last_seen_at_ms, duplicate_count)
-                VALUES (?, ?, ?, 0)
-                """,
-                (key, timestamp_ms, timestamp_ms),
-            )
-            if cursor.rowcount == 1:
-                conn.commit()
-                return {"claimed": True, "duplicate": False, "key": key, "status": "claimed"}
-            conn.execute(
-                f"""
-                UPDATE {MISSED_CALL_DEDUPE_TABLE}
-                SET last_seen_at_ms = ?, duplicate_count = duplicate_count + 1
-                WHERE dedupe_key = ?
-                """,
-                (timestamp_ms, key),
-            )
-            conn.commit()
-            return {"claimed": False, "duplicate": True, "key": key, "status": "duplicate"}
         finally:
             conn.close()
+        if claimed:
+            return {"claimed": True, "duplicate": False, "key": key, "status": "claimed"}
+        return {"claimed": False, "duplicate": True, "key": key, "status": "duplicate"}
     except Exception as exc:  # noqa: BLE001 - webhook notifications should fail open.
         print(f"⚠️  Missed-call dedupe unavailable ({type(exc).__name__})")
         return {"claimed": True, "duplicate": False, "key": key, "status": "dedupe_unavailable"}
@@ -1407,33 +1421,12 @@ def claim_sms_webhook_event(message_id, *, db_path=None, now_ms=None):
     try:
         conn = _init_sms_dedupe_db(db_path=db_path)
         try:
-            conn.execute(
-                f"DELETE FROM {SMS_DEDUPE_TABLE} WHERE first_seen_at_ms < ?",
-                (timestamp_ms - SMS_DEDUPE_RETENTION_MS,),
-            )
-            cursor = conn.execute(
-                f"""
-                INSERT OR IGNORE INTO {SMS_DEDUPE_TABLE}
-                    (dedupe_key, first_seen_at_ms, last_seen_at_ms, duplicate_count)
-                VALUES (?, ?, ?, 0)
-                """,
-                (key, timestamp_ms, timestamp_ms),
-            )
-            if cursor.rowcount == 1:
-                conn.commit()
-                return {"claimed": True, "duplicate": False, "key": key, "status": "claimed"}
-            conn.execute(
-                f"""
-                UPDATE {SMS_DEDUPE_TABLE}
-                SET last_seen_at_ms = ?, duplicate_count = duplicate_count + 1
-                WHERE dedupe_key = ?
-                """,
-                (timestamp_ms, key),
-            )
-            conn.commit()
-            return {"claimed": False, "duplicate": True, "key": key, "status": "duplicate"}
+            claimed = _claim_dedupe_row(conn, SMS_DEDUPE_TABLE, SMS_DEDUPE_RETENTION_MS, key, timestamp_ms)
         finally:
             conn.close()
+        if claimed:
+            return {"claimed": True, "duplicate": False, "key": key, "status": "claimed"}
+        return {"claimed": False, "duplicate": True, "key": key, "status": "duplicate"}
     except Exception as exc:  # noqa: BLE001 - webhook dedupe must fail open.
         print(f"⚠️  SMS dedupe unavailable ({type(exc).__name__})")
         return {"claimed": True, "duplicate": False, "key": key, "status": "dedupe_unavailable"}
@@ -3442,8 +3435,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         """Side-effect processing that runs AFTER the 200 ACK (ACK-first).
 
         Enrichment, draft generation, OpenClaw hooks, and Telegram. Any raise
-        propagates to the caller, which releases the dedupe claim so a Dialpad
-        retry can recover rather than being suppressed as a duplicate."""
+        propagates to the caller, which logs it and KEEPS the dedupe claim: a
+        post-ACK failure may be after a draft/hook/Telegram card already fired, so
+        replaying via a Dialpad retry would duplicate user-visible output. The
+        message stays stored; only the auto-draft may be missing."""
         # Forward inbound SMS to OpenClaw hooks (non-sensitive only)
         hook_sent = False
         hook_status = None

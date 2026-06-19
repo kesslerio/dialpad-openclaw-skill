@@ -145,6 +145,9 @@ MISSED_CALL_DEDUPE_TABLE = "missed_call_webhook_events"
 MISSED_CALL_DEDUPE_FALLBACK_BUCKET_MS = 60 * 1000
 MISSED_CALL_DEDUPE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
+SMS_DEDUPE_TABLE = "sms_webhook_events"
+SMS_DEDUPE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+
 TELEGRAM_STATUS_SENT = "sent"
 TELEGRAM_STATUS_FILTERED = "filtered"
 TELEGRAM_STATUS_NOT_APPLICABLE = "not_applicable"
@@ -1322,6 +1325,80 @@ def claim_missed_call_notification(dedupe_key, *, db_path=None, now_ms=None):
             conn.close()
     except Exception as exc:  # noqa: BLE001 - webhook notifications should fail open.
         print(f"⚠️  Missed-call dedupe unavailable ({type(exc).__name__})")
+        return {"claimed": True, "duplicate": False, "key": key, "status": "dedupe_unavailable"}
+
+
+def _sms_dedupe_db_path():
+    if sms_approval is not None and getattr(sms_approval, "DB_PATH", None):
+        return Path(sms_approval.DB_PATH)
+    return Path(os.environ.get("DIALPAD_SMS_DEDUPE_DB", "/home/art/clawd/logs/sms_approvals.db"))
+
+
+def _init_sms_dedupe_db(db_path=None):
+    path = Path(db_path) if db_path is not None else _sms_dedupe_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SMS_DEDUPE_TABLE} (
+            dedupe_key TEXT PRIMARY KEY,
+            first_seen_at_ms INTEGER NOT NULL,
+            last_seen_at_ms INTEGER NOT NULL,
+            duplicate_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def claim_sms_webhook_event(message_id, *, db_path=None, now_ms=None):
+    """Atomically claim an inbound SMS webhook event by Dialpad message_id, failing open.
+
+    Mirrors claim_missed_call_notification: the first claim for a message_id returns
+    claimed=True; a Dialpad retry of the same message returns duplicate=True so the
+    handler can ACK 200 without re-running side effects (draft creation, hook
+    delivery). Fails open if storage is unavailable so the webhook never blocks on
+    dedupe. Pair with the ACK-first async path so a slow ACK / retry cannot create a
+    duplicate draft (plan U5/U6).
+    """
+    key = _clean_identifier(message_id)
+    if not key:
+        return {"claimed": True, "duplicate": False, "key": None, "status": "key_missing"}
+
+    timestamp_ms = _now_ms() if now_ms is None else now_ms
+    try:
+        conn = _init_sms_dedupe_db(db_path=db_path)
+        try:
+            conn.execute(
+                f"DELETE FROM {SMS_DEDUPE_TABLE} WHERE first_seen_at_ms < ?",
+                (timestamp_ms - SMS_DEDUPE_RETENTION_MS,),
+            )
+            cursor = conn.execute(
+                f"""
+                INSERT OR IGNORE INTO {SMS_DEDUPE_TABLE}
+                    (dedupe_key, first_seen_at_ms, last_seen_at_ms, duplicate_count)
+                VALUES (?, ?, ?, 0)
+                """,
+                (key, timestamp_ms, timestamp_ms),
+            )
+            if cursor.rowcount == 1:
+                conn.commit()
+                return {"claimed": True, "duplicate": False, "key": key, "status": "claimed"}
+            conn.execute(
+                f"""
+                UPDATE {SMS_DEDUPE_TABLE}
+                SET last_seen_at_ms = ?, duplicate_count = duplicate_count + 1
+                WHERE dedupe_key = ?
+                """,
+                (timestamp_ms, key),
+            )
+            conn.commit()
+            return {"claimed": False, "duplicate": True, "key": key, "status": "duplicate"}
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - webhook dedupe must fail open.
+        print(f"⚠️  SMS dedupe unavailable ({type(exc).__name__})")
         return {"claimed": True, "duplicate": False, "key": key, "status": "dedupe_unavailable"}
 
 

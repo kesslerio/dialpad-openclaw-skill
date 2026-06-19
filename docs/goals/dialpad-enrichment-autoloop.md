@@ -216,8 +216,8 @@ needs from you) and ends. You resume by re-invoking the one-liner.
 | S1 (adapters) | merged | #90 | Phase A adapters |
 | runbook | merged | #91 | this doc |
 | PR2 (async+idempotency) | merged | #92 | ACK-first + SMS idempotency; 3 adversarial rounds + Codex clean. Learnings: docs/solutions/ack-first-webhook-idempotency.md |
-| PR3 (un-gate+deploy) | next | — | U7 (un-gate+provenance) ready now; U8 deploy is CP2 |
-| S2 (identity resolver) | todo | — | reuses attio_context.py |
+| PR3 (un-gate+provenance, U7) | parked@CP1 | #94 | review-clean (adversarial + thermo + 2 Codex rounds); CP4 customer-PII decision applied (operator-only at low confidence); awaiting human merge. U8 deploy still CP2. Learnings: docs/solutions/ungate-enrichment-customer-pii.md |
+| S2 (identity resolver) | next | — | auto-merge-eligible; reuses attio_context.py |
 | S3 (branching) | todo | — | depends on S2, PR3 |
 | S4 (auto-send) | todo | — | depends on S6, S3; CP3 |
 | S5 (routing+write-back) | todo | — | depends on PR2 |

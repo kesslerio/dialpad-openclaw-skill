@@ -78,5 +78,66 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIsNone(ws._build_draft_provenance(ev))
 
 
+class CustomerTextSafetyTests(unittest.TestCase):
+    CRM = {"usable": True, "company": "Acme Corp", "stage": "Demo Booked"}
+
+    def _msg(self, confidence):
+        ev = {"inbound_context": {"identityConfidence": confidence}}
+        return ws._crm_reply_message(ev, {}, self.CRM)
+
+    def test_company_named_only_at_high_confidence(self):
+        self.assertIn("Acme Corp", self._msg("high"))
+        self.assertNotIn("Acme Corp", self._msg("medium"))
+        self.assertNotIn("Acme Corp", self._msg("low"))
+        self.assertNotIn("Acme Corp", self._msg(None))
+
+    def test_customer_text_never_contains_provenance_tokens(self):
+        # the operator-facing provenance tokens must never reach customer-facing text
+        for conf in ("high", "medium", "low"):
+            msg = self._msg(conf)
+            for tok in ("Attio:", "stage:", "QMD", "Calendar:", "↳"):
+                self.assertNotIn(tok, msg, f"{tok} leaked at {conf}")
+
+    def test_low_confidence_draft_is_safe_generic_crm_line(self):
+        msg = self._msg("low")
+        self.assertIn("ShapeScale conversation here", msg)  # company-free
+
+
+class CalendarUngateTests(unittest.TestCase):
+    def test_calendar_lookup_runs_at_low_confidence(self):
+        event = {"event_type": "sms", "sender_number": "+14155550123", "text": "running late",
+                 "inbound_context": {"identityConfidence": "low"}}
+        cal_payload = {"usable": True, "basis": "attio", "summary": "Upcoming demo: Acme", "startsInMinutes": 30}
+        with patch.object(ws, "_run_context_command", return_value=cal_payload):
+            ctx = ws.lookup_sales_calendar_context(
+                event, crm_context={"company": "Acme"}, sender_enrichment={"contact_name": "Jane"})
+        self.assertTrue(ctx["usable"])
+
+
+class ProvenanceRobustnessTests(unittest.TestCase):
+    def test_non_string_company_does_not_raise(self):
+        prov = ws._build_draft_provenance({"crm_context": {"usable": True, "company": 12345, "stage": 99}})
+        self.assertIn("12345", prov)
+
+    def test_basisless_rich_reply_not_labeled_qmd(self):
+        self.assertIsNone(ws._build_draft_provenance({"rich_reply": {"usable": True}}))
+
+
+class NoUnattendedSendInvariantTests(unittest.TestCase):
+    def test_send_proactive_reply_has_no_callers(self):
+        # U7's safety basis: enrichment feeds operator-approval DRAFTS only; there is
+        # no unattended auto-send. If a real caller of send_proactive_reply appears
+        # (e.g. S4) without re-gating the customer-facing enrichment, fail loudly.
+        import inspect
+        src = inspect.getsource(ws)
+        callers = [
+            line.strip() for line in src.splitlines()
+            if "send_proactive_reply(" in line
+            and "should_send_proactive_reply(" not in line
+            and not line.lstrip().startswith("def send_proactive_reply(")
+        ]
+        self.assertEqual(callers, [], f"send_proactive_reply gained a caller; re-gate U7 first: {callers}")
+
+
 if __name__ == "__main__":
     unittest.main()

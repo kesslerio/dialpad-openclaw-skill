@@ -2451,8 +2451,14 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
 
 def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
     greeting = _context_greeting(sender_enrichment, normalized_event)
+    confidence = (normalized_event.get("inbound_context") or {}).get("identityConfidence")
     company = str(crm_context.get("company") or "").strip()
-    if company:
+    # Name the matched company in the CUSTOMER-facing text ONLY at high confidence.
+    # A low/medium-confidence Attio phone-match may be wrong (reused/ported/shared
+    # number), and naming the wrong company to a customer is a PII leak. At lower
+    # confidence the operator still sees the Attio context via the draft's
+    # provenance line and can personalize manually before approving (U7 decision).
+    if company and confidence == "high":
         return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation with {company} here and will follow up shortly."
     return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation here and will follow up shortly."
 
@@ -2910,13 +2916,14 @@ def _build_draft_provenance(normalized_event):
     crm = normalized_event.get("crm_context") or {}
     if isinstance(crm, dict) and crm.get("usable"):
         bits = [crm.get("company"), f"stage: {crm.get('stage')}" if crm.get("stage") else None]
-        detail = " · ".join(b for b in bits if b)
+        detail = " · ".join(str(b) for b in bits if b)
         parts.append(f"Attio: {detail}" if detail else "Attio: matched")
     cal = normalized_event.get("calendar_context") or {}
     if isinstance(cal, dict) and cal.get("usable") and cal.get("summary"):
         parts.append(f"Calendar: {cal.get('summary')}")
     rich = normalized_event.get("rich_reply") or {}
-    if isinstance(rich, dict) and rich.get("usable") and rich.get("basis") not in ("attio_crm", "calendar_meeting"):
+    rich_basis = rich.get("basis") if isinstance(rich, dict) else None
+    if isinstance(rich, dict) and rich.get("usable") and rich_basis and rich_basis not in ("attio_crm", "calendar_meeting"):
         parts.append("QMD knowledge")
     return " | ".join(parts) if parts else None
 

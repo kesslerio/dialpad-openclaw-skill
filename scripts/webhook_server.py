@@ -2449,8 +2449,18 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
     }
 
 
+def _draft_greeting(normalized_event, sender_enrichment):
+    """Greeting for the un-gated contextual drafts. Suppress the matched name at
+    low confidence — a reused/shared/ported number can carry a stale Dialpad
+    contact name, so 'Hi Wrong,' is a leak. Mirrors the generic fallback, which
+    already drops names at low confidence."""
+    if (normalized_event.get("inbound_context") or {}).get("identityConfidence") == "low":
+        return "there"
+    return _context_greeting(sender_enrichment, normalized_event)
+
+
 def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
-    greeting = _context_greeting(sender_enrichment, normalized_event)
+    greeting = _draft_greeting(normalized_event, sender_enrichment)
     confidence = (normalized_event.get("inbound_context") or {}).get("identityConfidence")
     company = str(crm_context.get("company") or "").strip()
     # Name the matched company in the CUSTOMER-facing text ONLY at high confidence.
@@ -2464,7 +2474,7 @@ def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
 
 
 def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _calendar_context):
-    greeting = _context_greeting(sender_enrichment, normalized_event)
+    greeting = _draft_greeting(normalized_event, sender_enrichment)
     body = str(normalized_event.get("text") or "").lower()
     if re.search(r"\blate\b|\bon my way\b", body):
         return f"Hi {greeting}, no worries, thanks for letting me know. See you shortly."
@@ -2923,8 +2933,13 @@ def _build_draft_provenance(normalized_event):
         parts.append(f"Calendar: {cal.get('summary')}")
     rich = normalized_event.get("rich_reply") or {}
     rich_basis = rich.get("basis") if isinstance(rich, dict) else None
-    if isinstance(rich, dict) and rich.get("usable") and rich_basis and rich_basis not in ("attio_crm", "calendar_meeting"):
-        parts.append("QMD knowledge")
+    if isinstance(rich, dict) and rich.get("usable"):
+        # Label the source accurately — only a shapescale_knowledge reply is QMD;
+        # recent_thread_link is a prior-SMS-history link resend, not QMD.
+        if rich_basis == "shapescale_knowledge":
+            parts.append("QMD knowledge")
+        elif rich_basis == "recent_thread_link":
+            parts.append("Prior-thread link")
     return " | ".join(parts) if parts else None
 
 

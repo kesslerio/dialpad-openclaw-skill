@@ -55,8 +55,13 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(ws._build_draft_provenance(ev), "Attio: matched")
 
     def test_qmd_provenance(self):
-        ev = {"rich_reply": {"usable": True, "basis": "knowledge_backed"}}
+        ev = {"rich_reply": {"usable": True, "basis": "shapescale_knowledge"}}
         self.assertEqual(ws._build_draft_provenance(ev), "QMD knowledge")
+
+    def test_recent_thread_link_not_labeled_qmd(self):
+        # link-resend from prior SMS history must not claim a QMD source
+        ev = {"rich_reply": {"usable": True, "basis": "recent_thread_link"}}
+        self.assertEqual(ws._build_draft_provenance(ev), "Prior-thread link")
 
     def test_calendar_and_combined(self):
         ev = {
@@ -101,6 +106,23 @@ class CustomerTextSafetyTests(unittest.TestCase):
     def test_low_confidence_draft_is_safe_generic_crm_line(self):
         msg = self._msg("low")
         self.assertIn("ShapeScale conversation here", msg)  # company-free
+
+    def test_greeting_suppresses_name_at_low_confidence(self):
+        crm = {"usable": True, "company": "Acme"}
+        low = ws._crm_reply_message({"inbound_context": {"identityConfidence": "low"}},
+                                    {"first_name": "Wrong"}, crm)
+        self.assertIn("Hi there,", low)
+        self.assertNotIn("Wrong", low)
+        # medium/high keep the (known-contact) name
+        med = ws._crm_reply_message({"inbound_context": {"identityConfidence": "medium"}},
+                                    {"first_name": "Jane"}, crm)
+        self.assertIn("Jane", med)
+
+    def test_meeting_greeting_suppresses_name_at_low_confidence(self):
+        ev = {"inbound_context": {"identityConfidence": "low"}, "text": "running late"}
+        msg = ws._meeting_reply_message(ev, {"first_name": "Wrong"}, {}, {})
+        self.assertIn("Hi there,", msg)
+        self.assertNotIn("Wrong", msg)
 
 
 class CalendarUngateTests(unittest.TestCase):

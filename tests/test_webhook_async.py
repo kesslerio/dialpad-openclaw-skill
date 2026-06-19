@@ -157,6 +157,16 @@ class AckFirstIdempotencyTests(unittest.TestCase):
         self.assertTrue(again["duplicate"])  # claim kept -> retry suppressed (no replay)
 
 
+    def test_ack_write_failure_still_processes(self):
+        # If Dialpad disconnects mid-ACK, the write raises — the handler must still
+        # process (side effects once); Dialpad's retry hits the duplicate branch.
+        handler, _ = _build_handler(_inbound("ackfail-1"))
+        with patch.object(handler, "_ack_webhook_200",
+                          MagicMock(side_effect=BrokenPipeError("client gone"))):
+            handler.handle_webhook()  # must not raise
+        self.assertEqual(self.assess.call_count, 1)
+
+
 class ServerConfigTests(unittest.TestCase):
     def test_main_uses_threading_http_server(self):
         # ACK-first relies on per-request threads -> main() must instantiate

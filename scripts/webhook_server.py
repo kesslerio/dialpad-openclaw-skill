@@ -1397,7 +1397,14 @@ def sms_dedupe_key(data):
     parts = [
         str(first_value(data.get("from_number")) or ""),
         str(first_value(data.get("to_number")) or ""),
-        str(data.get("created_date") or data.get("timestamp") or data.get("date") or ""),
+        str(
+            data.get("created_date")
+            or data.get("event_timestamp")
+            or data.get("date_created")
+            or data.get("timestamp")
+            or data.get("date")
+            or ""
+        ),
         hashlib.sha256((extract_message_text(data) or "").encode("utf-8")).hexdigest()[:16],
     ]
     return "sms-synth:" + "|".join(parts)
@@ -3414,7 +3421,14 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             return
 
         # ACK Dialpad now; the slow side-effect processing runs after this 200.
-        self._ack_webhook_200(stored=True, duplicate=False)
+        try:
+            self._ack_webhook_200(stored=True, duplicate=False)
+        except Exception:  # noqa: BLE001 - client disconnected mid-ACK
+            # Dialpad never received the 200 and will retry; that retry hits the
+            # duplicate branch (claim is held) and gets a clean 200. Process now so
+            # the inbound still gets its side effects exactly once instead of being
+            # silently suppressed by the retry's duplicate short-circuit.
+            print("⚠️  ACK write failed (client disconnect); processing inbound anyway")
         try:
             self._process_inbound_post_ack(
                 data, result, from_num, to_num, text, direction, notification_type, timestamp, auth_source

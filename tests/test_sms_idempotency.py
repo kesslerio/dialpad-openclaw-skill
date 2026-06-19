@@ -113,6 +113,19 @@ class SmsDedupeKeyTests(unittest.TestCase):
         self.assertTrue(k1.startswith("sms-synth:"))
         self.assertEqual(k1, k2)  # deterministic -> retries of an id-less payload dedupe
 
+    def test_synth_key_uses_all_recognized_timestamp_fields(self):
+        # event_timestamp and date_created are recognized SMS timestamp fields;
+        # distinct times must yield distinct keys so id-less messages don't collide.
+        base = {"from_number": "+1", "to_number": "+2", "text": "ok"}
+        self.assertNotEqual(
+            ws.sms_dedupe_key({**base, "event_timestamp": "2026-06-19T09:00:00Z"}),
+            ws.sms_dedupe_key({**base, "event_timestamp": "2026-06-19T09:05:00Z"}),
+        )
+        self.assertNotEqual(
+            ws.sms_dedupe_key({**base, "date_created": "t1"}),
+            ws.sms_dedupe_key({**base, "date_created": "t2"}),
+        )
+
     def test_synthesized_key_differs_by_text(self):
         base = {"from_number": "+1", "to_number": "+2", "created_date": "t"}
         self.assertNotEqual(

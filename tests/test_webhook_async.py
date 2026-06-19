@@ -100,12 +100,70 @@ class AckFirstIdempotencyTests(unittest.TestCase):
             h.handle_webhook()
         self.assertEqual(self.assess.call_count, 2)
 
+    def test_ack_written_before_processing_runs(self):
+        # The ACK body must already be on the wire when processing begins.
+        handler, _ = _build_handler(_inbound("ord-1"))
+        seen = {}
+
+        def _probe(*a, **k):
+            seen["ack_len"] = len(handler.wfile.getvalue())
+            return {"eligible": False, "reason_code": "blocked", "sensitive_filtered": False,
+                    "notification_type": "inbound"}
+
+        with patch.object(ws, "assess_inbound_sms_alert_eligibility", _probe):
+            handler.handle_webhook()
+        self.assertGreater(seen.get("ack_len", 0), 0)
+
+    def test_outbound_acks_once_without_claim(self):
+        handler, status = _build_handler({
+            "direction": "outbound", "from_number": "+14155201316",
+            "to_number": "+14155550123", "text": "hi", "message_id": "out-1",
+        })
+        with patch.object(ws, "sms_approval", None):
+            handler.handle_webhook()
+        self.assertEqual(status["code"], 200)
+        self.assertIn('"processing": "async"', handler.wfile.getvalue().decode())
+
+    def test_storage_failure_sends_500_and_releases_claim(self):
+        handler, status = _build_handler(_inbound("sf-1"))
+        with patch.object(ws, "handle_sms_webhook", lambda data: {"stored": False, "error": "boom"}):
+            handler.handle_webhook()
+        self.assertEqual(status["code"], 500)  # send_error, not a 200 ACK
+        self.assertNotIn("processing", handler.wfile.getvalue().decode())  # no ACK body
+        # claim was released, so a retry of the same message is NOT a duplicate
+        again = ws.claim_sms_webhook_event(ws.sms_dedupe_key(_inbound("sf-1")), db_path=self.db)
+        self.assertTrue(again["claimed"])
+        self.assertFalse(again["duplicate"])
+
+    def test_dedupe_unavailable_still_acks_and_processes(self):
+        with patch.object(ws, "claim_sms_webhook_event",
+                          lambda key, **k: {"claimed": True, "duplicate": False, "status": "dedupe_unavailable"}):
+            handler, status = _build_handler(_inbound("fo-1"))
+            handler.handle_webhook()
+        self.assertEqual(status["code"], 200)
+        self.assertIn('"processing": "async"', handler.wfile.getvalue().decode())
+        self.assertEqual(self.assess.call_count, 1)  # fail-open -> processing runs
+
+    def test_post_ack_exception_releases_claim_for_retry(self):
+        # A post-ACK failure must release the claim so a Dialpad retry recovers.
+        handler, status = _build_handler(_inbound("pa-1"))
+        with patch.object(ws, "assess_inbound_sms_alert_eligibility",
+                          MagicMock(side_effect=RuntimeError("boom"))):
+            handler.handle_webhook()  # must not raise; 200 already sent
+        self.assertEqual(status["code"], 200)
+        again = ws.claim_sms_webhook_event(ws.sms_dedupe_key(_inbound("pa-1")), db_path=self.db)
+        self.assertTrue(again["claimed"])
+        self.assertFalse(again["duplicate"])
+
 
 class ServerConfigTests(unittest.TestCase):
-    def test_uses_threading_http_server(self):
-        # ACK-first relies on per-request threads so post-ACK work never blocks.
-        from http.server import ThreadingHTTPServer
-        self.assertIs(ws.ThreadingHTTPServer, ThreadingHTTPServer)
+    def test_main_uses_threading_http_server(self):
+        # ACK-first relies on per-request threads -> main() must instantiate
+        # ThreadingHTTPServer, not the single-threaded HTTPServer.
+        import inspect
+        src = inspect.getsource(ws.main)
+        self.assertIn("ThreadingHTTPServer(", src)
+        self.assertNotIn("= HTTPServer(", src)
 
 
 if __name__ == "__main__":

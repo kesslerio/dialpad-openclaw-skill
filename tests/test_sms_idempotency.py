@@ -43,6 +43,36 @@ class ClaimSmsWebhookEventTests(unittest.TestCase):
         claimed = [r for r in results if r["claimed"] and not r["duplicate"]]
         self.assertEqual(len(claimed), 1)
 
+    def test_at_most_once_under_concurrency(self):
+        # ThreadingHTTPServer means concurrent retries hit claim() on separate
+        # threads/connections. INSERT OR IGNORE + busy_timeout must still yield
+        # exactly one winner and zero raised exceptions.
+        import threading
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def worker():
+            try:
+                r = ws.claim_sms_webhook_event("concurrent-1", db_path=self.db)
+            except Exception as exc:  # noqa: BLE001 - record, don't swallow silently
+                with lock:
+                    errors.append(exc)
+                return
+            with lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=worker) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        winners = [r for r in results if r["claimed"] and not r["duplicate"]]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(results), 12)
+
     def test_missing_message_id_fails_open(self):
         for bad in ("", None):
             r = self.claim(bad)

@@ -1423,6 +1423,24 @@ def claim_sms_webhook_event(message_id, *, db_path=None, now_ms=None):
         return {"claimed": True, "duplicate": False, "key": key, "status": "dedupe_unavailable"}
 
 
+def release_sms_webhook_event(dedupe_key, *, db_path=None):
+    """Release a previously-claimed SMS dedupe key so a Dialpad retry can be
+    reprocessed. Called when intake fails after the claim (storage error or a
+    post-ACK processing exception). Best-effort; never raises; no-op on empty key."""
+    key = _clean_identifier(dedupe_key)
+    if not key:
+        return
+    try:
+        conn = _init_sms_dedupe_db(db_path=db_path)
+        try:
+            conn.execute(f"DELETE FROM {SMS_DEDUPE_TABLE} WHERE dedupe_key = ?", (key,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - rollback is best-effort.
+        print(f"⚠️  SMS dedupe release failed ({type(exc).__name__})")
+
+
 def _extract_payload_contact_name(data):
     """Extract a Dialpad-provided contact display name from webhook payloads."""
     contact = data.get("contact")
@@ -3357,6 +3375,18 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         text = extract_message_text(data)
         notification_type = classify_inbound_notification(data) if direction == "inbound" else "not_inbound"
 
+        # ACK-first idempotent intake: claim the inbound BEFORE storage so a
+        # Dialpad retry short-circuits before ANY side effect (storage, draft,
+        # hooks, Telegram) re-fires. The claim is released on any intake failure
+        # so a retry can still recover the message (plan U5/U6).
+        inbound_dedupe_key = None
+        if direction == "inbound":
+            inbound_dedupe_key = sms_dedupe_key(data)
+            if claim_sms_webhook_event(inbound_dedupe_key).get("duplicate", False):
+                self._ack_webhook_200(stored=True, duplicate=True)
+                print("   ♻️  Duplicate inbound SMS — skipping reprocessing")
+                return
+
         # Store message in SQLite
         try:
             result = handle_sms_webhook(data)
@@ -3364,27 +3394,37 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
             if not stored:
                 print(f"⚠️  Failed to store message: {result.get('error', 'Unknown error')}")
+                release_sms_webhook_event(inbound_dedupe_key)
                 self.send_error(500, "Storage failed")
                 return
 
         except Exception as e:
             print(f"❌ Storage error: {e}")
+            release_sms_webhook_event(inbound_dedupe_key)
             self.send_error(500, f"Storage error: {e}")
             return
 
-        # ACK-first: acknowledge Dialpad now, then run the slow inbound processing
-        # (enrichment, draft generation, hooks, Telegram) below. Claim the inbound
-        # message_id first so a Dialpad retry of an already-processed message ACKs
-        # 200 without re-running those side effects (plan U5/U6).
-        duplicate_inbound = False
-        if direction == "inbound":
-            inbound_dedupe_key = sms_dedupe_key(data)
-            duplicate_inbound = claim_sms_webhook_event(inbound_dedupe_key).get("duplicate", False)
-        self._ack_webhook_200(stored=True, duplicate=duplicate_inbound)
-        if duplicate_inbound:
-            print(f"   ♻️  Duplicate inbound SMS — skipping reprocessing")
-            return
+        # ACK Dialpad now; the slow side-effect processing runs after this 200.
+        self._ack_webhook_200(stored=True, duplicate=False)
+        try:
+            self._process_inbound_post_ack(
+                data, result, from_num, to_num, text, direction, notification_type, timestamp, auth_source
+            )
+        except Exception as exc:  # noqa: BLE001 - 200 already sent; never crash the thread.
+            print(
+                f"❌ Post-ACK inbound processing failed ({type(exc).__name__}) — "
+                "releasing dedupe claim so a Dialpad retry can recover"
+            )
+            release_sms_webhook_event(inbound_dedupe_key)
 
+    def _process_inbound_post_ack(
+        self, data, result, from_num, to_num, text, direction, notification_type, timestamp, auth_source
+    ):
+        """Side-effect processing that runs AFTER the 200 ACK (ACK-first).
+
+        Enrichment, draft generation, OpenClaw hooks, and Telegram. Any raise
+        propagates to the caller, which releases the dedupe claim so a Dialpad
+        retry can recover rather than being suppressed as a duplicate."""
         # Forward inbound SMS to OpenClaw hooks (non-sensitive only)
         hook_sent = False
         hook_status = None
@@ -3602,7 +3642,6 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"({sender_enrichment.get('degraded_reason')})"
                 )
         print()
-        # 200 ACK was already sent (ACK-first) right after storage above.
 
     def handle_call_webhook(self):
         """Handle /webhook/dialpad-call endpoint - missed call notifications"""

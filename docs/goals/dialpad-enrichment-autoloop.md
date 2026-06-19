@@ -213,9 +213,10 @@ needs from you) and ends. You resume by re-invoking the one-liner.
 
 | Item | State | PR(s) | Notes |
 |------|-------|-------|-------|
-| S1 (adapters) | merged-pending | #90 | Phase A; awaiting your merge |
-| PR2 (async+idempotency) | todo | — | depends on #90 merged |
-| PR3 (un-gate+deploy) | todo | — | depends on PR2 |
+| S1 (adapters) | merged | #90 | Phase A adapters |
+| runbook | merged | #91 | this doc |
+| PR2 (async+idempotency) | merged | #92 | ACK-first + SMS idempotency; 3 adversarial rounds + Codex clean. Learnings: docs/solutions/ack-first-webhook-idempotency.md |
+| PR3 (un-gate+deploy) | next | — | U7 (un-gate+provenance) ready now; U8 deploy is CP2 |
 | S2 (identity resolver) | todo | — | reuses attio_context.py |
 | S3 (branching) | todo | — | depends on S2, PR3 |
 | S4 (auto-send) | todo | — | depends on S6, S3; CP3 |

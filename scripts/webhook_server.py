@@ -2242,12 +2242,16 @@ def _run_qmd_command(command, args):
 
 
 def _qmd_top_hit_ref(search_output):
-    """Return the top hit's `qmd://...` doc ref (without the :line/#hash suffix)."""
+    """Return the top hit's `qmd://...md:line` doc ref, keeping the matched line.
+
+    The `:line` lets `qmd get` fetch the matched section of a long doc instead of
+    only the first DIALPAD_QMD_GET_LINES lines from the top. The trailing ` #hash`
+    is dropped.
+    """
     for raw_line in str(search_output or "").splitlines():
         line = raw_line.strip()
         if line.startswith("qmd://"):
-            ref = line.split()[0]  # drop the trailing " #hash"
-            return re.sub(r":\d+$", "", ref)  # drop the trailing :line
+            return line.split()[0]  # qmd://...md:line, without the trailing " #hash"
     return None
 
 
@@ -2288,24 +2292,20 @@ def _qmd_answer_body(get_output):
     A `qmd get` document opens with a metadata block — `# heading`, `---` fences,
     and `Key: value` lines whose keys vary by source (Gorgias help articles use
     `Source:`/`Article ID:`/`Category:`; Notion exports use `Source course:`/
-    `Source page ID:`/`Created:`). We drop:
-      - known metadata keys anywhere in the doc (leading *and* trailing/transcluded),
-      - any remaining `Key: value` line in the leading preamble, before prose starts,
-      - headings, `---` fences, qmd refs, and any URL/markdown-link,
-    keeping only the answer prose so the draft carries the answer, not a title or
-    an internal source URL.
+    `Source page ID:`/`Created:`). We drop only *recognized* metadata keys (anywhere
+    in the doc, so transcluded/footer metadata can't leak), headings, `---` fences,
+    qmd refs, and any URL/markdown-link. Lines whose label is not a known metadata
+    key are kept, so a legitimate labeled answer line (`Pricing: $1,799 upfront…`,
+    `Note: billing starts after delivery`) survives into the draft. Internal-link
+    disclosure is prevented by the unconditional URL strip, not by key denylisting.
     """
     body = []
-    started = False
     for raw_line in str(get_output or "").splitlines():
         line = raw_line.strip()
         if not line or line == "---" or line.startswith(("#", "@@", "qmd://")):
             continue
         if _is_qmd_metadata_line(line):
-            continue  # known metadata key — drop wherever it appears
-        if not started and _QMD_KEY_LINE.match(line):
-            continue  # unknown leading `Key: value` preamble line
-        started = True
+            continue  # recognized metadata key — drop wherever it appears
         cleaned = _strip_markup_and_urls(line)
         if cleaned:
             body.append(cleaned)
@@ -2643,6 +2643,11 @@ def _knowledge_query_for_category(category, text):
     the old keyword-stuffed sentence queries returned zero matches. We strip
     stopwords/brand terms and keep the two most discriminating (longest) content
     words, prefixed by a light category anchor, so recall stays high.
+
+    Returns an empty string when nothing discriminating remains (no anchor and no
+    salient keywords, e.g. "how does it work?"). The caller fails closed on an
+    empty query rather than searching the brand alone, which would match an
+    arbitrary doc across the whole collection.
     """
     anchor = {"pricing": "pricing", "booking": "book demo"}.get(category, "")
     words = re.findall(r"[a-zA-Z]{3,}", str(text or "").lower())
@@ -2656,7 +2661,7 @@ def _knowledge_query_for_category(category, text):
             tokens.append(word)
         if len(tokens) >= len(anchor.split()) + 2:
             break
-    return " ".join(tokens) or "ShapeScale"
+    return " ".join(tokens)
 
 
 def _compose_knowledge_sms(category, knowledge_text):

@@ -888,10 +888,11 @@ ShapeScale's home device is priced at $1,799 upfront for the hardware, plus an a
     assert "qmd://" not in result["text"]
     assert "Source:" not in result["text"]
     assert "Score:" not in result["text"]
-    # get was called with the search hit's ref, stripped of :line and #hash.
+    # get was called with the search hit's ref, keeping :line (to fetch the matched
+    # section of long docs) and dropping the #hash.
     assert calls[0][1] == "search"
     assert calls[1][1] == "get"
-    assert calls[1][2] == "qmd://shapescale-knowledge/support/help-articles/693708-pricing-home.md"
+    assert calls[1][2] == "qmd://shapescale-knowledge/support/help-articles/693708-pricing-home.md:1"
 
 
 def test_knowledge_lookup_no_match_when_search_returns_no_hit(monkeypatch):
@@ -906,15 +907,25 @@ def test_knowledge_lookup_no_match_when_search_returns_no_hit(monkeypatch):
     assert result["status"] == "no_match"
 
 
-def test_qmd_answer_body_strips_preamble_and_top_hit_ref_cleans_suffix():
+def test_qmd_answer_body_strips_preamble_and_top_hit_ref_keeps_line():
+    # The matched :line is kept (so qmd get fetches the right section); only #hash drops.
     assert webhook_server._qmd_top_hit_ref(
         "qmd://shapescale-knowledge/a/b.md:42 #deadbe\nTitle: x"
-    ) == "qmd://shapescale-knowledge/a/b.md"
+    ) == "qmd://shapescale-knowledge/a/b.md:42"
     assert webhook_server._qmd_top_hit_ref("Title: nothing here") is None
     body = webhook_server._qmd_answer_body(
         "Folder Context: ctx\n---\n# Heading\nSource: https://x\nArticle ID: 1\n---\nThe real answer is 42."
     )
     assert body == "The real answer is 42."
+
+
+def test_qmd_answer_body_keeps_labeled_answer_lines():
+    # A labeled answer line (label is NOT a known metadata key) must survive; only
+    # recognized metadata keys are dropped.
+    doc = "Source: https://x\n---\nPricing: $1,799 upfront for the hardware.\nNote: billing starts after delivery."
+    body = webhook_server._qmd_answer_body(doc)
+    assert "Pricing: $1,799 upfront for the hardware." in body
+    assert "Note: billing starts after delivery." in body
 
 
 def test_qmd_answer_body_strips_notion_metadata_block():
@@ -980,8 +991,11 @@ def test_knowledge_query_extracts_salient_keywords_for_and_search():
     ) == "pricing home"
     q = webhook_server._knowledge_query_for_category("product", "how does the business scanner work")
     assert set(q.split()) == {"business", "scanner"}
-    # Empty/stopword-only text still yields a non-empty query.
-    assert webhook_server._knowledge_query_for_category("product", "how do you do") == "ShapeScale"
+    # No anchor + no salient keywords -> empty query so the lookup fails closed
+    # (rather than searching the brand alone and matching an arbitrary doc).
+    assert webhook_server._knowledge_query_for_category("product", "how does it work") == ""
+    # An anchored category still yields a query even with all-stopword text.
+    assert webhook_server._knowledge_query_for_category("pricing", "how much does it cost") == "pricing"
 
 
 def test_failed_rich_lookup_is_cached_for_generic_fallback(monkeypatch):

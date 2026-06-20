@@ -117,6 +117,12 @@ DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_E
 DIALPAD_RICH_SMS_DRAFTS_ENABLED = parse_bool_env(os.environ.get("DIALPAD_RICH_SMS_DRAFTS_ENABLED"), True)
 DIALPAD_QMD_COMMAND = os.environ.get("DIALPAD_QMD_COMMAND", "qmd")
 DIALPAD_QMD_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_QMD_TIMEOUT_SECONDS", "8"))
+# Curated, human-readable knowledge collection to search (Gorgias help articles +
+# training). Empty string = search all collections. Scoping here keeps SMS answers
+# grounded in the customer-facing KB instead of code/workflow collections.
+DIALPAD_QMD_COLLECTION = os.environ.get("DIALPAD_QMD_COLLECTION", "shapescale-knowledge")
+# How many leading lines of the matched doc to pull for the answer body.
+DIALPAD_QMD_GET_LINES = int(os.environ.get("DIALPAD_QMD_GET_LINES", "40"))
 DIALPAD_BOOK_DEMO_URL = os.environ.get("DIALPAD_BOOK_DEMO_URL", "https://bysha.pe/book-demo")
 DIALPAD_CRM_CONTEXT_COMMAND = os.environ.get("DIALPAD_CRM_CONTEXT_COMMAND", "")
 DIALPAD_CALENDAR_CONTEXT_COMMAND = os.environ.get("DIALPAD_CALENDAR_CONTEXT_COMMAND", "")
@@ -2166,84 +2172,144 @@ def classify_rich_sms_question(text, recent_thread=None):
 
 
 def lookup_shapescale_knowledge(query):
-    """Retrieve ShapeScale knowledge for rich SMS drafts; fail closed on any issue."""
-    result = {
-        "usable": False,
-        "status": "disabled",
-        "text": "",
-    }
+    """Retrieve a customer-ready ShapeScale answer for rich SMS drafts; fail closed.
+
+    Two steps: BM25 `qmd search` finds the best-matching knowledge doc, then
+    `qmd get` pulls that doc so we can extract its *answer body* — not the search
+    snippet, which is only the title + source URL and never the actual answer.
+    """
+    result = {"usable": False, "status": "disabled", "text": ""}
     command = str(DIALPAD_QMD_COMMAND or "").strip()
     if not command:
         return result
 
-    args = [command, "search", str(query or "").strip()]
-    if not args[-1]:
+    query = str(query or "").strip()
+    if not query:
         result["status"] = "empty_query"
         return result
 
+    search_args = ["search", query, "-n", "1"]
+    if DIALPAD_QMD_COLLECTION:
+        search_args += ["-c", DIALPAD_QMD_COLLECTION]
+    search_out, status = _run_qmd_command(command, search_args)
+    if status != "ok":
+        result["status"] = status
+        return result
+
+    doc_ref = _qmd_top_hit_ref(search_out)
+    if not doc_ref:
+        result["status"] = "no_match"
+        return result
+
+    get_out, status = _run_qmd_command(command, ["get", doc_ref, "-l", str(DIALPAD_QMD_GET_LINES)])
+    if status != "ok":
+        result["status"] = f"get_{status}"  # distinguish get failures from search failures
+        return result
+
+    safe_output = customer_safe_knowledge_text(_qmd_answer_body(get_out))
+    if not safe_output:
+        result["status"] = "unsafe_output"
+        return result
+
+    result.update({"usable": True, "status": "ok", "text": safe_output[:1200]})
+    return result
+
+
+def _run_qmd_command(command, args):
+    """Run `qmd <args>` and return (stdout, status). status == 'ok' on success."""
     try:
         completed = subprocess.run(
-            args,
+            [command, *args],
             check=False,
             capture_output=True,
             text=True,
             timeout=DIALPAD_QMD_TIMEOUT_SECONDS,
         )
     except FileNotFoundError:
-        result["status"] = "unavailable"
-        return result
+        return "", "unavailable"
     except subprocess.TimeoutExpired:
-        result["status"] = "timeout"
-        return result
+        return "", "timeout"
     except Exception as exc:  # noqa: BLE001 - qmd must not break webhook processing.
         print(f"⚠️  ShapeScale knowledge lookup failed ({type(exc).__name__})")
-        result["status"] = "request_failed"
-        return result
+        return "", "request_failed"
 
-    output = (completed.stdout or "").strip()
     if completed.returncode != 0:
-        result["status"] = f"exit_{completed.returncode}"
-        return result
+        return "", f"exit_{completed.returncode}"
+    output = (completed.stdout or "").strip()
     if not output:
-        result["status"] = "empty"
-        return result
-    safe_output = customer_safe_knowledge_text(extract_qmd_customer_snippet(output))
-    if not safe_output:
-        result["status"] = "unsafe_output"
-        return result
-
-    result.update(
-        {
-            "usable": True,
-            "status": "ok",
-            "text": safe_output[:1200],
-        }
-    )
-    return result
+        return "", "empty"
+    return output, "ok"
 
 
-def extract_qmd_customer_snippet(output):
-    """Extract candidate snippet text from qmd search output."""
-    lines = []
-    in_snippet = False
-    for raw_line in str(output or "").splitlines():
+def _qmd_top_hit_ref(search_output):
+    """Return the top hit's `qmd://...` doc ref (without the :line/#hash suffix)."""
+    for raw_line in str(search_output or "").splitlines():
         line = raw_line.strip()
-        if not line:
-            continue
         if line.startswith("qmd://"):
-            if lines:
-                break
-            in_snippet = False
-            continue
-        if re.match(r"^(Title|Context|Score):", line, re.IGNORECASE):
-            continue
-        if line.startswith("@@"):
-            in_snippet = True
-            continue
-        if in_snippet:
-            lines.append(line)
+            ref = line.split()[0]  # drop the trailing " #hash"
+            return re.sub(r":\d+$", "", ref)  # drop the trailing :line
+    return None
 
-    return " ".join(lines) if lines else str(output or "")
+
+# Known metadata keys emitted by `qmd get` / source exports. These are stripped
+# wherever they appear (not just the leading preamble) so transcluded/footer
+# metadata can't leak internal URLs or record IDs into a customer draft. Matched
+# case-insensitively. A line is only treated as metadata when its key is in this
+# set — so legitimate prose lead-ins ("Note:", "Important:") are preserved.
+_QMD_META_KEYS = frozenset(
+    [
+        "folder context", "source", "source course", "source page id", "source url",
+        "article id", "category", "last updated", "created", "title", "context", "score",
+    ]
+)
+_QMD_KEY_LINE = re.compile(r"^([A-Za-z][A-Za-z ]{0,30}):")
+# Markdown image, then markdown link (keep its text), then angle-bracket and bare URLs.
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_URL_RE = re.compile(r"<https?://[^>]*>|https?://\S+|www\.\S+", re.IGNORECASE)
+
+
+def _strip_markup_and_urls(text):
+    """Remove markdown images/links and any URLs so internal links can't reach the SMS."""
+    text = _MD_IMAGE_RE.sub("", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _URL_RE.sub("", text)
+    return " ".join(text.split())
+
+
+def _is_qmd_metadata_line(line):
+    match = _QMD_KEY_LINE.match(line)
+    return bool(match) and match.group(1).strip().lower() in _QMD_META_KEYS
+
+
+def _qmd_answer_body(get_output):
+    """Extract the answer prose from `qmd get` output, dropping metadata and URLs.
+
+    A `qmd get` document opens with a metadata block — `# heading`, `---` fences,
+    and `Key: value` lines whose keys vary by source (Gorgias help articles use
+    `Source:`/`Article ID:`/`Category:`; Notion exports use `Source course:`/
+    `Source page ID:`/`Created:`). We drop:
+      - known metadata keys anywhere in the doc (leading *and* trailing/transcluded),
+      - any remaining `Key: value` line in the leading preamble, before prose starts,
+      - headings, `---` fences, qmd refs, and any URL/markdown-link,
+    keeping only the answer prose so the draft carries the answer, not a title or
+    an internal source URL.
+    """
+    body = []
+    started = False
+    for raw_line in str(get_output or "").splitlines():
+        line = raw_line.strip()
+        if not line or line == "---" or line.startswith(("#", "@@", "qmd://")):
+            continue
+        if _is_qmd_metadata_line(line):
+            continue  # known metadata key — drop wherever it appears
+        if not started and _QMD_KEY_LINE.match(line):
+            continue  # unknown leading `Key: value` preamble line
+        started = True
+        cleaned = _strip_markup_and_urls(line)
+        if cleaned:
+            body.append(cleaned)
+    return " ".join(body)
 
 
 def customer_safe_knowledge_text(output):
@@ -2557,15 +2623,40 @@ def _first_recent_link(recent_thread):
     return None
 
 
+# Question words / articles / fillers that carry no retrieval signal, plus the
+# brand itself (in nearly every doc, so it never discriminates). "shapescale" is
+# kept out of the AND-query so it can't shrink recall.
+_QMD_STOPWORDS = frozenset(
+    """a an the is are am be was were do does did how what when where why who whom
+    which can could would should will to for of on in at by with from my your our we
+    us i you me it this that these those and or but if so about get got have has had
+    need want much many cost costs price priced work works working please thanks
+    thank hi hello there here just like into out up down over more most any some
+    your shapescale shape scale""".split()
+)
+
+
 def _knowledge_query_for_category(category, text):
-    topic = str(text or "").strip()
-    if category == "booking":
-        return f"ShapeScale book demo booking link sales SMS answer: {topic}"
-    if category == "pricing":
-        return f"ShapeScale pricing lease buyout financing sales SMS answer: {topic}"
-    if category == "product":
-        return f"ShapeScale product business consumer scan results sales SMS answer: {topic}"
-    return f"ShapeScale sales SMS answer: {topic}"
+    """Build a focused AND-query from the customer's salient keywords + a category anchor.
+
+    `qmd search` is BM25 with AND semantics — every term must appear in a doc — so
+    the old keyword-stuffed sentence queries returned zero matches. We strip
+    stopwords/brand terms and keep the two most discriminating (longest) content
+    words, prefixed by a light category anchor, so recall stays high.
+    """
+    anchor = {"pricing": "pricing", "booking": "book demo"}.get(category, "")
+    words = re.findall(r"[a-zA-Z]{3,}", str(text or "").lower())
+    # Longest content words first; lexicographic tie-break keeps the query stable
+    # across processes (set iteration order is hash-randomized).
+    candidates = sorted({w for w in words if w not in _QMD_STOPWORDS}, key=lambda w: (-len(w), w))
+    # Dedup against the anchor's own words so we don't emit "book demo book demo".
+    tokens = anchor.split()
+    for word in candidates:
+        if word not in tokens:
+            tokens.append(word)
+        if len(tokens) >= len(anchor.split()) + 2:
+            break
+    return " ".join(tokens) or "ShapeScale"
 
 
 def _compose_knowledge_sms(category, knowledge_text):

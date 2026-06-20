@@ -843,29 +843,145 @@ def test_product_question_falls_back_when_knowledge_unavailable(monkeypatch, tmp
     assert webhook_server.build_proactive_reply_message(normalized_event).startswith("Hi there, thanks for reaching")
 
 
-def test_qmd_search_metadata_is_stripped_before_customer_safe_knowledge(monkeypatch):
-    raw_qmd_output = """qmd://shapescale-json/sales/faq-13-business-faq.json:5 #f84e26
-Title: ShapeScale for Business FAQ
-Context: Structured ShapeScale JSON knowledge.
-Score:  90%
+def test_knowledge_lookup_extracts_answer_body_from_qmd_get(monkeypatch):
+    # qmd search returns the matching doc's title/source snippet (NOT the answer);
+    # qmd get returns the full doc whose body holds the actual answer.
+    search_output = """qmd://shapescale-knowledge/support/help-articles/693708-pricing-home.md:1 #237f44
+Title: What is the pricing for ShapeScale for Home?
+Context: Curated ShapeScale knowledge base.
+Score:  78%
 
-@@ -4,4 @@
-ShapeScale for Business supports client scans and demo booking for practices.
+@@ -1,3 @@
+# What is the pricing for ShapeScale for Home?
 """
+    get_output = """Folder Context: Curated ShapeScale knowledge base.
+---
+
+# What is the pricing for ShapeScale for Home?
+
+Source: https://shapescalehelpcenter.gorgias.help/pricing-home-693708?isEmbedded=true
+Article ID: 693708
+Category: Pricing & Shipping
+Last updated: 2026-02-03T10:32:07.289Z
+
+---
+
+ShapeScale's home device is priced at $1,799 upfront for the hardware, plus an app subscription that only starts billing once you receive your unit.
+"""
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(args)
+        stdout = search_output if args[1] == "search" else get_output
+        return _FakeCompletedProcess(stdout=stdout, returncode=0)
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_QMD_COMMAND", "qmd")
+    monkeypatch.setattr(webhook_server.subprocess, "run", _fake_run)
+
+    result = webhook_server.lookup_shapescale_knowledge("how much does ShapeScale cost")
+
+    assert result["usable"] is True
+    assert result["status"] == "ok"
+    # The answer body is returned, not the title/source/metadata.
+    assert "$1,799" in result["text"]
+    assert "What is the pricing" not in result["text"]
+    assert "qmd://" not in result["text"]
+    assert "Source:" not in result["text"]
+    assert "Score:" not in result["text"]
+    # get was called with the search hit's ref, stripped of :line and #hash.
+    assert calls[0][1] == "search"
+    assert calls[1][1] == "get"
+    assert calls[1][2] == "qmd://shapescale-knowledge/support/help-articles/693708-pricing-home.md"
+
+
+def test_knowledge_lookup_no_match_when_search_returns_no_hit(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_QMD_COMMAND", "qmd")
     monkeypatch.setattr(
         webhook_server.subprocess,
         "run",
-        lambda *args, **kwargs: _FakeCompletedProcess(stdout=raw_qmd_output, returncode=0),
+        lambda *a, **k: _FakeCompletedProcess(stdout="No results found.", returncode=0),
     )
+    result = webhook_server.lookup_shapescale_knowledge("how much does ShapeScale cost")
+    assert result["usable"] is False
+    assert result["status"] == "no_match"
 
-    result = webhook_server.lookup_shapescale_knowledge("ShapeScale pricing")
 
-    assert result["usable"] is True
-    assert result["status"] == "ok"
-    assert result["text"] == "ShapeScale for Business supports client scans and demo booking for practices."
-    assert "qmd://" not in result["text"]
-    assert "Score:" not in result["text"]
+def test_qmd_answer_body_strips_preamble_and_top_hit_ref_cleans_suffix():
+    assert webhook_server._qmd_top_hit_ref(
+        "qmd://shapescale-knowledge/a/b.md:42 #deadbe\nTitle: x"
+    ) == "qmd://shapescale-knowledge/a/b.md"
+    assert webhook_server._qmd_top_hit_ref("Title: nothing here") is None
+    body = webhook_server._qmd_answer_body(
+        "Folder Context: ctx\n---\n# Heading\nSource: https://x\nArticle ID: 1\n---\nThe real answer is 42."
+    )
+    assert body == "The real answer is 42."
+
+
+def test_qmd_answer_body_strips_notion_metadata_block():
+    # Notion exports use different metadata keys than Gorgias help articles; the
+    # generic leading-block strip must drop them all, not just a fixed denylist.
+    notion = (
+        "Source course: Online Training\n"
+        "Source page ID: 312746d6-e6c2\n"
+        "Source URL: https://www.notion.so/Online-Training-312746d6\n"
+        "Created: 2026-02-25T00:28:00.000Z\n"
+        "\n"
+        "ShapeScale is accurate down to 1/20th of an inch."
+    )
+    assert webhook_server._qmd_answer_body(notion) == "ShapeScale is accurate down to 1/20th of an inch."
+
+
+def test_qmd_answer_body_strips_trailing_and_lowercase_metadata():
+    # Metadata that re-appears AFTER the first prose line (transcluded/footer) or
+    # uses lowercase keys must not leak internal URLs / record IDs into the draft.
+    doc = (
+        "---\n# Title\nSource: https://help.example/foo\n---\n"
+        "The first prose line is fine.\n"
+        "source: https://internal.shapescale.io/admin/leads\n"
+        "Article ID: 8675309\n"
+        "Last updated: 2026-06-19\n"
+    )
+    body = webhook_server._qmd_answer_body(doc)
+    assert body == "The first prose line is fine."
+    assert "internal.shapescale.io" not in body
+    assert "8675309" not in body
+
+
+def test_qmd_answer_body_strips_image_embeds_and_urls():
+    # Verified production-shape leak: Gorgias bodies carry ![](attachment.png) image
+    # embeds, <https://...> angle URLs, and bare URLs that must not reach the SMS.
+    doc = (
+        "---\n# Title\n---\n"
+        "See the difference ![](https://attachments.gorgias.help/abc/photo.png) here.\n"
+        "More at <https://business.shapescale.com/demo> or https://shapescale.com/x.\n"
+    )
+    body = webhook_server._qmd_answer_body(doc)
+    assert "http" not in body
+    assert "gorgias.help" not in body
+    assert "See the difference" in body and "here." in body
+
+
+def test_knowledge_query_is_deterministic_and_dedupes_anchor():
+    # Equal-length ties must resolve the same way every call (no hash-seed drift),
+    # and the anchor's own words must not be duplicated into the query.
+    q1 = webhook_server._knowledge_query_for_category("product", "refund cancel policy return delays")
+    q2 = webhook_server._knowledge_query_for_category("product", "refund cancel policy return delays")
+    assert q1 == q2
+    booking = webhook_server._knowledge_query_for_category("booking", "how do I book a demo")
+    assert booking.split().count("book") == 1
+    assert booking.split().count("demo") == 1
+
+
+def test_knowledge_query_extracts_salient_keywords_for_and_search():
+    # qmd search is AND-based, so the query must be a few high-signal content words,
+    # not the full sentence (which matches nothing). Stopwords + brand are dropped.
+    assert webhook_server._knowledge_query_for_category(
+        "pricing", "how much does ShapeScale for home cost"
+    ) == "pricing home"
+    q = webhook_server._knowledge_query_for_category("product", "how does the business scanner work")
+    assert set(q.split()) == {"business", "scanner"}
+    # Empty/stopword-only text still yields a non-empty query.
+    assert webhook_server._knowledge_query_for_category("product", "how do you do") == "ShapeScale"
 
 
 def test_failed_rich_lookup_is_cached_for_generic_fallback(monkeypatch):

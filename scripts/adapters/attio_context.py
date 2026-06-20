@@ -139,6 +139,62 @@ def _reference_id(values, key):
     return None
 
 
+# --- people-field extraction (confirmed shapes; side-effect-free, reused by S2) ---
+#
+# Verified live 2026-06-18 against the people object:
+#   values.name            -> [{"first_name", "last_name", "full_name", ...}]
+#   values.email_addresses -> [{"email_address", "original_email_address", ...}]
+#   values.company         -> [{"target_record_id", ...}] (direct ref; preferred)
+# Every values.* is a list of objects with an active_from/active_until envelope;
+# read the first active entry defensively and never assume a non-empty list.
+
+def person_name_parts(person):
+    """Return (first_name, last_name, full_name) from a person record, each cleaned or None.
+
+    Tolerates ``name`` not being a list, ``[None]``, or missing sub-keys.
+    """
+    item = _first(((person or {}).get("values") or {}), "name")
+    if not isinstance(item, dict):
+        return (None, None, None)
+    first = _clean(item.get("first_name")) if isinstance(item.get("first_name"), str) else None
+    last = _clean(item.get("last_name")) if isinstance(item.get("last_name"), str) else None
+    full = _clean(item.get("full_name")) if isinstance(item.get("full_name"), str) else None
+    if not full and (first or last):
+        full = " ".join(part for part in (first, last) if part) or None
+    return (first, last, full)
+
+
+def person_primary_email(person):
+    """Return the person's primary email address (cleaned, lower-cased), or None.
+
+    Tolerates ``email_addresses`` not being a list or holding non-dict entries.
+    """
+    item = _first(((person or {}).get("values") or {}), "email_addresses")
+    if not isinstance(item, dict):
+        return None
+    email = item.get("email_address") or item.get("original_email_address")
+    if isinstance(email, str) and "@" in email:
+        cleaned = _clean(email)
+        return cleaned.lower() if cleaned else None
+    return None
+
+
+def person_company_name(person):
+    """Resolve a person's company name from the direct ``company`` ref.
+
+    Prefers the direct ``company`` record-reference. Returns a cleaned name or
+    None; never raises (``get_record`` swallows AttioError and returns None).
+    """
+    values = (person or {}).get("values") or {}
+    company_id = _reference_id(values, "company")
+    if company_id:
+        company = get_record("companies", company_id)
+        name = _text_value((company or {}).get("values"), "name")
+        if name:
+            return name
+    return None
+
+
 # --- resolution helpers (reusable by S2) ---
 
 def find_person_by_phone(phone):

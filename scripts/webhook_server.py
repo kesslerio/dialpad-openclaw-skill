@@ -2251,7 +2251,9 @@ def _qmd_top_hit_ref(search_output):
     for raw_line in str(search_output or "").splitlines():
         line = raw_line.strip()
         if line.startswith("qmd://"):
-            return line.split()[0]  # qmd://...md:line, without the trailing " #hash"
+            # Strip only the trailing " #hash"; splitting on all whitespace would
+            # truncate qmd virtual paths that contain spaces (Notion/training exports).
+            return re.sub(r"\s+#[0-9a-fA-F]+$", "", line)
     return None
 
 

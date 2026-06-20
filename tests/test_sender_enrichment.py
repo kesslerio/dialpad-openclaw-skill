@@ -913,6 +913,10 @@ def test_qmd_answer_body_strips_preamble_and_top_hit_ref_keeps_line():
         "qmd://shapescale-knowledge/a/b.md:42 #deadbe\nTitle: x"
     ) == "qmd://shapescale-knowledge/a/b.md:42"
     assert webhook_server._qmd_top_hit_ref("Title: nothing here") is None
+    # Paths with spaces (Notion/training exports) must survive — strip only the hash.
+    assert webhook_server._qmd_top_hit_ref(
+        "qmd://shapescale-knowledge/online training/intro to scan.md:7 #abc123"
+    ) == "qmd://shapescale-knowledge/online training/intro to scan.md:7"
     body = webhook_server._qmd_answer_body(
         "Folder Context: ctx\n---\n# Heading\nSource: https://x\nArticle ID: 1\n---\nThe real answer is 42."
     )

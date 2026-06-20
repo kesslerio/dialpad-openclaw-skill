@@ -895,6 +895,14 @@ ShapeScale's home device is priced at $1,799 upfront for the hardware, plus an a
     assert calls[1][2] == "qmd://shapescale-knowledge/support/help-articles/693708-pricing-home.md:1"
 
 
+def test_qmd_command_returns_timeout_when_deadline_already_passed():
+    # The shared deadline means a second call after the budget is spent fails fast
+    # instead of starting a fresh full-timeout subprocess (no 2x worst-case hold).
+    import time as _time
+    out, status = webhook_server._run_qmd_command("qmd", ["search", "x"], _time.monotonic() - 1)
+    assert (out, status) == ("", "timeout")
+
+
 def test_knowledge_lookup_no_match_when_search_returns_no_hit(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_QMD_COMMAND", "qmd")
     monkeypatch.setattr(

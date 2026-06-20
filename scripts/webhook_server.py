@@ -2188,10 +2188,14 @@ def lookup_shapescale_knowledge(query):
         result["status"] = "empty_query"
         return result
 
+    # One shared deadline across both subprocess calls, so search+get can't hold a
+    # processing thread for 2x DIALPAD_QMD_TIMEOUT_SECONDS.
+    deadline = time.monotonic() + DIALPAD_QMD_TIMEOUT_SECONDS
+
     search_args = ["search", query, "-n", "1"]
     if DIALPAD_QMD_COLLECTION:
         search_args += ["-c", DIALPAD_QMD_COLLECTION]
-    search_out, status = _run_qmd_command(command, search_args)
+    search_out, status = _run_qmd_command(command, search_args, deadline)
     if status != "ok":
         result["status"] = status
         return result
@@ -2201,7 +2205,7 @@ def lookup_shapescale_knowledge(query):
         result["status"] = "no_match"
         return result
 
-    get_out, status = _run_qmd_command(command, ["get", doc_ref, "-l", str(DIALPAD_QMD_GET_LINES)])
+    get_out, status = _run_qmd_command(command, ["get", doc_ref, "-l", str(DIALPAD_QMD_GET_LINES)], deadline)
     if status != "ok":
         result["status"] = f"get_{status}"  # distinguish get failures from search failures
         return result
@@ -2215,15 +2219,22 @@ def lookup_shapescale_knowledge(query):
     return result
 
 
-def _run_qmd_command(command, args):
-    """Run `qmd <args>` and return (stdout, status). status == 'ok' on success."""
+def _run_qmd_command(command, args, deadline):
+    """Run `qmd <args>` and return (stdout, status). status == 'ok' on success.
+
+    `deadline` is a `time.monotonic()` timestamp shared across the calls in one
+    knowledge lookup, so the lookup respects a single timeout budget overall.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return "", "timeout"
     try:
         completed = subprocess.run(
             [command, *args],
             check=False,
             capture_output=True,
             text=True,
-            timeout=DIALPAD_QMD_TIMEOUT_SECONDS,
+            timeout=remaining,
         )
     except FileNotFoundError:
         return "", "unavailable"

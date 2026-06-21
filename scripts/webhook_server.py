@@ -3382,7 +3382,6 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             # policy — so opted-out and risky drafts are never marked auto-send-eligible.
             # Stamped on the event so all 3 call sites + the draft metadata surface it.
             auto_send_shadow = evaluate_auto_send_shadow(normalized_event, reply_policy)
-            normalized_event["autoSendShadow"] = auto_send_shadow
             draft = sms_approval.create_replacement_draft(
                 conn,
                 invalidate_thread_key=thread_key,
@@ -3407,6 +3406,9 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "autoSendShadow": auto_send_shadow,
                 },
             )
+            # Stamp the event only AFTER the draft is persisted, so a failed
+            # persistence never leaves a shadow decision exposed to the call sites.
+            normalized_event["autoSendShadow"] = auto_send_shadow
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - webhook should not fail because approval storage is down.
@@ -3950,9 +3952,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     "message": auto_reply_message,
                     "richReply": normalized_sms.get("rich_reply"),
                     "replyPolicy": reply_policy,
-                    # S4 shadow decision — computed/logged only, never sent.
-                    "autoSendShadow": normalized_sms.get("autoSendShadow"),
                 }
+                # S4 shadow decision is metadata/log-only — deliberately NOT placed in
+                # auto_reply, which build_openclaw_hook_payload forwards to the hook.
+                # It lives in draft metadata (for S6) + the event stamp + this log line.
                 log_auto_send_shadow(normalized_sms)
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(
                     normalized_sms, line_display=line_display

@@ -297,10 +297,6 @@ class NoAutomatedPathIntoSendInvariantTests(unittest.TestCase):
         self.assertEqual(callers, [], f"send_proactive_reply gained a caller: {callers}")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReplyPolicyGateTests(unittest.TestCase):
     def test_risky_policy_blocks_auto_send(self):
         # A 'risky' reply needs two-step human confirmation -> never auto-send-eligible,
@@ -340,3 +336,38 @@ class PersistedOptOutShadowTests(unittest.TestCase):
         self.assertFalse(created)
         self.assertEqual(status, "blocked_opt_out")
         self.assertNotIn("autoSendShadow", ev)
+
+
+class DraftPersistenceFailureShadowTests(unittest.TestCase):
+    def test_failed_persistence_does_not_stamp_shadow(self):
+        # If create_replacement_draft raises, the handler returns
+        # approval_persistence_failed and the event must NOT be left stamped, so a
+        # failed persistence cannot pollute S6 with a phantom auto-send decision.
+        ev = {
+            "event_type": "sms",
+            "sender_number": "+14155550100",
+            "recipient_number": "+14155201316",
+            "rich_reply": {"usable": True, "category": "link_issue"},
+            "inbound_context": {"identityConfidence": "high"},
+        }
+
+        class _FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(ws, "should_send_proactive_reply", return_value=True), \
+                patch.object(ws, "build_proactive_reply_message", return_value="hi"), \
+                patch.object(ws, "classify_sms_reply_policy", return_value={"state": "normal"}), \
+                patch.object(ws.sms_approval, "init_db", return_value=_FakeConn()), \
+                patch.object(ws.sms_approval, "is_opted_out", return_value=False), \
+                patch.object(ws.sms_approval, "build_context_fingerprint", return_value="fp"), \
+                patch.object(ws.sms_approval, "create_replacement_draft",
+                             side_effect=RuntimeError("db down")):
+            created, status, *_ = ws.create_proactive_reply_draft(ev)
+        self.assertFalse(created)
+        self.assertEqual(status, "approval_persistence_failed")
+        self.assertNotIn("autoSendShadow", ev)
+
+
+if __name__ == "__main__":
+    unittest.main()

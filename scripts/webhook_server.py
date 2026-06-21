@@ -2787,8 +2787,10 @@ def write_attio_inbound_note(normalized_event, *, sender_enrichment=None, db_pat
             # Claim is intentionally NOT released: the POST may have partially
             # succeeded, and a duplicate/wrong note is worse than a missing one.
             return {"written": False, "status": "error", "note_id": None}
-        if not note_id:
-            return {"written": False, "status": "no_record_id", "note_id": None}
+        # create_person_note raises AttioError on a failed POST and returns None only
+        # before issuing it (no record id / blank content) -- both already guarded
+        # above. So a value here always means the note was created: truthy note id,
+        # or the True sentinel when Attio's response envelope is unexpected.
         return {
             "written": True,
             "status": "written",

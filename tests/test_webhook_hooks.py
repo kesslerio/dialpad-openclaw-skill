@@ -129,6 +129,22 @@ def test_normalize_and_format_hook_message():
     assert "Message: Need a callback" in message
 
 
+def test_normalize_whitespace_text_falls_back_to_text_content():
+    # A whitespace-only "text" is truthy but blank; the canonical extractor must
+    # fall through to text_content so the real SMS body reaches the timeline/hook
+    # rather than a blank string (regression: a truthy-but-blank `text or ...`).
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155559876"],
+        "text": "   ",
+        "text_content": "Real body",
+        "id": "m-456",
+    }
+    normalized = normalize_sms_payload(payload)
+    assert normalized["text"] == "Real body"
+
+
 def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
     monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_NAME", "Dialpad SMS")
     monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")

@@ -79,7 +79,10 @@ except Exception:
 # Attio client for the S5 person-timeline note write-back. Optional + guarded so a
 # missing adapter never breaks import; the write path treats a None client as
 # "disabled" and writes nothing.
-sys.path.insert(0, str(skill_dir / "adapters"))
+# append (not insert(0)): adapters/ is searched LAST so a basename collision can
+# never shadow a stdlib/third-party/scripts module; attio_context is a unique name
+# importing only stdlib, so it still resolves.
+sys.path.append(str(skill_dir / "adapters"))
 try:
     import attio_context
 except Exception:
@@ -2178,9 +2181,10 @@ def normalize_sms_payload(data, contact_info=None):
     """Normalize Dialpad webhook payload to a consistent SMS object for hooks."""
     sender_number = data.get("from_number")
     recipient_number = _first_value(data.get("to_number"))
-    # A present-but-blank "text" must fall through to text_content (a valid Dialpad
-    # SMS shape); data.get("text", default) would return the blank instead.
-    text = data.get("text") or data.get("text_content") or ""
+    # A present-but-blank (incl. whitespace-only) "text" must fall through to
+    # text_content (a valid Dialpad SMS shape). Use the canonical extractor so the
+    # write-back sees the real body instead of a whitespace string treated as truthy.
+    text = extract_message_text(data)
     direction = data.get("direction", "unknown")
     timestamp = (
         data.get("timestamp")

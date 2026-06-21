@@ -119,6 +119,13 @@ DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", 
 DIALPAD_LINE_TOPIC_ROUTES = os.environ.get("DIALPAD_LINE_TOPIC_ROUTES", "")
 DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), False)
 DIALPAD_RICH_SMS_DRAFTS_ENABLED = parse_bool_env(os.environ.get("DIALPAD_RICH_SMS_DRAFTS_ENABLED"), True)
+# S4 SHADOW MODE: rich-reply categories (build_rich_sms_reply's 'category' key)
+# that would be eligible for confidence-gated auto-send. The shadow classifier
+# only *computes and logs* this decision for S6 evaluation; it is NEVER wired to a
+# send. Real auto-send is a future CP3 per-intent decision, out of scope here.
+# Start with link_issue only: a deterministic prior-thread link resend with no QMD
+# / free-text generation, so it's the lowest-risk first candidate to measure.
+DIALPAD_AUTO_SEND_SHADOW_ALLOWLIST = frozenset({"link_issue"})
 DIALPAD_QMD_COMMAND = os.environ.get("DIALPAD_QMD_COMMAND", "qmd")
 DIALPAD_QMD_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_QMD_TIMEOUT_SECONDS", "8"))
 # Curated, human-readable knowledge collection to search (Gorgias help articles +
@@ -3210,6 +3217,87 @@ def _build_draft_provenance(normalized_event):
     return " | ".join(parts) if parts else None
 
 
+def evaluate_auto_send_shadow(normalized_event, reply_policy=None):
+    """S4 SHADOW MODE — compute (never act on) a confidence-gated auto-send decision.
+
+    Answers one question for later S6 evaluation: *would* this drafted reply have
+    been safe to auto-send at high confidence? The result is written to draft
+    metadata + a log line only. It is NEVER fed to approve_draft, send_func,
+    dialpad_send_sms, or send_proactive_reply — the no-automated-path-into-send
+    invariant (tests/test_auto_send_shadow.py) pins that. Real auto-send is a
+    separate, explicitly-gated future CP3 decision and is out of scope here.
+
+    Decision = rich reply is usable AND its category is in the auto-send allowlist
+    (link_issue only to start) AND identity confidence is high AND the deterministic
+    reply policy is "normal" (a "risky" policy needs human two-step confirmation; an
+    opt-out must never send). Reads the REAL classifier output: build_rich_sms_reply
+    exposes the category under 'category' (link_issue / booking / pricing / product /
+    None) — there is no 'intent' field. Caller passes reply_policy and evaluates this
+    only AFTER the persisted opt-out gate, so opted-out customers are never stamped.
+
+    Guards for the missed-call/voicemail call site, which builds normalized_event
+    WITHOUT inbound_context and where build_rich_sms_reply rejects the event
+    (unsupported_event) — so rich_reply may be absent/unusable and inbound_context
+    None. Both are treated as "not eligible", never a crash.
+
+    Measurement caveat for S6: this fires only on *drafted* events (a biased slice
+    of all inbound), since it is evaluated alongside draft creation. That slice is
+    acceptable for a shadow baseline; just don't read the rates as whole-population.
+
+    Returns a dict of booleans/enums only — NEVER raw CRM PII (company/name/phone).
+    """
+    rich_reply = normalized_event.get("rich_reply")
+    if not isinstance(rich_reply, dict):
+        rich_reply = {}
+    inbound_context = normalized_event.get("inbound_context")
+    if not isinstance(inbound_context, dict):
+        inbound_context = {}
+
+    rich_usable = bool(rich_reply.get("usable"))
+    # Prefer the rich reply's own category; fall back to the value stamped onto
+    # inbound_context by create_proactive_reply_draft. Either may be absent.
+    category = rich_reply.get("category") or inbound_context.get("richDraftCategory")
+    identity_confidence = inbound_context.get("identityConfidence")
+
+    allowlist_match = category in DIALPAD_AUTO_SEND_SHADOW_ALLOWLIST
+    confidence_met = identity_confidence == "high"
+    # Only a deterministically-normal reply is auto-send-eligible: a "risky" policy
+    # requires two-step human confirmation, and "blocked_opt_out" must never send.
+    # (Absent/None policy is treated as not-normal — fail closed.)
+    policy_normal = (reply_policy or {}).get("state") == "normal"
+    would_auto_send = rich_usable and allowlist_match and confidence_met and policy_normal
+
+    return {
+        "mode": "shadow",
+        "wouldAutoSend": would_auto_send,
+        # confidence signals — booleans/enums only, no customer PII
+        "category": category,
+        "identityConfidence": identity_confidence,
+        "richReplyUsable": rich_usable,
+        "allowlistMatch": allowlist_match,
+        "confidenceMet": confidence_met,
+        "policyNormal": policy_normal,
+    }
+
+
+def log_auto_send_shadow(normalized_event):
+    """Emit one log line for the S4 shadow auto-send decision (no PII, no send).
+
+    Reads the decision stamped onto normalized_event by create_proactive_reply_draft.
+    Absent (e.g. not-eligible / opt-out / voicemail with no draft) → nothing to log.
+    """
+    shadow = normalized_event.get("autoSendShadow")
+    if not isinstance(shadow, dict):
+        return
+    print(
+        "   👻 Auto-Send SHADOW (not sent): "
+        f"would_auto_send={shadow.get('wouldAutoSend')} "
+        f"category={shadow.get('category')} "
+        f"confidence={shadow.get('identityConfidence')} "
+        f"richUsable={shadow.get('richReplyUsable')}"
+    )
+
+
 def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_display=None):
     """Create an approval-gated proactive reply draft instead of sending SMS."""
     sender_number = normalized_event.get("recipient_number")
@@ -3289,6 +3377,11 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "reason_code": "filtered_opt_out",
                     "risk_reason": "customer previously opted out",
                 }
+            # S4 SHADOW MODE: compute (never act on) the auto-send decision here —
+            # AFTER the persisted opt-out gate and factoring the deterministic reply
+            # policy — so opted-out and risky drafts are never marked auto-send-eligible.
+            # Stamped on the event so all 3 call sites + the draft metadata surface it.
+            auto_send_shadow = evaluate_auto_send_shadow(normalized_event, reply_policy)
             draft = sms_approval.create_replacement_draft(
                 conn,
                 invalidate_thread_key=thread_key,
@@ -3309,8 +3402,13 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "crm_context": normalized_event.get("crm_context"),
                     "calendar_context": normalized_event.get("calendar_context"),
                     "provenance": _build_draft_provenance(normalized_event),
+                    # S4 SHADOW MODE decision (booleans/enums only, no PII) for S6.
+                    "autoSendShadow": auto_send_shadow,
                 },
             )
+            # Stamp the event only AFTER the draft is persisted, so a failed
+            # persistence never leaves a shadow decision exposed to the call sites.
+            normalized_event["autoSendShadow"] = auto_send_shadow
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - webhook should not fail because approval storage is down.
@@ -3855,6 +3953,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     "richReply": normalized_sms.get("rich_reply"),
                     "replyPolicy": reply_policy,
                 }
+                # S4 shadow decision is metadata/log-only — deliberately NOT placed in
+                # auto_reply, which build_openclaw_hook_payload forwards to the hook.
+                # It lives in draft metadata (for S6) + the event stamp + this log line.
+                log_auto_send_shadow(normalized_sms)
                 hook_sent, hook_status = send_sms_to_openclaw_hooks(
                     normalized_sms, line_display=line_display
                 )
@@ -4163,7 +4265,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 "status": auto_reply_status,
                 "message": auto_reply_message,
                 "replyPolicy": reply_policy,
+                # S4 shadow decision is metadata/log-only — NOT in auto_reply, which
+                # build_openclaw_hook_payload forwards to the hook. (Lives in the log line.)
             }
+            log_auto_send_shadow(normalized_event)
             hook_sent, hook_status = send_to_openclaw_hooks(
                 normalized_event,
                 line_display=line_display,
@@ -4341,7 +4446,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             "status": auto_reply_status,
             "message": auto_reply_message,
             "replyPolicy": reply_policy,
+            # S4 shadow decision is metadata/log-only — NOT in auto_reply (hook-forwarded);
+            # at this voicemail site it is absent/not-eligible anyway.
         }
+        log_auto_send_shadow(normalized_event)
         tg_text += build_approval_review_suffix(
             auto_reply_draft_id,
             auto_reply_message,

@@ -233,11 +233,14 @@ class AttioNoteWritebackTests(unittest.TestCase):
         self.assertEqual(result["status"], "identity_mismatch")
         self.assertEqual(fake.note_posts, [])
 
-    def test_partial_name_ties(self):
-        # First-name-only Dialpad record still ties to the fuller Attio name.
+    def test_single_token_name_fails_closed(self):
+        # First-name-only Dialpad name vs a multi-token Attio name is too weak
+        # (recycled-phone first-name collision) -> identity_mismatch, no write.
         fake = CapturingRequest()
         result = self._write(_event(contact_name="Ada"), fake)
-        self.assertTrue(result["written"])
+        self.assertFalse(result["written"])
+        self.assertEqual(result["status"], "identity_mismatch")
+        self.assertEqual(fake.note_posts, [])
 
     def test_long_message_truncated_with_ellipsis(self):
         # A multipart SMS (>160 chars) is clamped with a visible ellipsis marker so a

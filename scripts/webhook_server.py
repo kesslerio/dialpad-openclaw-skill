@@ -2178,7 +2178,9 @@ def normalize_sms_payload(data, contact_info=None):
     """Normalize Dialpad webhook payload to a consistent SMS object for hooks."""
     sender_number = data.get("from_number")
     recipient_number = _first_value(data.get("to_number"))
-    text = data.get("text", data.get("text_content", "")) or ""
+    # A present-but-blank "text" must fall through to text_content (a valid Dialpad
+    # SMS shape); data.get("text", default) would return the blank instead.
+    text = data.get("text") or data.get("text_content") or ""
     direction = data.get("direction", "unknown")
     timestamp = (
         data.get("timestamp")
@@ -2666,15 +2668,21 @@ def _name_tokens(name):
 def _names_tie(dialpad_name, attio_name):
     """True only if the Dialpad-resolved name and the Attio person name are plausibly
     the SAME person. Token-set comparison (case/punct/whitespace-insensitive): the
-    smaller non-empty token set must be a subset of the larger (handles 'John Smith'
-    vs 'John Smith Jr' and first-name-only Dialpad records). Distinct names — the
+    smaller-vs-larger token sets: when either side is multi-token, require >=2 shared
+    tokens (handles 'Ada Lovelace' vs 'Ada Lovelace Jr' while rejecting first-name-only
+    collisions); two single-token names must be equal. Distinct names — the
     recycled/stale-phone cross-customer case — return False, failing the write closed.
     """
     a = _name_tokens(dialpad_name)
     b = _name_tokens(attio_name)
     if not a or not b:
         return False
-    return a <= b or b <= a
+    # A single shared first name is too weak on a recycled phone (Dialpad "John" vs a
+    # stale Attio "John Smith" is likely a stranger). Require >=2 shared tokens whenever
+    # either side is multi-token; two single-token names must be equal. Fails closed.
+    if len(a) == 1 and len(b) == 1:
+        return a == b
+    return len(a & b) >= 2
 
 
 def write_attio_inbound_note(normalized_event, *, db_path=None):

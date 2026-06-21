@@ -2668,21 +2668,20 @@ def _name_tokens(name):
 def _names_tie(dialpad_name, attio_name):
     """True only if the Dialpad-resolved name and the Attio person name are plausibly
     the SAME person. Token-set comparison (case/punct/whitespace-insensitive): the
-    smaller-vs-larger token sets: when either side is multi-token, require >=2 shared
-    tokens (handles 'Ada Lovelace' vs 'Ada Lovelace Jr' while rejecting first-name-only
-    collisions); two single-token names must be equal. Distinct names — the
-    recycled/stale-phone cross-customer case — return False, failing the write closed.
+    EXACT token-set equality (order/case/punct-insensitive). Any partial overlap — a
+    missing/extra token, a different surname, a first-name-only record — returns False,
+    failing the write closed, since a recycled/stale phone can resolve a DIFFERENT
+    person and a wrong-timeline write is the cross-customer leak this gate prevents.
     """
     a = _name_tokens(dialpad_name)
     b = _name_tokens(attio_name)
-    if not a or not b:
-        return False
-    # A single shared first name is too weak on a recycled phone (Dialpad "John" vs a
-    # stale Attio "John Smith" is likely a stranger). Require >=2 shared tokens whenever
-    # either side is multi-token; two single-token names must be equal. Fails closed.
-    if len(a) == 1 and len(b) == 1:
-        return a == b
-    return len(a & b) >= 2
+    # Require an EXACT token-set match (order/case/punct-insensitive). Any partial
+    # overlap fails closed: on a recycled/stale phone a shared first name ("John" vs
+    # "John Smith") OR shared given names with a different surname ("Mary Jane Watson"
+    # vs "Mary Jane Smith") can be a different person, and writing a customer's SMS onto
+    # a stranger's CRM timeline is the cross-customer leak this gate prevents. Skipping a
+    # note on a formatting mismatch is the safe trade.
+    return bool(a) and a == b
 
 
 def write_attio_inbound_note(normalized_event, *, db_path=None):

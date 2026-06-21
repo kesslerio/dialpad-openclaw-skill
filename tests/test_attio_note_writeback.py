@@ -498,3 +498,17 @@ class CallSiteWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NamesTieTests(unittest.TestCase):
+    def test_exact_match_ties(self):
+        self.assertTrue(ws._names_tie("Ada Lovelace", "Ada Lovelace"))
+        self.assertTrue(ws._names_tie("ada  LOVELACE", "Lovelace, Ada"))  # order/case/punct
+
+    def test_partial_overlaps_fail_closed(self):
+        self.assertFalse(ws._names_tie("Ada", "Ada Lovelace"))                 # first-name only
+        self.assertFalse(ws._names_tie("Mary Jane Watson", "Mary Jane Smith")) # diff surname
+        self.assertFalse(ws._names_tie("Ada Lovelace", "Ada Lovelace Jr"))     # extra suffix token
+        self.assertFalse(ws._names_tie("Bob", "Alice"))
+        self.assertFalse(ws._names_tie("", "Ada Lovelace"))
+        self.assertFalse(ws._names_tie(None, "Ada Lovelace"))

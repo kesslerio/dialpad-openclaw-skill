@@ -369,5 +369,24 @@ class DraftPersistenceFailureShadowTests(unittest.TestCase):
         self.assertNotIn("autoSendShadow", ev)
 
 
+class HookPayloadShadowContainmentTests(unittest.TestCase):
+    def test_hook_payload_never_carries_shadow(self):
+        # All 3 call sites converge at build_openclaw_hook_payload; the shadow
+        # decision must never reach the outbound OpenClaw hook, even when stamped on
+        # the event. auto_reply (forwarded to the hook) must carry no shadow key.
+        import json as _json
+        ev = {
+            "event_type": "sms",
+            "sender_number": "+14155550100",
+            "recipient_number": "+14155201316",
+            "autoSendShadow": {"mode": "shadow", "wouldAutoSend": True},
+            "auto_reply": {"status": "draft_created", "draftCreated": True,
+                           "replyPolicy": {"state": "normal"}},
+        }
+        blob = _json.dumps(ws.build_openclaw_hook_payload(ev))
+        self.assertNotIn("autoSendShadow", blob)
+        self.assertNotIn("wouldAutoSend", blob)
+
+
 if __name__ == "__main__":
     unittest.main()

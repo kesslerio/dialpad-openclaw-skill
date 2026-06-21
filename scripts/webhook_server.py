@@ -4265,8 +4265,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 "status": auto_reply_status,
                 "message": auto_reply_message,
                 "replyPolicy": reply_policy,
-                # S4 shadow decision — computed/logged only, never sent.
-                "autoSendShadow": normalized_event.get("autoSendShadow"),
+                # S4 shadow decision is metadata/log-only — NOT in auto_reply, which
+                # build_openclaw_hook_payload forwards to the hook. (Lives in the log line.)
             }
             log_auto_send_shadow(normalized_event)
             hook_sent, hook_status = send_to_openclaw_hooks(
@@ -4446,10 +4446,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             "status": auto_reply_status,
             "message": auto_reply_message,
             "replyPolicy": reply_policy,
-            # S4 shadow decision — computed/logged only, never sent. At this
-            # voicemail site there is no inbound_context and build_rich_sms_reply
-            # rejects the event, so the shadow decision is absent/not-eligible.
-            "autoSendShadow": normalized_event.get("autoSendShadow"),
+            # S4 shadow decision is metadata/log-only — NOT in auto_reply (hook-forwarded);
+            # at this voicemail site it is absent/not-eligible anyway.
         }
         log_auto_send_shadow(normalized_event)
         tg_text += build_approval_review_suffix(

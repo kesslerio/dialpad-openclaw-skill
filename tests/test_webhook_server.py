@@ -330,6 +330,161 @@ class WebhookNotificationClassificationTests(unittest.TestCase):
         self.assertEqual(requests[0]["reply_markup"], reply_markup)
 
 
+class LineTopicRoutingTests(unittest.TestCase):
+    """Line-based Telegram topic routing for inbound-SMS notification/approval cards."""
+
+    ROUTES = {
+        "+14155201316": "telegram:group:-1003882776023:topic:3530",
+        "+14153602954": "telegram:group:-1003882776023:topic:3533",
+        "+14159065785": "telegram:group:-1003882776023:topic:3537",
+    }
+
+    def _routes_map(self):
+        return webhook_server.parse_line_topic_routes(json.dumps(self.ROUTES))
+
+    def test_parse_telegram_group_route_extracts_chat_and_thread(self):
+        self.assertEqual(
+            webhook_server.parse_telegram_group_route(
+                "telegram:group:-1003882776023:topic:3530"
+            ),
+            ("-1003882776023", "3530"),
+        )
+
+    def test_parse_telegram_group_route_without_topic_returns_no_thread(self):
+        self.assertEqual(
+            webhook_server.parse_telegram_group_route("telegram:group:-100123"),
+            ("-100123", None),
+        )
+
+    def test_parse_telegram_group_route_rejects_garbage(self):
+        self.assertEqual(webhook_server.parse_telegram_group_route("nonsense"), (None, None))
+        self.assertEqual(webhook_server.parse_telegram_group_route(""), (None, None))
+        self.assertEqual(webhook_server.parse_telegram_group_route(None), (None, None))
+
+    def test_parse_line_topic_routes_normalizes_keys(self):
+        routes = self._routes_map()
+        # Keys normalized to last-10-digit form for inbound matching.
+        self.assertEqual(routes["4155201316"], "telegram:group:-1003882776023:topic:3530")
+        self.assertEqual(routes["4153602954"], "telegram:group:-1003882776023:topic:3533")
+        self.assertEqual(routes["4159065785"], "telegram:group:-1003882776023:topic:3537")
+
+    def test_parse_line_topic_routes_defensive_on_bad_json(self):
+        self.assertEqual(webhook_server.parse_line_topic_routes("not json"), {})
+        self.assertEqual(webhook_server.parse_line_topic_routes(""), {})
+        self.assertEqual(webhook_server.parse_line_topic_routes(None), {})
+        # JSON array (not object) → ignored, never crashes.
+        self.assertEqual(webhook_server.parse_line_topic_routes('["x"]'), {})
+
+    def test_line_match_routes_to_topic(self):
+        with patch.object(webhook_server, "LINE_TOPIC_ROUTES", self._routes_map()), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""):
+            chat_id, thread_id = webhook_server.resolve_telegram_route(
+                "+14155550123", "+14159065785"
+            )
+        self.assertEqual(chat_id, "-1003882776023")
+        self.assertEqual(thread_id, "3537")
+
+    def test_recipient_line_as_list_still_matches(self):
+        with patch.object(webhook_server, "LINE_TOPIC_ROUTES", self._routes_map()), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""):
+            # Dialpad payloads often wrap to_number in a list.
+            chat_id, thread_id = webhook_server.resolve_telegram_route(
+                "+14155550123", ["+14153602954"]
+            )
+        self.assertEqual(chat_id, "-1003882776023")
+        self.assertEqual(thread_id, "3533")
+
+    def test_unknown_line_falls_back_to_default(self):
+        with patch.object(webhook_server, "LINE_TOPIC_ROUTES", self._routes_map()), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""):
+            chat_id, thread_id = webhook_server.resolve_telegram_route(
+                "+14155550123", "+19998887777"
+            )
+        self.assertIsNone(chat_id)
+        self.assertIsNone(thread_id)
+
+    def test_priority_caller_route_overrides_line_route(self):
+        with patch.object(webhook_server, "LINE_TOPIC_ROUTES", self._routes_map()), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", {"4155550123"}), \
+                patch.object(
+                    webhook_server,
+                    "DIALPAD_PRIORITY_ROUTE_TO",
+                    "telegram:group:-100999:topic:42",
+                ):
+            # Sender is a priority caller AND the line has a topic route — priority wins.
+            chat_id, thread_id = webhook_server.resolve_telegram_route(
+                "+14155550123", "+14159065785"
+            )
+        self.assertEqual(chat_id, "-100999")
+        self.assertEqual(thread_id, "42")
+
+    def test_malformed_routes_behave_as_unset(self):
+        with patch.object(
+            webhook_server,
+            "LINE_TOPIC_ROUTES",
+            webhook_server.parse_line_topic_routes("{bad json"),
+        ), patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""):
+            chat_id, thread_id = webhook_server.resolve_telegram_route(
+                "+14155550123", "+14159065785"
+            )
+        self.assertIsNone(chat_id)
+        self.assertIsNone(thread_id)
+
+    def test_send_to_telegram_emits_chat_and_thread_on_wire(self):
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout=10):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse()
+
+        with patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100default"), \
+                patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            sent = webhook_server.send_to_telegram(
+                "Card",
+                chat_id="-1003882776023",
+                message_thread_id="3537",
+            )
+
+        self.assertTrue(sent)
+        self.assertEqual(requests[0]["chat_id"], "-1003882776023")
+        self.assertEqual(requests[0]["message_thread_id"], "3537")
+
+    def test_send_to_telegram_falls_back_to_default_chat_without_topic(self):
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout=10):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse()
+
+        with patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100default"), \
+                patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            sent = webhook_server.send_to_telegram("Card")
+
+        self.assertTrue(sent)
+        self.assertEqual(requests[0]["chat_id"], "-100default")
+        self.assertNotIn("message_thread_id", requests[0])
+
+
 class MissedCallResolutionTests(unittest.TestCase):
     def test_sparse_payload_nested_key_resolution(self):
         payload = {
@@ -729,6 +884,131 @@ class CallWebhookHandlerTests(unittest.TestCase):
 
         self.assertEqual(status["code"], 401)
 
+    def test_missed_call_card_routed_to_line_topic_on_wire(self):
+        """End-to-end: a configured line routes the missed-call card to its forum topic."""
+        telegram_requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout=10):
+            if "api.telegram.org" in request.full_url and request.full_url.endswith("/sendMessage"):
+                telegram_requests.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse()
+
+        routes = webhook_server.parse_line_topic_routes(
+            json.dumps({"+14159065785": "telegram:group:-1003882776023:topic:3537"})
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", False), \
+                patch.object(webhook_server, "LINE_TOPIC_ROUTES", routes), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100default"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": None,
+                        "first_name": None,
+                        "last_name": None,
+                        "company": None,
+                        "job_title": None,
+                        "status": "not_found",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[]), \
+                patch.object(webhook_server, "send_to_openclaw_hooks", return_value=(True, "http_200")), \
+                patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-line-topic",
+                "from_number": "+14155550123",
+                # Dialpad commonly wraps the recipient line in a list.
+                "to_number": ["+14159065785"],
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(len(telegram_requests), 1)
+        self.assertEqual(telegram_requests[0]["chat_id"], "-1003882776023")
+        self.assertEqual(telegram_requests[0]["message_thread_id"], "3537")
+
+    def test_missed_call_unknown_line_uses_default_chat_no_topic(self):
+        """End-to-end: an unconfigured line falls back to the default chat, no topic."""
+        telegram_requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout=10):
+            if "api.telegram.org" in request.full_url and request.full_url.endswith("/sendMessage"):
+                telegram_requests.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse()
+
+        routes = webhook_server.parse_line_topic_routes(
+            json.dumps({"+14159065785": "telegram:group:-1003882776023:topic:3537"})
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", False), \
+                patch.object(webhook_server, "LINE_TOPIC_ROUTES", routes), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100default"), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": None,
+                        "first_name": None,
+                        "last_name": None,
+                        "company": None,
+                        "job_title": None,
+                        "status": "not_found",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[]), \
+                patch.object(webhook_server, "send_to_openclaw_hooks", return_value=(True, "http_200")), \
+                patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-unknown-line",
+                "from_number": "+14155550123",
+                "to_number": ["+19998887777"],
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(len(telegram_requests), 1)
+        self.assertEqual(telegram_requests[0]["chat_id"], "-100default")
+        self.assertNotIn("message_thread_id", telegram_requests[0])
+
     def test_inbound_missed_call_forwards_hook_and_telegram(self):
         hook_calls = []
         telegram_messages = []
@@ -766,7 +1046,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
-                    side_effect=lambda text: telegram_messages.append(text) or True,
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
                 ), \
                 patch.object(
                     webhook_server,
@@ -1000,7 +1280,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
-                    side_effect=lambda text: telegram_messages.append(text) or True,
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
                 ):
             payload = {
                 "direction": "inbound",
@@ -1045,7 +1325,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
-                    side_effect=lambda text: telegram_messages.append(text) or True,
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
                 ):
             payload = {
                 "direction": "inbound",
@@ -1084,7 +1364,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
-                    side_effect=lambda text: telegram_messages.append(text) or True,
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
                 ):
             payload = {
                 "direction": "inbound",
@@ -1122,7 +1402,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
-                    side_effect=lambda text: telegram_messages.append(text) or True,
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
                 ):
             payload = {
                 "direction": "outbound",
@@ -1164,7 +1444,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 patch.object(
                     webhook_server,
                     "send_to_telegram",
-                    side_effect=lambda text: telegram_messages.append(text) or True,
+                    side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
                 ):
             payload = {
                 "direction": "inbound",
@@ -1462,7 +1742,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(
             webhook_server,
             "send_to_telegram",
-            side_effect=lambda text: telegram_messages.append(text) or True,
+            side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
         ), patch.object(
             webhook_server,
             "dialpad_send_sms",
@@ -1519,7 +1799,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(
             webhook_server,
             "send_to_telegram",
-            side_effect=lambda text: telegram_messages.append(text) or True,
+            side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
         ):
             payload = {
                 "from_number": "+14155550123",
@@ -1629,7 +1909,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(
             webhook_server,
             "send_to_telegram",
-            side_effect=lambda text: telegram_messages.append(text) or True,
+            side_effect=lambda text, **_kwargs: telegram_messages.append(text) or True,
         ):
             payload = {
                 "from_number": "+14155550123",

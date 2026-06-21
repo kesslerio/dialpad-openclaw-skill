@@ -19,6 +19,9 @@ Environment Variables:
 - DIALPAD_TELEGRAM_BOT_TOKEN - Telegram bot token (required for call/voicemail notifications)
 - DIALPAD_TELEGRAM_CHAT_ID - Telegram chat ID (required for call/voicemail notifications)
 - DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED (default: disabled)
+- DIALPAD_LINE_TOPIC_ROUTES - JSON object mapping a normalized E.164 recipient line to a
+  Telegram route string (telegram:group:<chat_id>:topic:<thread_id>), routing each inbound-SMS
+  card/notification to the forum topic for the Dialpad line it arrived on (optional)
 - TELEGRAM_WEBHOOK_SECRET - Telegram secret_token for inline approval callbacks
 - DIALPAD_API_KEY - Dialpad API key (required for contact lookup)
 - DIALPAD_WEBHOOK_SECRET - webhook auth secret (optional, enables signature/JWT verification)
@@ -113,6 +116,7 @@ DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED = parse_bool_env(
 )
 DIALPAD_PRIORITY_ROUTE_TO = os.environ.get("DIALPAD_PRIORITY_ROUTE_TO", "")
 DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", "")
+DIALPAD_LINE_TOPIC_ROUTES = os.environ.get("DIALPAD_LINE_TOPIC_ROUTES", "")
 DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), False)
 DIALPAD_RICH_SMS_DRAFTS_ENABLED = parse_bool_env(os.environ.get("DIALPAD_RICH_SMS_DRAFTS_ENABLED"), True)
 DIALPAD_QMD_COMMAND = os.environ.get("DIALPAD_QMD_COMMAND", "qmd")
@@ -300,6 +304,85 @@ def parse_priority_route_phones(raw_value):
 
 
 PRIORITY_ROUTE_PHONES = parse_priority_route_phones(DIALPAD_PRIORITY_ROUTE_PHONES)
+
+
+def parse_line_topic_routes(raw_value):
+    """
+    Parse DIALPAD_LINE_TOPIC_ROUTES (JSON object) into a normalized-line -> route-string map.
+
+    Maps each Dialpad recipient line (E.164) to a Telegram route string of the form
+    ``telegram:group:<chat_id>:topic:<thread_id>``. Keys are normalized to last-10-digit
+    form so inbound recipient lines match regardless of country-code formatting.
+
+    Defensive by design: bad/missing JSON, non-object payloads, or unusable entries yield an
+    empty map instead of raising, so a misconfigured value never breaks webhook delivery.
+    """
+    routes = {}
+    if not raw_value:
+        return routes
+    try:
+        mapping = json.loads(raw_value)
+    except Exception as exc:  # noqa: BLE001 - misconfig must degrade, never crash.
+        print(f"⚠️  Invalid DIALPAD_LINE_TOPIC_ROUTES, ignoring: {exc}")
+        return routes
+    if not isinstance(mapping, dict):
+        print("⚠️  DIALPAD_LINE_TOPIC_ROUTES must be a JSON object, ignoring")
+        return routes
+    for line, route in mapping.items():
+        normalized = normalize_phone_number(line)
+        if normalized and isinstance(route, str) and route.strip():
+            routes[normalized] = route.strip()
+    return routes
+
+
+LINE_TOPIC_ROUTES = parse_line_topic_routes(DIALPAD_LINE_TOPIC_ROUTES)
+
+
+def parse_telegram_group_route(route):
+    """
+    Parse ``telegram:group:<chat_id>:topic:<thread_id>`` into (chat_id, message_thread_id).
+
+    Returns (None, None) for empty/unparseable routes so callers fall back to the default chat.
+    The thread id is optional: ``telegram:group:<chat_id>`` resolves to (chat_id, None).
+    """
+    if not route or not isinstance(route, str):
+        return None, None
+    parts = route.split(":")
+    if len(parts) < 3 or parts[0] != "telegram" or parts[1] != "group":
+        return None, None
+    chat_id = parts[2].strip() or None
+    thread_id = None
+    if len(parts) >= 5 and parts[3] == "topic":
+        thread_id = parts[4].strip() or None
+    return chat_id, thread_id
+
+
+def resolve_telegram_route(sender_number, recipient_line):
+    """
+    Resolve the Telegram (chat_id, message_thread_id) for an inbound-SMS card.
+
+    Precedence:
+      1. Priority-caller route wins (DIALPAD_PRIORITY_ROUTE_TO for senders in
+         PRIORITY_ROUTE_PHONES) — unchanged existing behavior.
+      2. Else line-topic route for the recipient Dialpad line (DIALPAD_LINE_TOPIC_ROUTES).
+      3. Else (None, None): caller falls back to the default DIALPAD_TELEGRAM_CHAT_ID, no topic.
+
+    ``recipient_line`` may be a list (Dialpad payloads often wrap to_number); the first value is
+    used and normalized, never re-stringified as a list.
+    """
+    sender_norm = normalize_phone_number(sender_number)
+    if (
+        DIALPAD_PRIORITY_ROUTE_TO
+        and sender_norm
+        and sender_norm in PRIORITY_ROUTE_PHONES
+    ):
+        return parse_telegram_group_route(DIALPAD_PRIORITY_ROUTE_TO)
+
+    line_norm = normalize_phone_number(first_value(recipient_line))
+    if line_norm and line_norm in LINE_TOPIC_ROUTES:
+        return parse_telegram_group_route(LINE_TOPIC_ROUTES[line_norm])
+
+    return None, None
 
 
 def get_line_name(to_number):
@@ -850,20 +933,26 @@ def call_telegram_api(method, payload, *, timeout=10):
         return False
 
 
-def send_to_telegram(text, reply_markup=None):
+def send_to_telegram(text, reply_markup=None, *, chat_id=None, message_thread_id=None):
     """
-    Send a message to the configured Telegram channel.
-    Returns True on success, False on failure (non-blocking).
+    Send a message to a Telegram channel.
+
+    Routes to ``chat_id`` (and optional forum ``message_thread_id``) when provided, otherwise
+    falls back to the default DIALPAD_TELEGRAM_CHAT_ID with no topic. Returns True on success,
+    False on failure (non-blocking).
     """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    resolved_chat_id = chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or not resolved_chat_id:
         print("⚠️  Telegram not configured (missing BOT_TOKEN or CHAT_ID)")
         return False
 
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": resolved_chat_id,
         "text": text,
         "parse_mode": "Markdown"
     }
+    if message_thread_id is not None:
+        payload["message_thread_id"] = message_thread_id
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
@@ -3736,6 +3825,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         telegram_sms_sent = None
         telegram_status = TELEGRAM_STATUS_NOT_APPLICABLE
         if direction == "inbound":
+            route_chat_id, route_thread_id = resolve_telegram_route(from_num, to_num)
             if (
                 inbound_alert_decision["eligible"]
                 and DIALPAD_SMS_TELEGRAM_NOTIFY
@@ -3767,10 +3857,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 )
                 tg_text += build_human_only_blocked_suffix(reply_policy)
                 reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
-                telegram_sms_sent = (
-                    send_to_telegram(tg_text, reply_markup=reply_markup)
-                    if reply_markup
-                    else send_to_telegram(tg_text)
+                telegram_sms_sent = send_to_telegram(
+                    tg_text,
+                    reply_markup=reply_markup,
+                    chat_id=route_chat_id,
+                    message_thread_id=route_thread_id,
                 )
                 telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif hook_status == "filtered_opt_out":
@@ -3782,7 +3873,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"Message: {escape_telegram_markdown(text)}\n"
                     "Automation is not allowed to send on this thread."
                 )
-                telegram_sms_sent = send_to_telegram(tg_text)
+                telegram_sms_sent = send_to_telegram(
+                    tg_text,
+                    chat_id=route_chat_id,
+                    message_thread_id=route_thread_id,
+                )
                 telegram_status = "human_only_notified" if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif hook_status == "opt_out_persistence_failed":
                 tg_text = (
@@ -3790,7 +3885,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     f"From: {escape_telegram_markdown(str(from_num))}\n"
                     "Automation did not create a draft, but the opt-out could not be confirmed durable."
                 )
-                telegram_sms_sent = send_to_telegram(tg_text)
+                telegram_sms_sent = send_to_telegram(
+                    tg_text,
+                    chat_id=route_chat_id,
+                    message_thread_id=route_thread_id,
+                )
                 telegram_status = "opt_out_persistence_failed" if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif not DIALPAD_SMS_TELEGRAM_NOTIFY:
                 telegram_status = "disabled"
@@ -4012,10 +4111,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             )
             tg_text += build_human_only_blocked_suffix(reply_policy)
             reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
-            telegram_sent = (
-                send_to_telegram(tg_text, reply_markup=reply_markup)
-                if reply_markup
-                else send_to_telegram(tg_text)
+            route_chat_id, route_thread_id = resolve_telegram_route(from_num, to_num)
+            telegram_sent = send_to_telegram(
+                tg_text,
+                reply_markup=reply_markup,
+                chat_id=route_chat_id,
+                message_thread_id=route_thread_id,
             )
 
             print(f"[{datetime.now().isoformat()}]")
@@ -4179,10 +4280,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         )
         tg_text += build_human_only_blocked_suffix(reply_policy)
         reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
-        telegram_sent = (
-            send_to_telegram(tg_text, reply_markup=reply_markup)
-            if reply_markup
-            else send_to_telegram(tg_text)
+        route_chat_id, route_thread_id = resolve_telegram_route(from_num, to_num)
+        telegram_sent = send_to_telegram(
+            tg_text,
+            reply_markup=reply_markup,
+            chat_id=route_chat_id,
+            message_thread_id=route_thread_id,
         )
 
         print(f"[{datetime.now().isoformat()}]")
@@ -4252,6 +4355,13 @@ def main():
         print(f"  - Priority Route Phones: {', '.join(sorted(PRIORITY_ROUTE_PHONES))}")
     else:
         print(f"  - Priority Route Phones: (unset)")
+    if LINE_TOPIC_ROUTES:
+        print(f"  - Line Topic Routes:")
+        for line in sorted(LINE_TOPIC_ROUTES.keys()):
+            formatted = format_phone_number(line) or line
+            print(f"    - {formatted} -> {LINE_TOPIC_ROUTES[line]}")
+    else:
+        print(f"  - Line Topic Routes: (unset)")
     print(f"  - OpenClaw Hooks Agent ID: {OPENCLAW_HOOKS_AGENT_ID or '(default)'}")
     print(f"  - Telegram: {'✓' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else '✗ (call/voicemail notifications disabled)'}")
     print(f"  - SMS Telegram Alerts: {'✓' if DIALPAD_SMS_TELEGRAM_NOTIFY else '✗ (disabled)'}")

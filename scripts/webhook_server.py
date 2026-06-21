@@ -362,26 +362,20 @@ def resolve_telegram_route(sender_number, recipient_line):
     Resolve the Telegram (chat_id, message_thread_id) for an inbound-SMS card.
 
     Precedence:
-      1. Priority-caller route wins (DIALPAD_PRIORITY_ROUTE_TO for senders in
-         PRIORITY_ROUTE_PHONES) — unchanged existing behavior.
-      2. Else line-topic route for the recipient Dialpad line (DIALPAD_LINE_TOPIC_ROUTES).
-      3. Else (None, None): caller falls back to the default DIALPAD_TELEGRAM_CHAT_ID, no topic.
+      1. Line-topic route for the recipient Dialpad line (DIALPAD_LINE_TOPIC_ROUTES).
+      2. Else (None, None): caller falls back to the default DIALPAD_TELEGRAM_CHAT_ID, no topic.
 
     ``recipient_line`` may be a list (Dialpad payloads often wrap to_number); the first value is
     used and normalized, never re-stringified as a list.
-    """
-    sender_norm = normalize_phone_number(sender_number)
-    if (
-        DIALPAD_PRIORITY_ROUTE_TO
-        and sender_norm
-        and sender_norm in PRIORITY_ROUTE_PHONES
-    ):
-        return parse_telegram_group_route(DIALPAD_PRIORITY_ROUTE_TO)
 
+    DIALPAD_PRIORITY_ROUTE_TO is deliberately NOT applied to the card: it targets the OpenClaw
+    hook (`target_to`) group, which ssdialpadbot is not a member of, so sending the direct card
+    there would silently fail. Priority routing stays a hook concept. ``sender_number`` is
+    unused here but kept for call-site stability.
+    """
     line_norm = normalize_phone_number(first_value(recipient_line))
     if line_norm and line_norm in LINE_TOPIC_ROUTES:
         return parse_telegram_group_route(LINE_TOPIC_ROUTES[line_norm])
-
     return None, None
 
 

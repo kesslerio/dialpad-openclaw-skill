@@ -406,7 +406,10 @@ class LineTopicRoutingTests(unittest.TestCase):
         self.assertIsNone(chat_id)
         self.assertIsNone(thread_id)
 
-    def test_priority_caller_route_overrides_line_route(self):
+    def test_priority_route_does_not_affect_card_routing(self):
+        # DIALPAD_PRIORITY_ROUTE_TO is a hook (target_to) concept for a group ssdialpadbot
+        # cannot post to; it must NOT route the direct card. A priority caller's card still
+        # routes by the recipient line.
         with patch.object(webhook_server, "LINE_TOPIC_ROUTES", self._routes_map()), \
                 patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", {"4155550123"}), \
                 patch.object(
@@ -414,12 +417,12 @@ class LineTopicRoutingTests(unittest.TestCase):
                     "DIALPAD_PRIORITY_ROUTE_TO",
                     "telegram:group:-100999:topic:42",
                 ):
-            # Sender is a priority caller AND the line has a topic route — priority wins.
             chat_id, thread_id = webhook_server.resolve_telegram_route(
                 "+14155550123", "+14159065785"
             )
-        self.assertEqual(chat_id, "-100999")
-        self.assertEqual(thread_id, "42")
+        # routed by the line (+14159065785 -> main topic 3537), NOT the priority group -100999
+        self.assertEqual(chat_id, "-1003882776023")
+        self.assertEqual(thread_id, "3537")
 
     def test_malformed_routes_behave_as_unset(self):
         with patch.object(

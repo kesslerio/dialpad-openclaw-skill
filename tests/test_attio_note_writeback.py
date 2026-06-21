@@ -55,6 +55,7 @@ def _event(
     text="Hi, I'd like a demo of ShapeScale please.",
     sender_number="+14155550123",
     message_id="msg-1",
+    contact_name="Ada Lovelace",  # ties to PERSON's full_name (identity-match gate)
 ):
     return {
         "event_type": "sms",
@@ -63,6 +64,7 @@ def _event(
         "recipient_number": "+14155201316",  # the Dialpad line — must NOT be used
         "message_id": message_id,
         "inbound_context": {"identityConfidence": confidence},
+        "first_contact": {"contactName": contact_name, "knownContact": True},
     }
 
 
@@ -221,6 +223,49 @@ class AttioNoteWritebackTests(unittest.TestCase):
         self.assertEqual(second["status"], "duplicate")
         self.assertEqual(len(fake.note_posts), 1)  # exactly one POST across both
 
+    def test_identity_mismatch_does_not_write(self):
+        # Recycled/stale phone: Dialpad resolved "Bob Smith" but Attio's record for the
+        # number is "Ada Lovelace" -> names don't tie -> fail closed, NO POST. This is
+        # the exact cross-customer CRM leak the gate exists to prevent.
+        fake = CapturingRequest()
+        result = self._write(_event(contact_name="Bob Smith"), fake)
+        self.assertFalse(result["written"])
+        self.assertEqual(result["status"], "identity_mismatch")
+        self.assertEqual(fake.note_posts, [])
+
+    def test_partial_name_ties(self):
+        # First-name-only Dialpad record still ties to the fuller Attio name.
+        fake = CapturingRequest()
+        result = self._write(_event(contact_name="Ada"), fake)
+        self.assertTrue(result["written"])
+
+    def test_long_message_truncated_with_ellipsis(self):
+        # A multipart SMS (>160 chars) is clamped with a visible ellipsis marker so a
+        # rep can see content was cut rather than silently losing the actionable part.
+        fake = CapturingRequest()
+        result = self._write(_event(text="A" * 400), fake)
+        self.assertTrue(result["written"])
+        content = fake.note_posts[0][2]["data"]["content_plaintext"]
+        self.assertLessEqual(len(content), 160)
+        self.assertTrue(content.endswith("\u2026"))
+
+    def test_failed_post_keeps_claim_and_suppresses_retry(self):
+        # The most consequential branch of claim-before-POST/never-release: first
+        # delivery claims the message id then the POST raises -> error, and the claim
+        # is intentionally NOT released. A retry with the SAME message_id must be a
+        # duplicate with NO second POST (guards a double-write when the first POST may
+        # have partially succeeded). A regression that released on error would pass the
+        # other tests yet break this invariant.
+        fail = CapturingRequest(raise_exc=attio_context.AttioError("boom"))
+        first = self._write(_event(message_id="retry-1"), fail)
+        self.assertFalse(first["written"])
+        self.assertEqual(first["status"], "error")
+        ok = CapturingRequest()  # would POST successfully if it were reached
+        second = self._write(_event(message_id="retry-1"), ok)
+        self.assertFalse(second["written"])
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(ok.note_posts, [])  # claim kept -> no second POST
+
     def test_missing_message_id_no_write(self):
         fake = CapturingRequest()
         result = self._write(_event(message_id=None), fake)
@@ -270,7 +315,7 @@ class AttioNoteWritebackTests(unittest.TestCase):
 
     # 10 ------------------------------------------------------------------
     def test_missing_record_id_no_post(self):
-        person = {"id": {}, "values": {"name": [{"full_name": "No Id", "active_until": None}]}}
+        person = {"id": {}, "values": {"name": [{"full_name": "Ada Lovelace", "active_until": None}]}}
         fake = CapturingRequest(person=person)
         result = self._write(_event(), fake)
         self.assertFalse(result["written"])

@@ -2659,6 +2659,24 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
     }
 
 
+def _name_tokens(name):
+    return set(re.findall(r"[a-z0-9]+", str(name or "").lower()))
+
+
+def _names_tie(dialpad_name, attio_name):
+    """True only if the Dialpad-resolved name and the Attio person name are plausibly
+    the SAME person. Token-set comparison (case/punct/whitespace-insensitive): the
+    smaller non-empty token set must be a subset of the larger (handles 'John Smith'
+    vs 'John Smith Jr' and first-name-only Dialpad records). Distinct names — the
+    recycled/stale-phone cross-customer case — return False, failing the write closed.
+    """
+    a = _name_tokens(dialpad_name)
+    b = _name_tokens(attio_name)
+    if not a or not b:
+        return False
+    return a <= b or b <= a
+
+
 def write_attio_inbound_note(normalized_event, *, db_path=None):
     """Write the inbound SMS body to the matched Attio person's timeline (S5).
 
@@ -2726,6 +2744,15 @@ def write_attio_inbound_note(normalized_event, *, db_path=None):
             # Phone matched a record with no usable name -> S2 would rate this
             # medium, not high. Belt for the inbound-context suspenders.
             return {"written": False, "status": "low_confidence", "note_id": None}
+        # IDENTITY MATCH (cross-customer leak guard): high inbound-context confidence
+        # means Dialpad resolved a known contact by NAME; the Attio person came from the
+        # phone number. On a recycled/stale phone those can be DIFFERENT people. Require
+        # the Dialpad-resolved name to tie to the Attio person's name, or fail closed --
+        # never write a customer's SMS onto a stranger's timeline.
+        first_contact = normalized_event.get("first_contact") or {}
+        dialpad_name = first_contact.get("contactName") if isinstance(first_contact, dict) else None
+        if not _names_tie(dialpad_name, full_name):
+            return {"written": False, "status": "identity_mismatch", "note_id": None}
         if not attio_context.person_record_id(person):
             return {"written": False, "status": "no_record_id", "note_id": None}
 
@@ -2739,8 +2766,11 @@ def write_attio_inbound_note(normalized_event, *, db_path=None):
         if claim["duplicate"]:
             return {"written": False, "status": "duplicate", "note_id": None}
 
+        # Clamp to ~160 chars with an ellipsis marker so a reader can see content was
+        # truncated (multipart SMS would otherwise be silently cut mid-message).
+        note_body = text if len(text) <= 160 else text[:159].rstrip() + "\u2026"
         try:
-            note_id = attio_context.create_person_note(person, text[:160])
+            note_id = attio_context.create_person_note(person, note_body)
         except attio_context.AttioError:
             # Claim is intentionally NOT released: the POST may have partially
             # succeeded, and a duplicate/wrong note is worse than a missing one.

@@ -2684,7 +2684,7 @@ def _names_tie(dialpad_name, attio_name):
     return bool(a) and a == b
 
 
-def write_attio_inbound_note(normalized_event, *, db_path=None):
+def write_attio_inbound_note(normalized_event, *, sender_enrichment=None, db_path=None):
     """Write the inbound SMS body to the matched Attio person's timeline (S5).
 
     Returns ``{"written": bool, "status": str, "note_id": <id|None>}`` and NEVER
@@ -2752,12 +2752,17 @@ def write_attio_inbound_note(normalized_event, *, db_path=None):
             # medium, not high. Belt for the inbound-context suspenders.
             return {"written": False, "status": "low_confidence", "note_id": None}
         # IDENTITY MATCH (cross-customer leak guard): high inbound-context confidence
-        # means Dialpad resolved a known contact by NAME; the Attio person came from the
-        # phone number. On a recycled/stale phone those can be DIFFERENT people. Require
+        # means Dialpad resolved a known contact; we tie the RAW resolved name (sender
+        # enrichment) to the phone-matched Attio person's name. On a recycled/stale phone those can be DIFFERENT people. Require
         # the Dialpad-resolved name to tie to the Attio person's name, or fail closed --
         # never write a customer's SMS onto a stranger's timeline.
-        first_contact = normalized_event.get("first_contact") or {}
-        dialpad_name = first_contact.get("contactName") if isinstance(first_contact, dict) else None
+        # Use the RAW resolved name (sender_enrichment first/last), NOT first_contact's
+        # contactName -- the latter is a formatted operator label (format_contact_enrichment
+        # appends "Title | Name (Company)"), which would never token-match the Attio name.
+        enrich = sender_enrichment or {}
+        dialpad_name = " ".join(
+            p for p in (enrich.get("first_name"), enrich.get("last_name")) if p
+        ).strip()
         if not _names_tie(dialpad_name, full_name):
             return {"written": False, "status": "identity_mismatch", "note_id": None}
         if not attio_context.person_record_id(person):
@@ -4179,7 +4184,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     print(f"   🤖 Auto Reply Draft: {'✓' if auto_reply_draft_created else '✗'} ({auto_reply_status})")
                 # S5: high-confidence-only, fail-closed, idempotent Attio note
                 # write-back. Never raises, so it cannot break this post-ACK flow.
-                note_result = write_attio_inbound_note(normalized_sms)
+                note_result = write_attio_inbound_note(normalized_sms, sender_enrichment=sender_enrichment)
                 normalized_sms["attio_note"] = note_result
                 if note_result.get("status") not in (None, "disabled"):
                     print(f"   🗒️  Attio note: {'✓' if note_result.get('written') else '✗'} ({note_result.get('status')})")

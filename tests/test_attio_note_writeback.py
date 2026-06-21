@@ -109,10 +109,13 @@ class AttioNoteWritebackTests(unittest.TestCase):
         self._flag.stop()
         Path(self.db).unlink(missing_ok=True)
 
-    def _write(self, event, fake):
+    def _write(self, event, fake, sender_enrichment=None):
+        if sender_enrichment is None:
+            sender_enrichment = {"first_name": "Ada", "last_name": "Lovelace"}  # ties to PERSON
         with patch.object(attio_context, "_request", fake), \
                 patch.object(attio_context, "_api_key", lambda: "test-key"):
-            return ws.write_attio_inbound_note(event, db_path=self.db)
+            return ws.write_attio_inbound_note(
+                event, sender_enrichment=sender_enrichment, db_path=self.db)
 
     # 1 -------------------------------------------------------------------
     def test_high_confidence_writes_note_to_right_person(self):
@@ -228,7 +231,8 @@ class AttioNoteWritebackTests(unittest.TestCase):
         # number is "Ada Lovelace" -> names don't tie -> fail closed, NO POST. This is
         # the exact cross-customer CRM leak the gate exists to prevent.
         fake = CapturingRequest()
-        result = self._write(_event(contact_name="Bob Smith"), fake)
+        result = self._write(_event(), fake,
+                             sender_enrichment={"first_name": "Bob", "last_name": "Smith"})
         self.assertFalse(result["written"])
         self.assertEqual(result["status"], "identity_mismatch")
         self.assertEqual(fake.note_posts, [])
@@ -237,7 +241,8 @@ class AttioNoteWritebackTests(unittest.TestCase):
         # First-name-only Dialpad name vs a multi-token Attio name is too weak
         # (recycled-phone first-name collision) -> identity_mismatch, no write.
         fake = CapturingRequest()
-        result = self._write(_event(contact_name="Ada"), fake)
+        result = self._write(_event(), fake,
+                             sender_enrichment={"first_name": "Ada", "last_name": None})
         self.assertFalse(result["written"])
         self.assertEqual(result["status"], "identity_mismatch")
         self.assertEqual(fake.note_posts, [])
@@ -370,7 +375,9 @@ class AttioNoteDedupeFailClosedTests(unittest.TestCase):
                 patch.object(attio_context, "_request", fake), \
                 patch.object(attio_context, "_api_key", lambda: "test-key"), \
                 patch.object(ws, "_init_attio_note_dedupe_db", side_effect=OSError("disk full")):
-            result = ws.write_attio_inbound_note(_event(), db_path="/nonexistent/x.db")
+            result = ws.write_attio_inbound_note(
+                _event(), sender_enrichment={"first_name": "Ada", "last_name": "Lovelace"},
+                db_path="/nonexistent/x.db")
         self.assertFalse(result["written"])
         self.assertEqual(result["status"], "dedupe_unavailable")
         self.assertEqual(fake.note_posts, [])
@@ -428,7 +435,7 @@ class CallSiteWiringTests(unittest.TestCase):
             patch.object(ws, "verify_webhook_auth", lambda *a, **k: (True, "test")),
             patch.object(ws, "handle_sms_webhook", lambda data: {"stored": True, "message": {}}),
             patch.object(ws, "lookup_contact_enrichment",
-                         lambda n: {"contact_name": "Ada Lovelace", "status": "resolved", "degraded": False}),
+                         lambda n: {"contact_name": "Ada Lovelace", "first_name": "Ada", "last_name": "Lovelace", "status": "resolved", "degraded": False}),
             patch.object(ws, "apply_payload_contact_fallback", lambda enr, data: enr),
             patch.object(ws, "assess_inbound_sms_alert_eligibility", lambda *a, **k: eligible),
             patch.object(ws, "build_inbound_context",
@@ -496,10 +503,6 @@ class CallSiteWiringTests(unittest.TestCase):
         self.assertEqual(fake.note_posts, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class NamesTieTests(unittest.TestCase):
     def test_exact_match_ties(self):
         self.assertTrue(ws._names_tie("Ada Lovelace", "Ada Lovelace"))
@@ -512,3 +515,7 @@ class NamesTieTests(unittest.TestCase):
         self.assertFalse(ws._names_tie("Bob", "Alice"))
         self.assertFalse(ws._names_tie("", "Ada Lovelace"))
         self.assertFalse(ws._names_tie(None, "Ada Lovelace"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -274,8 +274,9 @@ def create_person_note(person, content, *, title="Inbound SMS"):
 
     Body is the canonical Attio create-note shape (verified against the Attio REST
     reference 2026-06): a ``data`` wrapper with ``parent_object`` / ``parent_record_id``
-    / ``title`` (required) and ``content_plaintext`` (the live API uses
-    ``content_plaintext`` / ``content_markdown`` — NOT a ``format``/``content`` pair).
+    / ``title`` / ``format`` (required), and ``content`` (the request uses a single
+    ``content`` field paired with ``format``: "plaintext"; ``content_plaintext`` /
+    ``content_markdown`` are RESPONSE-only fields and would 400 in the request).
     The created note id lives at ``data.id.note_id`` in the response.
     """
     record_id = person_record_id(person)
@@ -284,12 +285,17 @@ def create_person_note(person, content, *, title="Inbound SMS"):
     text = _clean((content or "").strip()[:160])
     if not text:
         return None
+    # Attio's create-note REQUEST uses `format` + `content` (verified against the live
+    # API reference). `content_plaintext`/`content_markdown` are RESPONSE-only fields —
+    # sending content_plaintext would 400. parent_object/parent_record_id/title/format/
+    # content are all required.
     body = {
         "data": {
             "parent_object": "people",
             "parent_record_id": record_id,
             "title": title,
-            "content_plaintext": text,
+            "format": "plaintext",
+            "content": text,
         }
     }
     resp = _request("POST", "/notes", body)

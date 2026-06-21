@@ -13,7 +13,7 @@ Safety properties under test:
   - all errors are swallowed (written=False, never raises, never blocks);
   - the flag defaults OFF and gates everything;
   - the POST path is the bare ``/notes`` (full URL ``.../v2/notes``, never v2/v2);
-  - the body is the canonical data-wrapper with content_plaintext + parent_record_id.
+  - the body is the canonical data-wrapper with format=plaintext + content + parent_record_id.
 """
 import sys
 import tempfile
@@ -128,10 +128,10 @@ class AttioNoteWritebackTests(unittest.TestCase):
         self.assertEqual(data["parent_object"], "people")
         self.assertEqual(data["parent_record_id"], "REC123")
         self.assertEqual(data["title"], "Inbound SMS")
-        self.assertEqual(data["content_plaintext"], "Hi, I'd like a demo of ShapeScale please.")
-        # content_plaintext is the live shape — NOT a format/content pair.
-        self.assertNotIn("format", data)
-        self.assertNotIn("content", data)
+        self.assertEqual(data["content"], "Hi, I'd like a demo of ShapeScale please.")
+        self.assertEqual(data["format"], "plaintext")
+        # content_plaintext/content_markdown are RESPONSE-only fields, never sent.
+        self.assertNotIn("content_plaintext", data)
 
     # 2 -------------------------------------------------------------------
     def test_low_confidence_writes_nothing(self):
@@ -245,7 +245,7 @@ class AttioNoteWritebackTests(unittest.TestCase):
         fake = CapturingRequest()
         result = self._write(_event(text="A" * 400), fake)
         self.assertTrue(result["written"])
-        content = fake.note_posts[0][2]["data"]["content_plaintext"]
+        content = fake.note_posts[0][2]["data"]["content"]
         self.assertLessEqual(len(content), 160)
         self.assertTrue(content.endswith("\u2026"))
 
@@ -345,7 +345,7 @@ class AttioNoteWritebackTests(unittest.TestCase):
         with patch.object(attio_context, "_request", fake_request):
             out = attio_context.create_person_note(PERSON, long_text)
         self.assertEqual(out, "NOTE-X")
-        self.assertEqual(len(captured["body"]["data"]["content_plaintext"]), 160)
+        self.assertEqual(len(captured["body"]["data"]["content"]), 160)
 
     # 11 ------------------------------------------------------------------
     def test_disabled_flag_writes_nothing(self):
@@ -461,7 +461,8 @@ class CallSiteWiringTests(unittest.TestCase):
         body = fake.note_posts[0][2]["data"]
         self.assertEqual(body["parent_record_id"], "REC123")
         self.assertEqual(body["parent_object"], "people")
-        self.assertIn("content_plaintext", body)
+        self.assertEqual(body["format"], "plaintext")
+        self.assertIn("content", body)
 
     def test_flag_off_posts_no_note_through_handler(self):
         fake = CapturingRequest()

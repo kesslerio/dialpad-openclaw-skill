@@ -2621,18 +2621,82 @@ def _draft_greeting(normalized_event, sender_enrichment):
     return _context_greeting(sender_enrichment, normalized_event)
 
 
+# Exact live Attio "stage" titles → coarse deal segment, verified by a live Attio
+# pull (do not invent/guess titles). Keys are normalized (lowercase + collapsed
+# internal whitespace) so spacing variants like 'Not Qualified (MQL > SQL)' match.
+# Lost / Not a Fit / empty / any unmapped-or-new stage deliberately fall through
+# to None → generic copy, never a special voice. Keep robust to renamed stages.
+_DEAL_SEGMENT_STAGES = {
+    "customer": ("Won 🎉",),
+    "prospect_demo": (
+        "Sales Qualified", "DC Scheduling", "Call", "Call - Follow Up Sent",
+        "Call - No Show", "Demo Request", "Demo Booked", "Demo - No Show",
+        "Demo Canceled", "Demo Completed", "Demo Follow Up", "Negotiations",
+    ),
+    "prospect_cold": (
+        "MQL", "MQL Sequence", "Manual Review", "Qualifying Sequence",
+        "Not Qualified (MQL > SQL)", "Pause - Nurture (Timing)",
+    ),
+}
+
+
+def _normalize_stage_title(stage):
+    """Lowercase + collapse internal whitespace so spacing/case variants match."""
+    return " ".join(str(stage or "").split()).lower()
+
+
+_DEAL_SEGMENT_BY_STAGE = {
+    _normalize_stage_title(title): segment
+    for segment, titles in _DEAL_SEGMENT_STAGES.items()
+    for title in titles
+}
+
+
+def classify_deal_segment(stage):
+    """Map an Attio deal stage title to a coarse customer-facing segment.
+
+    Normalizes the title (lowercase + collapsed internal whitespace) and matches
+    the verified live-Attio segment map. Returns one of 'customer',
+    'prospect_demo', 'prospect_cold', or None for Lost / Not a Fit / empty / any
+    unmapped or newly-renamed stage. Never raises — an unknown stage is a safe
+    None (generic copy), so a new Attio stage can't crash the draft path."""
+    normalized = _normalize_stage_title(stage)
+    if not normalized:
+        return None
+    return _DEAL_SEGMENT_BY_STAGE.get(normalized)
+
+
 def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
     greeting = _draft_greeting(normalized_event, sender_enrichment)
     confidence = (normalized_event.get("inbound_context") or {}).get("identityConfidence")
     company = str(crm_context.get("company") or "").strip()
-    # Name the matched company in the CUSTOMER-facing text ONLY at high confidence.
-    # A low/medium-confidence Attio phone-match may be wrong (reused/ported/shared
-    # number), and naming the wrong company to a customer is a PII leak. At lower
-    # confidence the operator still sees the Attio context via the draft's
-    # provenance line and can personalize manually before approving (U7 decision).
-    if company and confidence == "high":
-        return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation with {company} here and will follow up shortly."
-    return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation here and will follow up shortly."
+    # Segment framing is CUSTOMER-facing, so it rides the same high-confidence gate
+    # as naming the company (PR3/U7 PII rule). A low/medium-confidence Attio
+    # phone-match may be wrong (reused/ported/shared number); at lower confidence we
+    # return the existing generic line and let the operator personalize from the
+    # provenance line + segment shown on the approval card before approving.
+    if confidence != "high":
+        return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation here and will follow up shortly."
+
+    segment = classify_deal_segment(crm_context.get("stage"))
+    inbound_context = normalized_event.get("inbound_context")
+    if isinstance(inbound_context, dict) and segment:
+        # Surface the segment to the operator (brief + dedup fingerprint). Setting
+        # this alone is invisible — build_inbound_context_brief renders it.
+        inbound_context["dealSegment"] = segment
+
+    # Per-segment copy reads fine even if the phone-match is wrong: no "as a
+    # churned customer" framing, just a warm/relevant-but-safe opener. The company
+    # name is still only named when present (company-empty-at-high stays handled).
+    with_company = f" with {company}" if company else ""
+    if segment == "customer":
+        return f"Hi {greeting}, great to hear from you again. I have your ShapeScale account{with_company} here and will follow up shortly."
+    if segment == "prospect_demo":
+        return f"Hi {greeting}, thanks for the update. I have your ShapeScale demo conversation{with_company} here and will follow up shortly."
+    if segment == "prospect_cold":
+        return f"Hi {greeting}, thanks for reaching out about ShapeScale. I have your conversation{with_company} here and will follow up shortly with more details."
+    # generic (None / Lost / Not a Fit / unmapped) — current copy, no special voice.
+    return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation{with_company} here and will follow up shortly."
 
 
 def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _calendar_context):
@@ -3036,6 +3100,17 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
         f"*Recency:* {escape_telegram_markdown(recency_text)}",
         f"*Draft basis:* {escape_telegram_markdown(draft_text)}",
     ]
+    # Segment is only set when the customer-facing copy was actually varied
+    # (high-confidence Attio match). Surface it so the operator knows which voice
+    # the draft used and can sanity-check the match before approving.
+    segment = inbound_context.get("dealSegment")
+    if segment:
+        segment_label = {
+            "customer": "Customer",
+            "prospect_demo": "Prospect (demo)",
+            "prospect_cold": "Prospect (cold)",
+        }.get(segment, segment)
+        lines.append(f"*Segment:* {escape_telegram_markdown(segment_label)}")
     return "\n".join(lines)
 
 

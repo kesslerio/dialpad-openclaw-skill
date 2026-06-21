@@ -224,12 +224,89 @@ def find_person_by_phone(phone):
     return recs[0] if recs else None
 
 
+def find_people_by_phone(phone, limit=2):
+    """Return up to ``limit`` Attio people matching ``phone`` (default 2).
+
+    Used by the S5 note write-back to detect an AMBIGUOUS phone (a shared /
+    recycled / family-plan number that resolves to more than one person). Writing a
+    customer's SMS onto the wrong person's timeline is a cross-customer CRM leak, so
+    the caller refuses to write when this returns more than one record. Returns a
+    list (possibly empty); never raises beyond the underlying AttioError.
+    """
+    if not phone:
+        return []
+    return _query_records("people", {"phone_numbers": phone}, limit=limit)
+
+
 def find_person_by_email(email):
     """Return the first Attio person whose email_addresses matches, or None."""
     if not email or "@" not in str(email):
         return None
     recs = _query_records("people", {"email_addresses": email}, limit=1)
     return recs[0] if recs else None
+
+
+def person_record_id(person):
+    """Return the Attio record_id for a person record, or None.
+
+    VERIFIED live shape: ``person["id"]["record_id"]`` (sibling keys are
+    ``workspace_id``, ``object_id``). Tolerates a non-dict person / missing id
+    envelope without raising. This is the value Attio's ``POST /notes`` wants as
+    ``parent_record_id`` (S5 person-timeline write-back).
+    """
+    ident = (person or {}).get("id") if isinstance(person, dict) else None
+    if isinstance(ident, dict):
+        rid = ident.get("record_id")
+        return rid if isinstance(rid, str) and rid.strip() else None
+    return None
+
+
+def create_person_note(person, content, *, title="Inbound SMS"):
+    """POST a plaintext note onto a person record's timeline. Returns the note id, or None.
+
+    Fail-closed like every helper here: raises ``AttioError`` on transport/API
+    failure (the S5 caller swallows it). Returns ``None`` — never raises — when
+    there is no usable record id or no content (no POST is issued).
+
+    Endpoint is the bare ``/notes``: ``ATTIO_BASE`` already ends in ``/v2`` and
+    ``_request`` concatenates ``f"{ATTIO_BASE}{path}"`` (a ``/v2/notes`` path would
+    resolve to ``/v2/v2/notes`` -> 404).
+
+    Body is the canonical Attio create-note shape (verified against the Attio REST
+    reference 2026-06): a ``data`` wrapper with ``parent_object`` / ``parent_record_id``
+    / ``title`` / ``format`` (required), and ``content`` (the request uses a single
+    ``content`` field paired with ``format``: "plaintext"; ``content_plaintext`` /
+    ``content_markdown`` are RESPONSE-only fields and would 400 in the request).
+    The created note id lives at ``data.id.note_id`` in the response.
+    """
+    record_id = person_record_id(person)
+    if not record_id:
+        return None
+    text = _clean((content or "").strip()[:160])
+    if not text:
+        return None
+    # Attio's create-note REQUEST uses `format` + `content` (verified against the live
+    # API reference). `content_plaintext`/`content_markdown` are RESPONSE-only fields —
+    # sending content_plaintext would 400. parent_object/parent_record_id/title/format/
+    # content are all required.
+    body = {
+        "data": {
+            "parent_object": "people",
+            "parent_record_id": record_id,
+            "title": title,
+            "format": "plaintext",
+            "content": text,
+        }
+    }
+    resp = _request("POST", "/notes", body)
+    note_id = None
+    if isinstance(resp, dict):
+        ident = (resp.get("data") or {}).get("id")
+        if isinstance(ident, dict):
+            note_id = ident.get("note_id")
+    # A 2xx with an unexpected id envelope still means the note was created; return
+    # a truthy sentinel so the caller records success rather than a silent no-op.
+    return note_id or True
 
 
 def deal_for_person(person):

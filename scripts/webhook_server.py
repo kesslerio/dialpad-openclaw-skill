@@ -76,6 +76,18 @@ try:
 except Exception:
     sms_approval = None
 
+# Attio client for the S5 person-timeline note write-back. Optional + guarded so a
+# missing adapter never breaks import; the write path treats a None client as
+# "disabled" and writes nothing.
+# append (not insert(0)): adapters/ is searched LAST so a basename collision can
+# never shadow a stdlib/third-party/scripts module; attio_context is a unique name
+# importing only stdlib, so it still resolves.
+sys.path.append(str(skill_dir / "adapters"))
+try:
+    import attio_context
+except Exception:
+    attio_context = None
+
 
 def parse_bool_env(raw_value, default=True):
     """Parse common truthy/falsey env values, falling back when unset."""
@@ -118,6 +130,12 @@ DIALPAD_PRIORITY_ROUTE_TO = os.environ.get("DIALPAD_PRIORITY_ROUTE_TO", "")
 DIALPAD_PRIORITY_ROUTE_PHONES = os.environ.get("DIALPAD_PRIORITY_ROUTE_PHONES", "")
 DIALPAD_LINE_TOPIC_ROUTES = os.environ.get("DIALPAD_LINE_TOPIC_ROUTES", "")
 DIALPAD_AUTO_REPLY_ENABLED = parse_bool_env(os.environ.get("DIALPAD_AUTO_REPLY_ENABLED"), False)
+# S5 Attio person-timeline write-back: default OFF. A CRM mutation, human-gated.
+# Only flip to on AFTER the CP2 single-note live smoke (bare /notes path +
+# data-wrapper body + notes-write scope) passes. See docs/reference / the S5 PR.
+DIALPAD_ATTIO_NOTE_WRITEBACK_ENABLED = parse_bool_env(
+    os.environ.get("DIALPAD_ATTIO_NOTE_WRITEBACK_ENABLED"), False
+)
 DIALPAD_RICH_SMS_DRAFTS_ENABLED = parse_bool_env(os.environ.get("DIALPAD_RICH_SMS_DRAFTS_ENABLED"), True)
 # S4 SHADOW MODE: rich-reply categories (build_rich_sms_reply's 'category' key)
 # that would be eligible for confidence-gated auto-send. The shadow classifier
@@ -164,6 +182,14 @@ MISSED_CALL_DEDUPE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 SMS_DEDUPE_TABLE = "sms_webhook_events"
 SMS_DEDUPE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+
+# S5: dedicated dedupe ledger for Attio note write-backs, keyed on the Dialpad
+# message id. Distinct from SMS_DEDUPE_TABLE (the intake claim) because the note
+# write has the OPPOSITE failure stance: claim-before-POST, never release, and
+# fail CLOSED when the store is unavailable — a duplicated/wrong CRM note is the
+# harm, so we only write when we can prove first-write.
+ATTIO_NOTE_DEDUPE_TABLE = "attio_note_writebacks"
+ATTIO_NOTE_DEDUPE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 TELEGRAM_STATUS_SENT = "sent"
 TELEGRAM_STATUS_FILTERED = "filtered"
@@ -1553,6 +1579,63 @@ def release_sms_webhook_event(dedupe_key, *, db_path=None):
         print(f"⚠️  SMS dedupe release failed ({type(exc).__name__})")
 
 
+def _init_attio_note_dedupe_db(db_path=None):
+    """Initialize (and reuse) the Attio note write-back dedupe table.
+
+    Shares the same SQLite db and concurrency pragmas as the SMS dedupe ledger;
+    only the table differs so the note ledger keeps its own retention/lifecycle."""
+    path = Path(db_path) if db_path is not None else _sms_dedupe_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    _apply_sqlite_concurrency_pragmas(conn)
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ATTIO_NOTE_DEDUPE_TABLE} (
+            dedupe_key TEXT PRIMARY KEY,
+            first_seen_at_ms INTEGER NOT NULL,
+            last_seen_at_ms INTEGER NOT NULL,
+            duplicate_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def claim_attio_note_writeback(message_id, *, db_path=None, now_ms=None):
+    """Claim an Attio note write-back by Dialpad message_id, failing CLOSED.
+
+    The note write is at-most-once: claim BEFORE the POST and NEVER release. Unlike
+    the intake claim (which fails OPEN because a dropped inbound is worse than a
+    rare duplicate), this fails CLOSED — when the store is unavailable we cannot
+    prove first-write, and a duplicated/wrong-person CRM note is the harm, so we
+    refuse to write. A missing internal note is strictly safer than a duplicate.
+
+    Returns ``{"claimed": bool, "duplicate": bool, "key": str|None, "status": str}``.
+    ``status`` is one of ``claimed`` / ``duplicate`` / ``no_message_id`` /
+    ``dedupe_unavailable``. ``claimed`` is True ONLY on a real first claim."""
+    key = _clean_identifier(message_id)
+    if not key:
+        # No stable idempotency anchor -> do not write (fail closed).
+        return {"claimed": False, "duplicate": False, "key": None, "status": "no_message_id"}
+
+    timestamp_ms = _now_ms() if now_ms is None else now_ms
+    try:
+        conn = _init_attio_note_dedupe_db(db_path=db_path)
+        try:
+            claimed = _claim_dedupe_row(
+                conn, ATTIO_NOTE_DEDUPE_TABLE, ATTIO_NOTE_DEDUPE_RETENTION_MS, f"attio-note:{key}", timestamp_ms
+            )
+        finally:
+            conn.close()
+        if claimed:
+            return {"claimed": True, "duplicate": False, "key": key, "status": "claimed"}
+        return {"claimed": False, "duplicate": True, "key": key, "status": "duplicate"}
+    except Exception as exc:  # noqa: BLE001 - fail CLOSED: prove first-write or do not write.
+        print(f"⚠️  Attio note dedupe unavailable ({type(exc).__name__}); skipping note")
+        return {"claimed": False, "duplicate": False, "key": key, "status": "dedupe_unavailable"}
+
+
 def _extract_payload_contact_name(data):
     """Extract a Dialpad-provided contact display name from webhook payloads."""
     contact = data.get("contact")
@@ -2098,7 +2181,10 @@ def normalize_sms_payload(data, contact_info=None):
     """Normalize Dialpad webhook payload to a consistent SMS object for hooks."""
     sender_number = data.get("from_number")
     recipient_number = _first_value(data.get("to_number"))
-    text = data.get("text", data.get("text_content", "")) or ""
+    # A present-but-blank (incl. whitespace-only) "text" must fall through to
+    # text_content (a valid Dialpad SMS shape). Use the canonical extractor so the
+    # write-back sees the real body instead of a whitespace string treated as truthy.
+    text = extract_message_text(data)
     direction = data.get("direction", "unknown")
     timestamp = (
         data.get("timestamp")
@@ -2577,6 +2663,156 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
         "owner": context_fields["owner"],
         "summary": summary[:300],
     }
+
+
+def _name_tokens(name):
+    return set(re.findall(r"[a-z0-9]+", str(name or "").lower()))
+
+
+def _names_tie(dialpad_name, attio_name):
+    """True only if the Dialpad-resolved name and the Attio person name are plausibly
+    the SAME person. Token-set comparison (case/punct/whitespace-insensitive): the
+    EXACT token-set equality (order/case/punct-insensitive). Any partial overlap — a
+    missing/extra token, a different surname, a first-name-only record — returns False,
+    failing the write closed, since a recycled/stale phone can resolve a DIFFERENT
+    person and a wrong-timeline write is the cross-customer leak this gate prevents.
+    """
+    a = _name_tokens(dialpad_name)
+    b = _name_tokens(attio_name)
+    # Require an EXACT token-set match (order/case/punct-insensitive). Any partial
+    # overlap fails closed: on a recycled/stale phone a shared first name ("John" vs
+    # "John Smith") OR shared given names with a different surname ("Mary Jane Watson"
+    # vs "Mary Jane Smith") can be a different person, and writing a customer's SMS onto
+    # a stranger's CRM timeline is the cross-customer leak this gate prevents. Skipping a
+    # note on a formatting mismatch is the safe trade.
+    return bool(a) and a == b
+
+
+def write_attio_inbound_note(normalized_event, *, sender_enrichment=None, db_path=None):
+    """Write the inbound SMS body to the matched Attio person's timeline (S5).
+
+    Returns ``{"written": bool, "status": str, "note_id": <id|None>}`` and NEVER
+    raises — every error is swallowed so this can never block the already-ACK'd
+    inbound, its storage, draft, hook, or Telegram card.
+
+    Hard safety gates (a low/medium-confidence phone-only Attio match can be the
+    WRONG person; writing a customer's SMS onto the wrong timeline is a
+    cross-customer CRM leak):
+      1. ``DIALPAD_ATTIO_NOTE_WRITEBACK_ENABLED`` must be on (default OFF).
+      2. ``inbound_context.identityConfidence`` must be ``high`` — exactly the
+         "we actually resolved this person via an exact phone match" condition.
+      3. The note POST is idempotent on the Dialpad message id (claim-before-POST,
+         never-release, fail-closed) so a Dialpad retry / client-disconnect
+         reprocess never double-writes.
+
+    Sensitive / OTP / opt-out / shortcode messages never reach here: the call site
+    lives inside ``if inbound_alert_decision["eligible"]:`` and those are ineligible.
+    """
+    result = {"written": False, "status": "disabled", "note_id": None}
+
+    if not DIALPAD_ATTIO_NOTE_WRITEBACK_ENABLED or attio_context is None:
+        return result
+
+    try:
+        # LINE GATE: the write-back is part of the sales-CRM automation, scoped to the
+        # sales line. Without this, enabling the flag on a multi-line deployment would
+        # log Work/Main/Support inbound SMS into the sales CRM too. Match the existing
+        # draft/auto-reply boundary (DIALPAD_AUTO_REPLY_SALES_LINE).
+        if normalize_phone_number(normalized_event.get("recipient_number")) != DIALPAD_AUTO_REPLY_SALES_LINE:
+            return {"written": False, "status": "line_not_eligible", "note_id": None}
+
+        inbound_context = normalized_event.get("inbound_context") or {}
+        # GATE: high confidence only. Medium/low/None -> write nothing.
+        if inbound_context.get("identityConfidence") != "high":
+            return {"written": False, "status": "low_confidence", "note_id": None}
+
+        text = str(normalized_event.get("text") or "").strip()
+        # Match create_person_note's own _clean (control-char strip + whitespace
+        # collapse): a control-char-only body survives .strip() but cleans to empty,
+        # so without this it would consume the idempotency claim yet POST nothing.
+        if not text or not attio_context._clean(text):
+            return {"written": False, "status": "blank", "note_id": None}
+
+        # sender_number is the CUSTOMER (recipient_number is the Dialpad line — do
+        # not swap). It can arrive as a LIST -> first_value before _normalize_phone,
+        # which raises on a non-str. Normalize the SAME way the draft/resolver path
+        # does (find_person_by_phone does not normalize internally).
+        sender_number = first_value(normalized_event.get("sender_number"))
+        if not isinstance(sender_number, str) or not sender_number.strip():
+            return {"written": False, "status": "no_sender", "note_id": None}
+        normalized = attio_context._normalize_phone(sender_number)
+        if not normalized:
+            return {"written": False, "status": "no_sender", "note_id": None}
+
+        # Resolve the person record exactly ONCE (no double lookup). The high
+        # inbound-context confidence is the primary gate; an exact phone match here
+        # that yields a usable name is the independent corroboration (S2's "high"
+        # signal) without a redundant second resolver call. Fetch up to 2 so an
+        # AMBIGUOUS phone (shared / recycled / family-plan number matching multiple
+        # people) is detected and refused — picking "first of many" could write a
+        # customer's SMS onto the wrong person's timeline (cross-customer leak).
+        try:
+            people = attio_context.find_people_by_phone(normalized, limit=2)
+        except attio_context.AttioError:
+            return {"written": False, "status": "error", "note_id": None}
+        if not people:
+            return {"written": False, "status": "person_not_found", "note_id": None}
+        if len(people) > 1:
+            return {"written": False, "status": "ambiguous_phone", "note_id": None}
+        person = people[0]
+        _f, _l, full_name = attio_context.person_name_parts(person)
+        if not full_name:
+            # Phone matched a record with no usable name -> S2 would rate this
+            # medium, not high. Belt for the inbound-context suspenders.
+            return {"written": False, "status": "low_confidence", "note_id": None}
+        # IDENTITY MATCH (cross-customer leak guard): high inbound-context confidence
+        # means Dialpad resolved a known contact; we tie the RAW resolved name (sender
+        # enrichment) to the phone-matched Attio person's name. On a recycled/stale phone those can be DIFFERENT people. Require
+        # the Dialpad-resolved name to tie to the Attio person's name, or fail closed --
+        # never write a customer's SMS onto a stranger's timeline.
+        # Use the RAW resolved name (sender_enrichment first/last), NOT first_contact's
+        # contactName -- the latter is a formatted operator label (format_contact_enrichment
+        # appends "Title | Name (Company)"), which would never token-match the Attio name.
+        enrich = sender_enrichment or {}
+        dialpad_name = " ".join(
+            p for p in (enrich.get("first_name"), enrich.get("last_name")) if p
+        ).strip()
+        if not _names_tie(dialpad_name, full_name):
+            return {"written": False, "status": "identity_mismatch", "note_id": None}
+        if not attio_context.person_record_id(person):
+            return {"written": False, "status": "no_record_id", "note_id": None}
+
+        # IDEMPOTENCY: claim on the Dialpad message id BEFORE the POST; never release.
+        message_id = normalized_event.get("message_id")
+        claim = claim_attio_note_writeback(message_id, db_path=db_path)
+        if claim["status"] == "no_message_id":
+            return {"written": False, "status": "no_message_id", "note_id": None}
+        if claim["status"] == "dedupe_unavailable":
+            return {"written": False, "status": "dedupe_unavailable", "note_id": None}
+        if claim["duplicate"]:
+            return {"written": False, "status": "duplicate", "note_id": None}
+
+        # Clamp to ~160 chars with an ellipsis marker so a reader can see content was
+        # truncated (multipart SMS would otherwise be silently cut mid-message).
+        note_body = text if len(text) <= 160 else text[:159].rstrip() + "\u2026"
+        try:
+            note_id = attio_context.create_person_note(person, note_body)
+        except attio_context.AttioError:
+            # Claim is intentionally NOT released: the POST may have partially
+            # succeeded, and a duplicate/wrong note is worse than a missing one.
+            return {"written": False, "status": "error", "note_id": None}
+        # create_person_note raises AttioError on a failed POST and returns None only
+        # before issuing it (no record id / blank content) -- both already guarded
+        # above. So a value here always means the note was created: truthy note id,
+        # or the True sentinel when Attio's response envelope is unexpected.
+        return {
+            "written": True,
+            "status": "written",
+            "note_id": note_id if isinstance(note_id, str) else None,
+        }
+    except Exception as exc:  # noqa: BLE001 - fail closed; never block the ACK'd inbound.
+        print(f"⚠️  Attio note write-back failed ({type(exc).__name__})")
+        return {"written": False, "status": "error", "note_id": None}
 
 
 def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enrichment=None):
@@ -3962,6 +4198,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 )
                 if auto_reply_status:
                     print(f"   🤖 Auto Reply Draft: {'✓' if auto_reply_draft_created else '✗'} ({auto_reply_status})")
+                # S5: high-confidence-only, fail-closed, idempotent Attio note
+                # write-back. Never raises, so it cannot break this post-ACK flow.
+                note_result = write_attio_inbound_note(normalized_sms, sender_enrichment=sender_enrichment)
+                normalized_sms["attio_note"] = note_result
+                if note_result.get("status") not in (None, "disabled"):
+                    print(f"   🗒️  Attio note: {'✓' if note_result.get('written') else '✗'} ({note_result.get('status')})")
             elif hook_status == "filtered_shortcode":
                 print("   🔒 Short-code message filtered (not forwarding to OpenClaw hooks)")
             elif hook_status == "filtered_sensitive":

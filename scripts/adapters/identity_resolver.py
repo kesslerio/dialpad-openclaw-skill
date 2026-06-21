@@ -106,7 +106,14 @@ def _identity_from_dialpad(contact):
     if not name and (first or last):
         name = " ".join(part for part in (first, last) if part) or None
 
+    # Raw Dialpad contacts carry an ``emails`` array (first entry primary) as well
+    # as (sometimes) a singular ``email``. Prefer the singular field, then fall
+    # back to the first array entry, so either shape seeds the Attio email stage.
     email = contact.get("email")
+    if not (isinstance(email, str) and "@" in email):
+        emails = contact.get("emails")
+        if isinstance(emails, list) and emails:
+            email = emails[0]
     if isinstance(email, str) and "@" in email:
         cleaned_email = _clean_str(email)
         identity["email"] = cleaned_email.lower() if cleaned_email else None
@@ -125,7 +132,10 @@ def _merge_attio_person(identity, person):
 
     Attio is the more authoritative source for the matched record, so its fields
     win where present; caller-supplied fields fill any gaps. Returns
-    ``has_name``: whether a usable name was resolved (from either source).
+    ``attio_has_name``: whether *Attio* (not a pre-existing Dialpad name) yielded
+    a usable name. A high promotion must hinge on Attio corroboration, so an Attio
+    person matched with no usable name stays medium even if Dialpad already named
+    the identity — and the email follow-up still gets a chance to run.
     Never raises — ``person_company_name`` swallows AttioError internally.
     """
     first, last, full = attio_context.person_name_parts(person)
@@ -147,7 +157,7 @@ def _merge_attio_person(identity, person):
     if company:
         identity["company"] = company
 
-    return bool(identity.get("name"))
+    return bool(full)
 
 
 def resolve_identity(phone, dialpad_contact=None, email=None):
@@ -161,7 +171,16 @@ def resolve_identity(phone, dialpad_contact=None, email=None):
             stage even before an Attio person is matched.
 
     Returns a dict with ``identity``, ``confidence`` (high/medium/low), and an
-    ordered ``sources`` list recording each cascade step. Never raises.
+    ordered ``sources`` list recording each cascade step. Never raises — a
+    numeric/odd ``phone`` (or ``email``) degrades to a low-confidence result
+    rather than raising.
+
+    ``sources`` vocabulary: ``dialpad_contact`` / ``dialpad_contact_empty`` (a
+    contact was supplied), ``attio_phone`` / ``attio_email`` (a person matched),
+    ``attio_phone_not_found`` / ``attio_email_not_found`` (the lookup ran but
+    matched nothing — provenance for a real miss), ``attio_error`` (fail-closed),
+    and ``no_input`` ONLY when there was genuinely no phone, no email, and no
+    usable dialpad_contact to resolve from.
 
     See the module docstring for the wrong-match warning that S3 must honor
     before putting any of this into customer-facing text.
@@ -197,14 +216,22 @@ def resolve_identity(phone, dialpad_contact=None, email=None):
     # whatever the Dialpad stage produced. With ATTIO_API_KEY unset, the adapter
     # raises AttioError("missing_api_key") BEFORE any network call, so this stays
     # network-free and degrades to the caller-supplied data.
+    # Coerce a non-string phone (e.g. a numeric Dialpad payload) to a safe string
+    # so _normalize_phone's re.sub never sees a non-str and raises. A blank/odd
+    # value degrades to "no phone lookup" rather than crashing this entrypoint.
+    phone_str = phone if isinstance(phone, str) else (str(phone) if phone is not None else None)
+    attempted_phone = bool(phone_str and phone_str.strip())
     person = None
-    try:
-        normalized = attio_context._normalize_phone(phone) if phone else None
-        if normalized:
-            person = attio_context.find_person_by_phone(normalized)
-    except attio_context.AttioError:
-        sources.append("attio_error")
-        person = None
+    if attempted_phone:
+        try:
+            normalized = attio_context._normalize_phone(phone_str)
+            if normalized:
+                person = attio_context.find_person_by_phone(normalized)
+                if person is None:
+                    sources.append("attio_phone_not_found")
+        except attio_context.AttioError:
+            sources.append("attio_error")
+            person = None
 
     if person is not None:
         attio_has_name = _merge_attio_person(identity, person)
@@ -222,12 +249,16 @@ def resolve_identity(phone, dialpad_contact=None, email=None):
     # --- Stage 3: Attio email match ------------------------------------------
     # Only runs once an email is known (from the caller, Dialpad, or the phone
     # match) AND we have not already resolved a high-confidence name from phone.
-    if confidence != CONFIDENCE_HIGH and identity.get("email"):
+    attempted_email = bool(confidence != CONFIDENCE_HIGH and identity.get("email"))
+    if attempted_email:
         try:
             email_person = attio_context.find_person_by_email(identity["email"])
         except attio_context.AttioError:
             sources.append("attio_error")
             email_person = None
+        else:
+            if email_person is None:
+                sources.append("attio_email_not_found")
         if email_person is not None:
             email_has_name = _merge_attio_person(identity, email_person)
             sources.append("attio_email")
@@ -237,8 +268,10 @@ def resolve_identity(phone, dialpad_contact=None, email=None):
             elif confidence != CONFIDENCE_HIGH:
                 confidence = CONFIDENCE_MEDIUM
 
-    # Make a fully-empty cascade explicit (no contact, no phone, no email) so a
-    # caller can distinguish "nothing to resolve from" from a real miss.
+    # ``no_input`` means there was genuinely nothing to resolve from: no phone, no
+    # email, and no usable dialpad_contact. A real miss (a lookup ran but found
+    # nothing) is already recorded by its own *_not_found source above, so it must
+    # not collapse to ``no_input`` and lose that provenance.
     if not sources:
         sources.append("no_input")
 

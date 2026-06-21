@@ -65,6 +65,42 @@ class ValueExtractionTests(unittest.TestCase):
     def test_reference_id(self):
         self.assertEqual(attio._reference_id(DEAL["values"], "associated_company"), "co-1")
 
+    def test_first_prefers_active_over_inactive_leading_entry(self):
+        # Attio can list a historical entry (active_until set) BEFORE the active
+        # one. _first must skip the stale entry and return the active record.
+        values = {"name": [
+            {"full_name": "Old Name", "active_until": "2025-01-01T00:00:00Z"},
+            {"full_name": "Current Name", "active_until": None},
+        ]}
+        self.assertEqual(attio._first(values, "name").get("full_name"), "Current Name")
+
+    def test_first_falls_back_to_first_dict_when_none_active(self):
+        # No entry is explicitly active -> fall back to the first usable dict.
+        values = {"name": [
+            {"full_name": "Only Historical", "active_until": "2025-01-01T00:00:00Z"},
+        ]}
+        self.assertEqual(attio._first(values, "name").get("full_name"), "Only Historical")
+
+    def test_first_skips_non_dict_entries(self):
+        values = {"name": [None, "nope", {"full_name": "Real", "active_until": None}]}
+        self.assertEqual(attio._first(values, "name").get("full_name"), "Real")
+
+    def test_person_name_parts_returns_active_not_stale(self):
+        person = {"values": {"name": [
+            {"first_name": "Stale", "last_name": "Doe", "full_name": "Stale Doe",
+             "active_until": "2025-01-01T00:00:00Z"},
+            {"first_name": "Active", "last_name": "Doe", "full_name": "Active Doe",
+             "active_until": None},
+        ]}}
+        self.assertEqual(attio.person_name_parts(person), ("Active", "Doe", "Active Doe"))
+
+    def test_person_primary_email_returns_active_not_stale(self):
+        person = {"values": {"email_addresses": [
+            {"email_address": "old@acme.com", "active_until": "2025-01-01T00:00:00Z"},
+            {"email_address": "new@acme.com", "active_until": None},
+        ]}}
+        self.assertEqual(attio.person_primary_email(person), "new@acme.com")
+
 
 class CrmContextFromRecordsTests(unittest.TestCase):
     def test_usable_with_deal(self):

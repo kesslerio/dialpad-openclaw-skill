@@ -49,6 +49,17 @@ PERSON_NO_NAME = {
     },
 }
 
+# Matched by phone, no usable name, but DOES carry an email so the follow-up
+# email stage has something to query.
+PERSON_NO_NAME_WITH_EMAIL = {
+    "id": {"record_id": "person-3"},
+    "values": {
+        "name": [None],
+        "email_addresses": [{"email_address": "jane@acme.com", "active_until": None}],
+        "phone_numbers": [{"phone_number": "+14155551234"}],
+    },
+}
+
 COMPANY = {
     "id": {"record_id": "co-1"},
     "values": {"name": [{"value": "Acme Corp", "attribute_type": "text"}]},
@@ -321,6 +332,106 @@ class NoWebhookSideEffectTests(unittest.TestCase):
         src = Path(resolver.__file__).read_text(encoding="utf-8")
         self.assertNotIn("webhook_server", src)
         self.assertNotIn("import webhook", src)
+
+
+class CodexP2RegressionTests(unittest.TestCase):
+    """Regression coverage for the five Codex P2 findings on PR #97."""
+
+    # P2-1: a non-string phone must degrade, never raise (TypeError in re.sub).
+    def test_numeric_phone_does_not_raise(self):
+        # No API key -> no network; the entrypoint must still return a contract.
+        with patch.dict("os.environ", {}, clear=True):
+            out = resolver.resolve_identity(14155201316)  # int, not str
+        self.assertEqual(set(out), {"identity", "confidence", "sources"})
+        self.assertEqual(out["confidence"], "low")
+
+    def test_numeric_phone_is_coerced_and_can_match(self):
+        # A coerced numeric phone still reaches Attio and can resolve high.
+        fake = make_fake_request(person_for_phone=PERSON_FULL)
+        with with_key(), patch.object(attio, "_request", side_effect=fake):
+            out = resolver.resolve_identity(14155201316)
+        self.assertEqual(out["confidence"], "high")
+        self.assertEqual(out["identity"]["name"], "Jane Doe")
+        self.assertIn("attio_phone", out["sources"])
+
+    def test_non_string_email_does_not_raise(self):
+        with patch.dict("os.environ", {}, clear=True):
+            out = resolver.resolve_identity("+14155550000", email=12345)
+        self.assertEqual(out["confidence"], "low")
+        self.assertIsNone(out["identity"]["email"])
+
+    # P2-2: an Attio phone match with no usable name is medium even when Dialpad
+    # already supplied a name, AND the email follow-up still runs.
+    def test_attio_no_name_stays_medium_despite_dialpad_name(self):
+        fake = make_fake_request(person_for_phone=PERSON_NO_NAME)
+        contact = {"name": "Dialpad Jane"}
+        with with_key(), patch.object(attio, "_request", side_effect=fake):
+            out = resolver.resolve_identity("+14155551234", dialpad_contact=contact)
+        # Dialpad name is retained, but confidence is NOT promoted to high.
+        self.assertEqual(out["confidence"], "medium")
+        self.assertEqual(out["identity"]["name"], "Dialpad Jane")
+        self.assertIn("attio_phone", out["sources"])
+
+    def test_attio_no_name_runs_email_followup_and_promotes(self):
+        # Phone match has no name but yields an email; the email stage then finds a
+        # named person and promotes to high. This only works if the no-name phone
+        # match did NOT short-circuit on the pre-existing Dialpad name.
+        fake = make_fake_request(
+            person_for_phone=PERSON_NO_NAME_WITH_EMAIL,
+            person_for_email=PERSON_FULL,
+        )
+        contact = {"name": "Dialpad Jane"}
+        with with_key(), patch.object(attio, "_request", side_effect=fake):
+            out = resolver.resolve_identity("+14155551234", dialpad_contact=contact)
+        self.assertEqual(out["confidence"], "high")
+        self.assertEqual(out["identity"]["name"], "Jane Doe")
+        self.assertIn("attio_phone", out["sources"])
+        self.assertIn("attio_email", out["sources"])
+
+    # P2-3: a Dialpad contact's emails[] array seeds the email stage.
+    def test_dialpad_emails_array_seeds_email_stage(self):
+        fake = make_fake_request(person_for_phone=None, person_for_email=PERSON_FULL)
+        contact = {"emails": ["jane@acme.com"]}
+        with with_key(), patch.object(attio, "_request", side_effect=fake):
+            out = resolver.resolve_identity("+14155559999", dialpad_contact=contact)
+        self.assertEqual(out["confidence"], "high")
+        self.assertEqual(out["identity"]["email"], "jane@acme.com")
+        self.assertIn("attio_email", out["sources"])
+
+    def test_dialpad_singular_email_preferred_over_emails_array(self):
+        contact = {"email": "primary@acme.com", "emails": ["secondary@acme.com"]}
+        with patch.dict("os.environ", {}, clear=True):
+            out = resolver.resolve_identity("+14155550000", dialpad_contact=contact)
+        self.assertEqual(out["identity"]["email"], "primary@acme.com")
+
+    def test_dialpad_emails_array_non_string_entry_ignored(self):
+        contact = {"emails": [12345]}
+        with patch.dict("os.environ", {}, clear=True):
+            out = resolver.resolve_identity("+14155550000", dialpad_contact=contact)
+        self.assertIsNone(out["identity"]["email"])
+
+    # P2-4: a real miss records its lookup source, not the misleading no_input.
+    def test_phone_not_found_records_source_not_no_input(self):
+        fake = make_fake_request(person_for_phone=None, person_for_email=None)
+        with with_key(), patch.object(attio, "_request", side_effect=fake):
+            out = resolver.resolve_identity("+14155551111")
+        self.assertEqual(out["confidence"], "low")
+        self.assertIn("attio_phone_not_found", out["sources"])
+        self.assertNotIn("no_input", out["sources"])
+
+    def test_email_not_found_records_source(self):
+        # Phone misses; a caller email is supplied but Attio matches nothing.
+        fake = make_fake_request(person_for_phone=None, person_for_email=None)
+        with with_key(), patch.object(attio, "_request", side_effect=fake):
+            out = resolver.resolve_identity("+14155551111", email="ghost@acme.com")
+        self.assertIn("attio_phone_not_found", out["sources"])
+        self.assertIn("attio_email_not_found", out["sources"])
+        self.assertNotIn("no_input", out["sources"])
+
+    def test_no_input_only_when_nothing_to_resolve_from(self):
+        with patch.dict("os.environ", {}, clear=True):
+            out = resolver.resolve_identity(None)
+        self.assertEqual(out["sources"], ["no_input"])
 
 
 if __name__ == "__main__":

@@ -111,8 +111,27 @@ def get_record(object_slug, record_id):
 # --- value extraction (Attio wraps each attribute as a list of typed objects) ---
 
 def _first(values, key):
+    """Return the first *active* dict entry for ``key`` (Attio value envelope).
+
+    Attio wraps each attribute as a list of typed objects carrying an
+    active_from/active_until envelope. Historical/inactive entries (those with a
+    non-null ``active_until``) can be listed BEFORE the active one, so blindly
+    taking ``arr[0]`` can return a stale name/email. Prefer the first entry whose
+    ``active_until`` is None; fall back to the first usable dict entry only when no
+    explicitly-active one exists. Non-dict entries are skipped defensively.
+    """
     arr = (values or {}).get(key)
-    return arr[0] if isinstance(arr, list) and arr else None
+    if not isinstance(arr, list) or not arr:
+        return None
+    fallback = None
+    for entry in arr:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("active_until") is None:
+            return entry
+        if fallback is None:
+            fallback = entry
+    return fallback
 
 
 def _text_value(values, key):

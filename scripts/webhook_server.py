@@ -3217,7 +3217,7 @@ def _build_draft_provenance(normalized_event):
     return " | ".join(parts) if parts else None
 
 
-def evaluate_auto_send_shadow(normalized_event):
+def evaluate_auto_send_shadow(normalized_event, reply_policy=None):
     """S4 SHADOW MODE — compute (never act on) a confidence-gated auto-send decision.
 
     Answers one question for later S6 evaluation: *would* this drafted reply have
@@ -3228,9 +3228,12 @@ def evaluate_auto_send_shadow(normalized_event):
     separate, explicitly-gated future CP3 decision and is out of scope here.
 
     Decision = rich reply is usable AND its category is in the auto-send allowlist
-    (link_issue only to start) AND identity confidence is high. Reads the REAL
-    classifier output: build_rich_sms_reply exposes the category under 'category'
-    (link_issue / booking / pricing / product / None) — there is no 'intent' field.
+    (link_issue only to start) AND identity confidence is high AND the deterministic
+    reply policy is "normal" (a "risky" policy needs human two-step confirmation; an
+    opt-out must never send). Reads the REAL classifier output: build_rich_sms_reply
+    exposes the category under 'category' (link_issue / booking / pricing / product /
+    None) — there is no 'intent' field. Caller passes reply_policy and evaluates this
+    only AFTER the persisted opt-out gate, so opted-out customers are never stamped.
 
     Guards for the missed-call/voicemail call site, which builds normalized_event
     WITHOUT inbound_context and where build_rich_sms_reply rejects the event
@@ -3258,7 +3261,11 @@ def evaluate_auto_send_shadow(normalized_event):
 
     allowlist_match = category in DIALPAD_AUTO_SEND_SHADOW_ALLOWLIST
     confidence_met = identity_confidence == "high"
-    would_auto_send = rich_usable and allowlist_match and confidence_met
+    # Only a deterministically-normal reply is auto-send-eligible: a "risky" policy
+    # requires two-step human confirmation, and "blocked_opt_out" must never send.
+    # (Absent/None policy is treated as not-normal — fail closed.)
+    policy_normal = (reply_policy or {}).get("state") == "normal"
+    would_auto_send = rich_usable and allowlist_match and confidence_met and policy_normal
 
     return {
         "mode": "shadow",
@@ -3269,6 +3276,7 @@ def evaluate_auto_send_shadow(normalized_event):
         "richReplyUsable": rich_usable,
         "allowlistMatch": allowlist_match,
         "confidenceMet": confidence_met,
+        "policyNormal": policy_normal,
     }
 
 
@@ -3335,12 +3343,6 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             else:
                 inbound_context["draftMode"] = "knowledge_backed"
 
-    # S4 SHADOW MODE: compute (never act on) the auto-send decision now that
-    # rich_reply + inbound_context are settled, and stamp it onto the event so all
-    # three call sites can surface it. Persisted into draft metadata below for S6.
-    auto_send_shadow = evaluate_auto_send_shadow(normalized_event)
-    normalized_event["autoSendShadow"] = auto_send_shadow
-
     message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
     if sms_approval is None:
         return False, "approval_unavailable", message, None, reply_policy
@@ -3375,6 +3377,12 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "reason_code": "filtered_opt_out",
                     "risk_reason": "customer previously opted out",
                 }
+            # S4 SHADOW MODE: compute (never act on) the auto-send decision here —
+            # AFTER the persisted opt-out gate and factoring the deterministic reply
+            # policy — so opted-out and risky drafts are never marked auto-send-eligible.
+            # Stamped on the event so all 3 call sites + the draft metadata surface it.
+            auto_send_shadow = evaluate_auto_send_shadow(normalized_event, reply_policy)
+            normalized_event["autoSendShadow"] = auto_send_shadow
             draft = sms_approval.create_replacement_draft(
                 conn,
                 invalidate_thread_key=thread_key,

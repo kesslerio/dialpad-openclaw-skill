@@ -45,7 +45,7 @@ def _event(category=None, confidence=None, *, rich_usable=True, inbound_context=
 
 class AllowlistDecisionTests(unittest.TestCase):
     def test_link_issue_high_confidence_would_auto_send(self):
-        decision = ws.evaluate_auto_send_shadow(_event("link_issue", "high"))
+        decision = ws.evaluate_auto_send_shadow(_event("link_issue", "high"), {"state": "normal"})
         self.assertTrue(decision["wouldAutoSend"])
         self.assertEqual(decision["category"], "link_issue")
         self.assertEqual(decision["mode"], "shadow")
@@ -111,7 +111,7 @@ class RichDraftCategoryFallbackTests(unittest.TestCase):
             "rich_reply": {"usable": True},  # no 'category' key
             "inbound_context": {"identityConfidence": "high", "richDraftCategory": "link_issue"},
         }
-        decision = ws.evaluate_auto_send_shadow(ev)
+        decision = ws.evaluate_auto_send_shadow(ev, {"state": "normal"})
         self.assertTrue(decision["wouldAutoSend"])
         self.assertEqual(decision["category"], "link_issue")
 
@@ -134,7 +134,7 @@ class DraftStampingIntegrationTests(unittest.TestCase):
 
         with patch.object(ws, "should_send_proactive_reply", return_value=True), \
                 patch.object(ws, "build_proactive_reply_message", return_value="hi"), \
-                patch.object(ws, "classify_sms_reply_policy", return_value={"state": "ok"}), \
+                patch.object(ws, "classify_sms_reply_policy", return_value={"state": "normal"}), \
                 patch.object(ws.sms_approval, "init_db", return_value=_FakeConn()), \
                 patch.object(ws.sms_approval, "is_opted_out", return_value=False), \
                 patch.object(ws.sms_approval, "build_context_fingerprint", return_value="fp"), \
@@ -166,7 +166,7 @@ class DraftStampingIntegrationTests(unittest.TestCase):
         ev = {"event_type": "sms", "sender_number": "+1", "recipient_number": "+2"}
         with patch.object(ws, "should_send_proactive_reply", return_value=False), \
                 patch.object(ws, "invalidate_pending_sms_drafts", return_value=True), \
-                patch.object(ws, "classify_sms_reply_policy", return_value={"state": "ok"}):
+                patch.object(ws, "classify_sms_reply_policy", return_value={"state": "normal"}):
             created, status, *_ = ws.create_proactive_reply_draft(ev)
         self.assertFalse(created)
         self.assertNotIn("autoSendShadow", ev)
@@ -299,3 +299,44 @@ class NoAutomatedPathIntoSendInvariantTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplyPolicyGateTests(unittest.TestCase):
+    def test_risky_policy_blocks_auto_send(self):
+        # A 'risky' reply needs two-step human confirmation -> never auto-send-eligible,
+        # even for an allowlisted high-confidence link_issue.
+        decision = ws.evaluate_auto_send_shadow(_event("link_issue", "high"), {"state": "risky"})
+        self.assertFalse(decision["wouldAutoSend"])
+        self.assertFalse(decision["policyNormal"])
+
+    def test_absent_policy_fails_closed(self):
+        decision = ws.evaluate_auto_send_shadow(_event("link_issue", "high"), None)
+        self.assertFalse(decision["wouldAutoSend"])
+
+
+class PersistedOptOutShadowTests(unittest.TestCase):
+    def test_persisted_opt_out_does_not_stamp_shadow(self):
+        # A previously opted-out customer (persisted is_opted_out=True) is blocked; the
+        # shadow must NOT be stamped, so S6 never sees an opted-out customer as eligible.
+        ev = {
+            "event_type": "sms",
+            "sender_number": "+14155550100",
+            "recipient_number": "+14155201316",
+            "rich_reply": {"usable": True, "category": "link_issue"},
+            "inbound_context": {"identityConfidence": "high"},
+        }
+
+        class _FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(ws, "should_send_proactive_reply", return_value=True), \
+                patch.object(ws, "build_proactive_reply_message", return_value="hi"), \
+                patch.object(ws, "classify_sms_reply_policy", return_value={"state": "normal"}), \
+                patch.object(ws.sms_approval, "init_db", return_value=_FakeConn()), \
+                patch.object(ws.sms_approval, "is_opted_out", return_value=True), \
+                patch.object(ws.sms_approval, "build_context_fingerprint", return_value="fp"):
+            created, status, *_ = ws.create_proactive_reply_draft(ev)
+        self.assertFalse(created)
+        self.assertEqual(status, "blocked_opt_out")
+        self.assertNotIn("autoSendShadow", ev)

@@ -136,6 +136,33 @@ class AttioNoteWritebackTests(unittest.TestCase):
         # content_plaintext/content_markdown are RESPONSE-only fields, never sent.
         self.assertNotIn("content_plaintext", data)
 
+    # 1b ------------------------------------------------------------------
+    def test_non_sales_line_recipient_writes_nothing(self):
+        # An eligible high-confidence SMS on a Work/Main/Support line must NOT be
+        # logged into the sales CRM. The write-back shares the sales-line boundary.
+        fake = CapturingRequest()
+        event = _event(confidence="high")
+        event["recipient_number"] = "+14159060000"  # not DIALPAD_AUTO_REPLY_SALES_LINE
+        result = self._write(event, fake)
+        self.assertFalse(result["written"])
+        self.assertEqual(result["status"], "line_not_eligible")
+        self.assertEqual(fake.note_posts, [])
+
+    # 1c ------------------------------------------------------------------
+    def test_control_char_only_body_blank_no_claim_no_post(self):
+        # A control-char-only body survives .strip() but cleans to empty. It must be
+        # rejected as blank BEFORE claiming the idempotency key, so it neither POSTs
+        # nor reports a successful write (regression: None recorded as written).
+        fake = CapturingRequest()
+        result = self._write(_event(text="\x01\x02\x03"), fake)
+        self.assertFalse(result["written"])
+        self.assertEqual(result["status"], "blank")
+        self.assertEqual(fake.note_posts, [])
+        # claim not consumed: a real-text retry on the same message id still writes.
+        ok = self._write(_event(text="Real follow-up about my demo."), fake)
+        self.assertTrue(ok["written"])
+        self.assertEqual(len(fake.note_posts), 1)
+
     # 2 -------------------------------------------------------------------
     def test_low_confidence_writes_nothing(self):
         fake = CapturingRequest()

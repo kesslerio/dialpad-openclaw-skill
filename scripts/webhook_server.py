@@ -2714,13 +2714,23 @@ def write_attio_inbound_note(normalized_event, *, sender_enrichment=None, db_pat
         return result
 
     try:
+        # LINE GATE: the write-back is part of the sales-CRM automation, scoped to the
+        # sales line. Without this, enabling the flag on a multi-line deployment would
+        # log Work/Main/Support inbound SMS into the sales CRM too. Match the existing
+        # draft/auto-reply boundary (DIALPAD_AUTO_REPLY_SALES_LINE).
+        if normalize_phone_number(normalized_event.get("recipient_number")) != DIALPAD_AUTO_REPLY_SALES_LINE:
+            return {"written": False, "status": "line_not_eligible", "note_id": None}
+
         inbound_context = normalized_event.get("inbound_context") or {}
         # GATE: high confidence only. Medium/low/None -> write nothing.
         if inbound_context.get("identityConfidence") != "high":
             return {"written": False, "status": "low_confidence", "note_id": None}
 
         text = str(normalized_event.get("text") or "").strip()
-        if not text:
+        # Match create_person_note's own _clean (control-char strip + whitespace
+        # collapse): a control-char-only body survives .strip() but cleans to empty,
+        # so without this it would consume the idempotency claim yet POST nothing.
+        if not text or not attio_context._clean(text):
             return {"written": False, "status": "blank", "note_id": None}
 
         # sender_number is the CUSTOMER (recipient_number is the Dialpad line — do

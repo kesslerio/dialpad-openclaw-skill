@@ -2026,6 +2026,42 @@ class OpenClawHookErrorLoggingTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(status, "request_failed")
 
+    def test_http_error_body_read_is_bounded(self):
+        # The body read must be capped (each post-ACK webhook runs this concurrently;
+        # an unbounded read of a huge error page could exhaust memory). Assert read()
+        # is called with a positive byte limit, never unbounded (-1 / None).
+        reads = []
+
+        class RecordingFp:
+            def read(self, amt=-1):
+                reads.append(amt)
+                return b"x" * 100000  # pretend a large error page
+
+            def close(self):
+                pass
+
+        def raise_big(request, timeout=10):
+            raise urllib.error.HTTPError(
+                request.full_url, 502, "Bad Gateway", {}, RecordingFp()
+            )
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_SMS_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "tok"), \
+                patch.object(urllib.request, "urlopen", side_effect=raise_big), \
+                patch("builtins.print") as mock_print:
+            ok, status = webhook_server.send_to_openclaw_hooks(
+                {"event_type": "sms", "text": "hi", "sender_number": "+14155550000"}
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(status, "http_502")
+        self.assertTrue(reads, "response body was never read")
+        self.assertIsNotNone(reads[0])
+        self.assertGreater(reads[0], 0)  # bounded, not e.read() / e.read(-1)
+        # and the log stays capped regardless of body size
+        logged = " ".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        self.assertLessEqual(len(logged), 600)
+
 
 if __name__ == "__main__":
     unittest.main()

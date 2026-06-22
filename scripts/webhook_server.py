@@ -3817,7 +3817,11 @@ def send_to_openclaw_hooks(normalized_event, line_display=None):
         # reason. A bare "HTTP Error 400" is undiagnosable; without this a hook
         # outage looks identical regardless of cause. Truncate to keep logs sane.
         try:
-            body = e.read().decode("utf-8", "replace").strip()
+            # Bounded read: the log keeps only 500 chars, but each post-ACK webhook
+            # runs this on its own thread, so reading a large error page in full would
+            # let a bad gateway response exhaust memory across concurrent requests.
+            # 2 KiB covers 500 chars even at 4 bytes/char.
+            body = e.read(2048).decode("utf-8", "replace").strip()
         except Exception:
             body = ""
         detail = f": {body[:500]}" if body else ""

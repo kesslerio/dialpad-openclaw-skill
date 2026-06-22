@@ -3820,8 +3820,8 @@ def send_to_openclaw_hooks(normalized_event, line_display=None):
             body = e.read().decode("utf-8", "replace").strip()
         except Exception:
             body = ""
-        detail = f" {body[:500]}" if body else ""
-        print(f"❌ Error forwarding {event_label} to OpenClaw hooks: HTTP {e.code}:{detail}")
+        detail = f": {body[:500]}" if body else ""
+        print(f"❌ Error forwarding {event_label} to OpenClaw hooks: HTTP {e.code}{detail}")
         return False, f"http_{e.code}"
     except Exception as e:
         print(f"❌ Error forwarding {event_label} to OpenClaw hooks: {e}")

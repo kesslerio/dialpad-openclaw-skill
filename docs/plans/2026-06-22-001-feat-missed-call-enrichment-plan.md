@@ -9,7 +9,7 @@ origin: docs/brainstorms/2026-06-22-missed-call-enrichment-requirements.md
 
 ## Summary
 
-Extend the existing Dialpad enrichment draft lane from Sales SMS to Sales missed calls. The plan reuses the shipped Attio/calendar/QMD adapters, provenance metadata, ACK-first intake, and SMS idempotency work, while adding missed-call eligibility, call-specific enriched copy, source-status visibility, and regression coverage.
+Extend the existing Dialpad enrichment draft lane from Sales SMS to Sales missed calls. The plan reuses the shipped Attio/calendar/QMD adapters, provenance metadata, ACK-first intake patterns, and SMS idempotency work, while adding missed-call eligibility, call-specific enriched copy, source-status visibility, missed-call response-timing safety, and regression coverage.
 
 ---
 
@@ -57,7 +57,7 @@ The prior SMS enrichment work already established the central safety invariant: 
 - **KTD2 — Applicability-aware source attempts.** Attio is applicable for silent missed calls because caller number exists. Calendar is applicable only when CRM or local context indicates scheduled or recent demo context; missed-call calendar lookup must not depend on the SMS-only `meeting_logistics_intent(text)` heuristic. QMD is only applicable when the normalized call event has usable text or transcript-like content; otherwise it should report `not_applicable` rather than running a weak empty query.
 - **KTD3 — Customer-facing copy gets a missed-call wrapper.** The existing CRM and meeting reply helpers are SMS-shaped. Missed calls need call-specific enriched copy while preserving the same high-confidence personalization gates.
 - **KTD4 — Fallback explanation belongs in operator metadata and Telegram, not SMS text.** Source status should make the operator card auditable, while customer-facing fallback copy remains short and unchanged when enrichment fails.
-- **KTD5 — Existing delivery safety remains the boundary.** ACK-first intake, SMS idempotency, missed-call dedupe, approval drafts, and shadow auto-send behavior are foundations for this work, not active scope unless implementation finds a missing integration seam.
+- **KTD5 — Delivery safety must extend to the missed-call enrichment path.** SMS already has post-ACK processing, but missed-call draft creation currently runs inline before the webhook response. If missed-call enrichment adds Attio, calendar, or QMD adapter calls, implementation must either move the call-side enrichment work behind an ACK-first/background seam or prove a strict nonblocking latency bound before adapter lookup. SMS idempotency, missed-call dedupe, approval drafts, and shadow auto-send behavior remain invariants.
 
 ---
 
@@ -105,11 +105,12 @@ flowchart TB
 - **Requirements:** R1, R2, R3, R11.
 - **Dependencies:** none.
 - **Files:** `scripts/webhook_server.py`, `tests/test_ungate_provenance.py`, `tests/test_webhook_server.py`.
-- **Approach:** Extend the existing enrichment eligibility helper to allow `missed_call` alongside `sms`, and update stale SMS-only comments and tests. Keep `voicemail` unsupported unless a later requirements document explicitly scopes it in.
+- **Approach:** Extend the existing enrichment eligibility helper to allow `missed_call` alongside `sms`, and update stale SMS-only comments and tests. Also refactor the `build_rich_sms_reply` event-type gate or rich-reply selection seam so `missed_call` does not stop at `unsupported_event` before CRM/calendar context can run. Keep `voicemail` unsupported unless a later requirements document explicitly scopes it in.
 - **Execution note:** Start with the gate test currently asserting missed calls are rejected, then update the handler-level missed-call tests.
 - **Patterns to follow:** The SMS un-gate tests in `tests/test_ungate_provenance.py`; existing missed-call handler tests in `tests/test_webhook_server.py`.
 - **Test scenarios:**
   - Covers AE1. `_sales_context_draft_allowed` returns true for `missed_call` and remains true for SMS.
+  - Covers AE1. `build_rich_sms_reply` or its successor no longer returns `unsupported_event` for Sales missed calls before contextual enrichment is attempted.
   - Non-Sales missed calls still fail `should_send_proactive_reply` through the existing sales-line check.
   - `voicemail` remains rejected by the enrichment gate.
   - Existing SMS un-gate tests continue to pass unchanged.
@@ -120,8 +121,8 @@ flowchart TB
 - **Goal:** Produce enriched missed-call approval text that is useful and still reads like a missed-call follow-up.
 - **Requirements:** R2, R3, R5, R6, R7, R12, R14.
 - **Dependencies:** U1.
-- **Files:** `scripts/webhook_server.py`, `tests/test_webhook_server.py`, `tests/test_sender_enrichment.py`, `tests/test_ungate_provenance.py`.
-- **Approach:** Keep the existing CRM and meeting context builders as the source of truth for usable context, but route missed-call customer text through missed-call-specific phrasing. Generalize the meeting-aware branch so call events can use scheduled or recent demo context even when there is no inbound SMS text. Preserve `_draft_greeting` and company/segment gates so low-confidence text stays generic while high-confidence callers can receive safe personalization.
+- **Files:** `scripts/webhook_server.py`, `scripts/adapters/calendar_context.py`, `tests/test_webhook_server.py`, `tests/test_sender_enrichment.py`, `tests/test_ungate_provenance.py`, `tests/test_calendar_context.py`.
+- **Approach:** Keep the existing CRM and meeting context builders as the source of truth for usable context, but route missed-call customer text through missed-call-specific phrasing. Generalize the meeting-aware branch so call events can use scheduled or recent demo context even when there is no inbound SMS text. Because the current calendar adapter only surfaces future demos, include the adapter/helper change needed to expose bounded recent demo context for missed-call use, or explicitly return a source status when recent-demo lookup is unavailable. Preserve `_draft_greeting` and company/segment gates so low-confidence text stays generic while high-confidence callers can receive safe personalization.
 - **Technical design:** Directional shape only: source selection can reuse `rich_reply` and context metadata, while message composition should branch on event type before returning customer-facing text.
 - **Patterns to follow:** `_crm_reply_message`, `_meeting_reply_message`, `_draft_greeting`, and `build_proactive_reply_message`.
 - **Test scenarios:**
@@ -129,6 +130,7 @@ flowchart TB
   - Covers AE4. A high-confidence known caller can receive safe personalization while the message remains a missed-call follow-up.
   - Covers AE2. A low-confidence missed call with usable Attio context starts with `Hi there,` and does not include the low-confidence name or company.
   - A silent missed call with CRM/demo context can attempt calendar lookup or record a calendar status without relying on SMS text intent.
+  - A missed call tied to a bounded recent demo/no-show can produce meeting-aware context or an explicit recent-demo unavailable status; it must not silently rely on the future-demo-only adapter behavior.
   - A meeting-aware missed-call draft acknowledges follow-up around the call/demo context without saying the caller texted an update.
   - Shadow auto-send remains metadata-only and does not create an unattended send path for missed calls.
 - **Verification:** Handler-level tests capture `auto_reply.message`, `draftMode`, `richReply`, and approval draft state for CRM-aware, meeting-aware, and low-confidence missed calls.
@@ -152,15 +154,16 @@ flowchart TB
 ### U4. Integrate missed-call enriched drafts in the handler
 
 - **Goal:** Ensure the missed-call webhook path forwards enriched draft metadata consistently to OpenClaw hooks, Telegram, and the approval database.
-- **Requirements:** R1, R8, R9, R10, R11, R13.
+- **Requirements:** R1, R8, R9, R10, R11, R13, R14.
 - **Dependencies:** U1, U2, U3.
-- **Files:** `scripts/webhook_server.py`, `tests/test_webhook_server.py`, `tests/test_webhook_hooks.py`.
-- **Approach:** Update the missed-call handler path so `auto_reply` includes rich reply metadata like the SMS path does, Telegram includes both draft basis and provenance/status details, and hook payloads carry the same normalized event state.
+- **Files:** `scripts/webhook_server.py`, `tests/test_webhook_server.py`, `tests/test_webhook_hooks.py`, `tests/test_webhook_async.py`.
+- **Approach:** Update the missed-call handler path so `auto_reply` includes rich reply metadata like the SMS path does, Telegram includes both draft basis and provenance/status details, and hook payloads carry the same normalized event state. Before adding slow adapters to the missed-call path, add a missed-call ACK-first/background handoff or an explicit latency-bounded nonblocking seam so Dialpad receives the webhook response before enrichment can time out the request.
 - **Patterns to follow:** The SMS inbound path that adds `richReply` to `auto_reply`, renders provenance, and builds the approval review suffix.
 - **Test scenarios:**
   - Covers AE1. Missed-call hook payload includes `auto_reply.richReply` for a CRM-aware draft.
   - Covers AE2. Telegram shows operator-facing Attio provenance while the exact draft text remains low-confidence safe.
   - Covers AE3. Generic fallback Telegram includes source statuses and the approval draft suffix.
+  - Covers R14. A Sales missed-call webhook responds before slow enrichment adapters complete, or the implementation proves those adapters are not run inline before the response.
   - Duplicate missed-call dedupe behavior remains unchanged and does not re-emit operator-visible output.
 - **Verification:** Existing missed-call tests still pass, and new tests assert parity with the SMS handoff for rich metadata and provenance.
 
@@ -199,7 +202,7 @@ flowchart TB
 - A full phone-first identity resolver or new source cascade.
 - Unattended auto-send expansion.
 - Attio write-back changes for missed calls.
-- Reconciliation for post-ACK missed-call processing failures.
+- Full retry/reconciliation for post-ACK missed-call processing failures beyond bounded logging/source-status visibility.
 - Using voice transcripts or voicemail text as a knowledge-query source unless such text already exists on the normalized event.
 
 ### Outside this change
@@ -215,6 +218,8 @@ flowchart TB
 - **Customer PII leak risk:** Low-confidence Attio context can be wrong. Mitigation: keep names/company data out of customer-facing text unless the existing high-confidence gate passes.
 - **QMD false signal risk:** Silent missed calls do not contain a useful question. Mitigation: record QMD as not applicable unless usable text exists.
 - **Calendar applicability risk:** Reusing the SMS meeting-intent heuristic would make silent missed calls skip calendar enrichment. Mitigation: add a missed-call-specific calendar applicability check based on CRM/demo context.
+- **Recent-demo coverage risk:** The current calendar adapter only surfaces future demos. Mitigation: include adapter/helper support for bounded recent demo context, or emit a clear unavailable status instead of silently falling back.
+- **Webhook retry risk:** Inline missed-call adapter calls can hold the Dialpad webhook response open and trigger retries. Mitigation: extend the ACK-first/background seam to missed-call enrichment or prove a strict nonblocking path before adapter calls.
 - **Operator-card noise risk:** Source-status rendering can make Telegram cards too long. Mitigation: keep statuses compact and only expand unusable details when fallback is generic.
 - **Regression risk in SMS enrichment:** Shared helpers serve SMS and missed calls. Mitigation: preserve existing SMS tests and add event-type-specific tests around changed branches.
 - **Delivery replay risk:** Missed-call dedupe already owns duplicate suppression. Mitigation: avoid changing dedupe keys or replay behavior in this plan.
@@ -223,7 +228,7 @@ flowchart TB
 
 ## System-Wide Impact
 
-- Telegram approval cards, OpenClaw hook payload metadata, approval draft metadata, and customer-facing SMS draft text are affected.
+- Telegram approval cards, OpenClaw hook payload metadata, approval draft metadata, webhook response timing, and customer-facing SMS draft text are affected.
 - Existing SMS enrichment behavior, missed-call duplicate suppression, ACK-first intake, and approval-only delivery remain invariants.
 
 ---

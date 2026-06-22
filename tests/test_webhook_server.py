@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1980,6 +1981,50 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(status["code"], 200)
         self.assertEqual(response["auto_reply_status"], "draft_created")
         self.assertEqual(draft["risk_state"], webhook_server.sms_approval.RISK_RISKY)
+
+
+class OpenClawHookErrorLoggingTests(unittest.TestCase):
+    """A failed hook forward must surface the gateway's response body, not just
+    'HTTP Error 400: Bad Request' (which is undiagnosable). Regression for the
+    silent-failure that made a real 400 outage opaque."""
+
+    def _raise_http_400(self, request, timeout=10):
+        raise urllib.error.HTTPError(
+            request.full_url, 400, "Bad Request", {},
+            io.BytesIO(b'{"error":"agent niemand-work not ready"}'),
+        )
+
+    def test_http_error_logs_response_body_and_returns_status_code(self):
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_SMS_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "tok"), \
+                patch.object(urllib.request, "urlopen", side_effect=self._raise_http_400), \
+                patch("builtins.print") as mock_print:
+            ok, status = webhook_server.send_to_openclaw_hooks(
+                {"event_type": "sms", "text": "hi", "sender_number": "+14155550000"}
+            )
+
+        self.assertFalse(ok)
+        # status now carries the HTTP code, not a generic "request_failed"
+        self.assertEqual(status, "http_400")
+        logged = " ".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        self.assertIn("400", logged)
+        # the gateway's actual reason must be in the log
+        self.assertIn("agent niemand-work not ready", logged)
+
+    def test_network_error_still_handled_generically(self):
+        def boom(request, timeout=10):
+            raise urllib.error.URLError("connection refused")
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_SMS_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "tok"), \
+                patch.object(urllib.request, "urlopen", side_effect=boom), \
+                patch("builtins.print"):
+            ok, status = webhook_server.send_to_openclaw_hooks(
+                {"event_type": "sms", "text": "hi", "sender_number": "+14155550000"}
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(status, "request_failed")
 
 
 if __name__ == "__main__":

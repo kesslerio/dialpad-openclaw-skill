@@ -104,8 +104,10 @@ def cache_db_path():
 
 def _private_connect(path):
     path = Path(path)
+    parent_existed = path.parent.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
+    if not parent_existed:
+        path.parent.chmod(0o700)
     old_umask = os.umask(0o177)
     try:
         conn = sqlite3.connect(path)
@@ -151,6 +153,19 @@ def _init_cache(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS phone_intelligence_json_cache (
+          namespace TEXT NOT NULL,
+          cache_key TEXT NOT NULL,
+          policy_version TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          payload TEXT NOT NULL,
+          PRIMARY KEY (namespace, cache_key, policy_version)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -161,7 +176,7 @@ def lookup_policy_version(country_hint=None, strictness=None, enhanced_line_chec
     return "|".join((IPQS_ENDPOINT, f"strict={strict}", f"country={country}", f"enhanced={enhanced}", RISK_POLICY_VERSION))
 
 
-def _cache_get(phone, policy_version, now=None):
+def _cache_payload_get(select_sql, params, policy_version, now=None):
     path = cache_db_path()
     if not path:
         return None
@@ -169,11 +184,7 @@ def _cache_get(phone, policy_version, now=None):
     try:
         with _private_connect(path) as conn:
             _init_cache(conn)
-            conn.execute("DELETE FROM phone_intelligence_cache WHERE expires_at <= ?", (now,))
-            row = conn.execute(
-                "SELECT payload FROM phone_intelligence_cache WHERE phone = ? AND policy_version = ? AND expires_at > ?",
-                (phone, policy_version, now),
-            ).fetchone()
+            row = conn.execute(select_sql, (*params, now)).fetchone()
             conn.commit()
             if not row:
                 return None
@@ -186,12 +197,12 @@ def _cache_get(phone, policy_version, now=None):
     return None
 
 
-def _cache_set(phone, policy_version, payload, ttl_seconds=None, now=None):
+def _cache_payload_set(delete_sql, insert_sql, params, payload, ttl_seconds, now=None):
     path = cache_db_path()
     if not path:
         return
     now = int(now or time.time())
-    ttl = int(ttl_seconds if ttl_seconds is not None else _env_int("DIALPAD_PHONE_INTELLIGENCE_CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECONDS))
+    ttl = int(ttl_seconds)
     if ttl <= 0:
         return
     stored = dict(payload)
@@ -199,19 +210,68 @@ def _cache_set(phone, policy_version, payload, ttl_seconds=None, now=None):
     try:
         with _private_connect(path) as conn:
             _init_cache(conn)
-            conn.execute("DELETE FROM phone_intelligence_cache WHERE expires_at <= ?", (now,))
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO phone_intelligence_cache
-                (phone, policy_version, created_at, expires_at, payload)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (phone, policy_version, now, now + ttl, json.dumps(stored, separators=(",", ":"))),
-            )
+            conn.execute(delete_sql, (now,))
+            conn.execute(insert_sql, (*params, now, now + ttl, json.dumps(stored, separators=(",", ":"))))
             conn.commit()
             _harden_sidecars(path)
     except Exception:
         return
+
+
+def _cache_get(phone, policy_version, now=None):
+    return _cache_payload_get(
+        """
+        SELECT payload FROM phone_intelligence_cache
+        WHERE phone = ? AND policy_version = ? AND expires_at > ?
+        """,
+        (phone, policy_version),
+        policy_version,
+        now=now,
+    )
+
+
+def _cache_set(phone, policy_version, payload, ttl_seconds=None, now=None):
+    ttl = int(ttl_seconds if ttl_seconds is not None else _env_int("DIALPAD_PHONE_INTELLIGENCE_CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECONDS))
+    _cache_payload_set(
+        "DELETE FROM phone_intelligence_cache WHERE expires_at <= ?",
+        """
+        INSERT OR REPLACE INTO phone_intelligence_cache
+        (phone, policy_version, created_at, expires_at, payload)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (phone, policy_version),
+        payload,
+        ttl,
+        now=now,
+    )
+
+
+def cache_json_get(namespace, cache_key, policy_version, now=None):
+    return _cache_payload_get(
+        """
+        SELECT payload FROM phone_intelligence_json_cache
+        WHERE namespace = ? AND cache_key = ? AND policy_version = ? AND expires_at > ?
+        """,
+        (namespace, cache_key, policy_version),
+        policy_version,
+        now=now,
+    )
+
+
+def cache_json_set(namespace, cache_key, policy_version, payload, ttl_seconds=None, now=None):
+    ttl = int(ttl_seconds if ttl_seconds is not None else DEFAULT_PUBLIC_SEARCH_TTL_SECONDS)
+    _cache_payload_set(
+        "DELETE FROM phone_intelligence_json_cache WHERE expires_at <= ?",
+        """
+        INSERT OR REPLACE INTO phone_intelligence_json_cache
+        (namespace, cache_key, policy_version, created_at, expires_at, payload)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (namespace, cache_key, policy_version),
+        payload,
+        ttl,
+        now=now,
+    )
 
 
 def budget_available(kind, token, limit, window_seconds=None, now=None):
@@ -226,6 +286,7 @@ def budget_available(kind, token, limit, window_seconds=None, now=None):
     try:
         with _private_connect(path) as conn:
             _init_cache(conn)
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM phone_intelligence_budget WHERE window_start < ?", (window_start,))
             count = conn.execute(
                 "SELECT COUNT(*) FROM phone_intelligence_budget WHERE kind = ? AND window_start = ?",

@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
 import webhook_server
+import draft_model
 import sms_sqlite
 
 
@@ -304,7 +305,7 @@ def test_attach_caller_intelligence_adds_operator_context(monkeypatch):
     assert out["status"] == "usable"
     assert event["inbound_context"]["callerIntelligence"]["possibleIdentity"]["reverseName"] == "Jordan Example"
     assert event["inbound_context"]["identityConfidence"] == "low"
-    assert event["inbound_context"]["sourceStatuses"]["phone"]["status"] == "usable"
+    assert webhook_server.collect_enrichment_source_statuses(event)["phone"]["status"] == "usable"
     brief = webhook_server.build_inbound_context_brief(event["inbound_context"])
     assert "Phone intel" in brief
     assert "possible reverse lookup" in brief
@@ -386,6 +387,90 @@ def test_public_prospect_requires_phone_corroborated_business_evidence():
     assert good["evidence"][0]["phoneCorroboration"]["matched"] is True
     assert weak["usable"] is False
 
+    business_without_phone = webhook_server._normalize_public_prospect_result(
+        {
+            "usable": True,
+            "summary": "Possible founder at Example Fitness.",
+            "evidence": [
+                {
+                    "sourceType": "business_directory",
+                    "domainOrTitle": "Example Fitness owner profile",
+                    "matchedTerms": ["Jordan Example", "Fort Worth", "business"],
+                    "phoneCorroboration": {"matched": False},
+                }
+            ],
+        },
+        webhook_server._public_prospect_search_inputs(caller_context),
+    )
+    wrong_country_phone = webhook_server._normalize_public_prospect_result(
+        {
+            "usable": True,
+            "summary": "Possible founder at Example Fitness.",
+            "evidence": [
+                {
+                    "sourceType": "business_directory",
+                    "domainOrTitle": "Example Fitness owner profile",
+                    "matchedTerms": ["Jordan Example", "Fort Worth", "business"],
+                    "phoneCorroboration": {
+                        "matched": True,
+                        "normalizedPhone": "+442025550142",
+                        "basis": "public_page_lists_validated_phone",
+                    },
+                }
+            ],
+        },
+        webhook_server._public_prospect_search_inputs(caller_context),
+    )
+    assert business_without_phone["usable"] is False
+    assert wrong_country_phone["usable"] is False
+    assert wrong_country_phone["evidence"][0]["phoneCorroboration"]["matched"] is False
+
+
+def test_public_prospect_lookup_uses_sanitized_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIALPAD_PHONE_INTELLIGENCE_CACHE_DB", str(tmp_path / "cache" / "phone.db"))
+    monkeypatch.setattr(webhook_server, "DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND", "prospect-search --json")
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append({"args": args, "input": kwargs.get("input")})
+        return _FakeCompletedProcess(
+            stdout=json.dumps({
+                "usable": True,
+                "summary": "Possible founder at Example Fitness.",
+                "evidence": [
+                    {
+                        "sourceType": "business_directory",
+                        "domainOrTitle": "Example Fitness owner profile",
+                        "matchedTerms": ["Jordan Example", "Fort Worth", "business"],
+                        "phoneCorroboration": {
+                            "matched": True,
+                            "normalizedPhone": "+12025550142",
+                            "basis": "public_page_lists_validated_phone",
+                        },
+                    }
+                ],
+            }),
+            returncode=0,
+        )
+
+    monkeypatch.setattr(webhook_server.subprocess, "run", _fake_run)
+    caller_context = {
+        "usable": True,
+        "status": "usable",
+        "phone": {"e164": "+12025550142", "city": "Fort Worth", "region": "TX", "country": "US"},
+        "line": {"activeStatus": "active"},
+        "risk": {"level": "low"},
+        "possibleIdentity": {"reverseName": "Jordan Example"},
+    }
+
+    first = webhook_server.lookup_public_prospect_context(caller_context)
+    second = webhook_server.lookup_public_prospect_context(caller_context)
+
+    assert first["usable"] is True
+    assert second["usable"] is True
+    assert second["cache"]["hit"] is True
+    assert len(calls) == 1
+
 
 def test_public_prospect_rejects_malicious_evidence_fields():
     caller_context = {
@@ -460,6 +545,39 @@ def test_contact_sync_requires_same_phone_corroborated_business_evidence():
     assert out["reason"] == "no_phone_corroborated_business_evidence"
 
 
+def test_contact_sync_requires_reverse_name_corroborated_business_evidence():
+    event = _unknown_sales_event()
+    event["caller_intelligence"] = {
+        "usable": True,
+        "status": "usable",
+        "phone": {"e164": "+12025550142"},
+        "risk": {"level": "low"},
+        "possibleIdentity": {"reverseName": "Jordan Example"},
+        "publicProspect": {
+            "usable": True,
+            "status": "usable",
+            "summary": "Possible business match.",
+            "evidence": [
+                {
+                    "sourceType": "business_directory",
+                    "domainOrTitle": "Example Fitness owner profile",
+                    "matchedTerms": ["Fort Worth", "business"],
+                    "phoneCorroboration": {
+                        "matched": True,
+                        "normalizedPhone": "+12025550142",
+                        "basis": "public_page_lists_validated_phone",
+                    },
+                }
+            ],
+        },
+    }
+
+    out = webhook_server.sync_dialpad_contact_from_enrichment(event, sender_enrichment={"status": "not_found"})
+
+    assert out["status"] == "suggestion_only"
+    assert out["reason"] == "no_phone_corroborated_business_evidence"
+
+
 def test_contact_sync_reverse_name_only_is_suggestion(monkeypatch):
     event = _unknown_sales_event()
     event["caller_intelligence"] = {
@@ -506,19 +624,50 @@ def test_contact_sync_requires_create_wrapper_created_action(monkeypatch):
         },
     }
 
-    monkeypatch.setattr(
-        webhook_server.subprocess,
-        "run",
-        lambda *args, **kwargs: _FakeCompletedProcess(
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(args)
+        return _FakeCompletedProcess(
             stdout=json.dumps({"data": {"shared": {"action": "created"}}}),
             returncode=0,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(webhook_server.subprocess, "run", _fake_run)
 
     out = webhook_server.sync_dialpad_contact_from_enrichment(event, sender_enrichment={"status": "not_found"})
 
     assert out["written"] is True
     assert out["status"] == "created"
+    assert calls[0][calls[0].index("--phone") + 1] == "+12025550142"
+
+
+def test_draft_model_redacts_low_confidence_public_prospect_summary():
+    event = _unknown_sales_event()
+    event["inbound_context"]["callerIntelligence"] = {
+        "status": "usable",
+        "phone": {"city": "Fort Worth", "region": "TX", "country": "US"},
+        "line": {"type": "wireless", "activeStatus": "active"},
+        "risk": {"level": "low"},
+        "possibleIdentity": {"basis": "ipqs_reverse_lookup", "confidence": "low"},
+        "publicProspect": {
+            "status": "usable",
+            "summary": "Possible founder at Example Fitness.",
+            "confidence": "low",
+        },
+    }
+
+    facts = draft_model._facts(
+        event,
+        "Hi there, thanks for reaching ShapeScale.",
+        "fallback",
+        {"basis": "deterministic", "category": "fallback", "message": "Hi there"},
+        "there",
+        draft_model.DraftModelConfig(),
+    )
+
+    public = facts["sources"]["callerIntelligence"]["publicProspect"]
+    assert public == {"status": "usable", "confidence": "low"}
 
 
 def test_contact_sync_rejects_create_wrapper_updated_action(monkeypatch):

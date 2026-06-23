@@ -172,6 +172,13 @@ DIALPAD_DRAFT_MODEL_MAX_CHARS = int(os.environ.get("DIALPAD_DRAFT_MODEL_MAX_CHAR
 DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND = os.environ.get("DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND", "")
 DIALPAD_PUBLIC_PROSPECT_SEARCH_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_PUBLIC_PROSPECT_SEARCH_TIMEOUT_SECONDS", "4"))
 DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW = int(os.environ.get("DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW", "30"))
+DIALPAD_PUBLIC_PROSPECT_SEARCH_CACHE_TTL_SECONDS = int(
+    os.environ.get(
+        "DIALPAD_PUBLIC_PROSPECT_SEARCH_CACHE_TTL_SECONDS",
+        str(getattr(phone_intelligence, "DEFAULT_PUBLIC_SEARCH_TTL_SECONDS", 6 * 60 * 60)),
+    )
+)
+DIALPAD_JSON_COMMAND_MAX_OUTPUT_CHARS = int(os.environ.get("DIALPAD_JSON_COMMAND_MAX_OUTPUT_CHARS", "65536"))
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -2778,13 +2785,29 @@ def _public_prospect_search_inputs(caller_intelligence):
     }
 
 
+def _canonical_e164_phone(value):
+    if phone_intelligence is not None:
+        normalized = phone_intelligence.normalize_phone(value)
+        if normalized:
+            return normalized
+    text = str(value or "").strip()
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if text.startswith("+") and 8 <= len(digits) <= 15:
+        return f"+{digits}"
+    return None
+
+
 def _sanitize_public_evidence(entry, normalized_phone):
     if not isinstance(entry, dict):
         return None
     phone_corroboration = entry.get("phoneCorroboration")
     if not isinstance(phone_corroboration, dict):
         phone_corroboration = {}
-    matched_phone = normalize_phone_number(phone_corroboration.get("normalizedPhone"))
+    matched_phone = _canonical_e164_phone(phone_corroboration.get("normalizedPhone"))
     matched = bool(phone_corroboration.get("matched") and matched_phone == normalized_phone)
     source_type = _compact_context_scalar(entry.get("sourceType"), limit=50)
     domain_or_title = _compact_context_scalar(entry.get("domainOrTitle"), limit=120)
@@ -2822,7 +2845,7 @@ def _unsafe_public_text(text):
 
 
 def _normalize_public_prospect_result(result, inputs):
-    normalized_phone = normalize_phone_number(inputs.get("phone"))
+    normalized_phone = _canonical_e164_phone(inputs.get("phone"))
     if not isinstance(result, dict):
         return {"usable": False, "status": "unsafe_output"}
     if result.get("usable") is False:
@@ -2831,14 +2854,18 @@ def _normalize_public_prospect_result(result, inputs):
     if _unsafe_public_text(summary):
         return {"usable": False, "status": "unsafe_output"}
     raw_evidence = result.get("evidence") if isinstance(result.get("evidence"), list) else []
-    evidence = [
-        item for item in (
-            _sanitize_public_evidence(entry, normalized_phone)
-            for entry in raw_evidence
-        ) if item
-    ][:5]
-    business_like = any(_evidence_business_like(item) for item in evidence)
-    if not evidence or not business_like:
+    evidence = []
+    for entry in raw_evidence:
+        item = _sanitize_public_evidence(entry, normalized_phone)
+        if item:
+            evidence.append(item)
+        if len(evidence) >= 5:
+            break
+    qualified_evidence = [
+        item for item in evidence
+        if (item.get("phoneCorroboration") or {}).get("matched") and _evidence_business_like(item)
+    ]
+    if not qualified_evidence:
         return {"usable": False, "status": "not_found", "evidence": evidence}
     return {
         "usable": True,
@@ -2849,6 +2876,44 @@ def _normalize_public_prospect_result(result, inputs):
     }
 
 
+def _public_prospect_cache_key(inputs):
+    return json.dumps(inputs or {}, sort_keys=True, separators=(",", ":"))
+
+
+def _public_prospect_cache_policy(command):
+    return f"public-prospect-v1|{command}"
+
+
+def _run_json_command(args, *, input_text=None, timeout=4, warning_label="command", invalid_json_status="invalid_payload"):
+    try:
+        completed = subprocess.run(
+            args,
+            input=input_text,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "status": "unavailable"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "status": "timeout"}
+    except Exception as exc:  # noqa: BLE001 - caller commands must fail closed.
+        print(f"WARNING: {warning_label} failed ({type(exc).__name__})")
+        return {"ok": False, "status": "request_failed"}
+    if completed.returncode != 0:
+        return {"ok": False, "status": f"exit_{completed.returncode}"}
+    stdout = getattr(completed, "stdout", "") or ""
+    stderr = getattr(completed, "stderr", "") or ""
+    if len(stdout) > DIALPAD_JSON_COMMAND_MAX_OUTPUT_CHARS or len(stderr) > DIALPAD_JSON_COMMAND_MAX_OUTPUT_CHARS:
+        return {"ok": False, "status": "output_too_large"}
+    try:
+        payload = json.loads(stdout or "{}")
+    except json.JSONDecodeError:
+        return {"ok": False, "status": invalid_json_status}
+    return {"ok": True, "status": "ok", "payload": payload}
+
+
 def lookup_public_prospect_context(caller_intelligence):
     inputs = _public_prospect_search_inputs(caller_intelligence)
     if not inputs:
@@ -2856,7 +2921,13 @@ def lookup_public_prospect_context(caller_intelligence):
     command = str(DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND or "").strip()
     if not command:
         return {"usable": False, "status": "not_configured"}
-    normalized_phone = normalize_phone_number(inputs.get("phone"))
+    cache_key = _public_prospect_cache_key(inputs)
+    cache_policy = _public_prospect_cache_policy(command)
+    if phone_intelligence is not None:
+        cached = phone_intelligence.cache_json_get("public_prospect", cache_key, cache_policy)
+        if cached is not None:
+            return cached
+    normalized_phone = _canonical_e164_phone(inputs.get("phone"))
     if phone_intelligence is not None and not phone_intelligence.budget_available(
         "public_prospect",
         normalized_phone or json.dumps(inputs, sort_keys=True),
@@ -2867,29 +2938,26 @@ def lookup_public_prospect_context(caller_intelligence):
         args = shlex.split(command)
     except ValueError:
         return {"usable": False, "status": "invalid_command"}
-    try:
-        completed = subprocess.run(
-            args,
-            input=json.dumps(inputs, separators=(",", ":")),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=DIALPAD_PUBLIC_PROSPECT_SEARCH_TIMEOUT_SECONDS,
+    command_result = _run_json_command(
+        args,
+        input_text=json.dumps(inputs, separators=(",", ":")),
+        timeout=DIALPAD_PUBLIC_PROSPECT_SEARCH_TIMEOUT_SECONDS,
+        warning_label="Public prospect search",
+        invalid_json_status="unsafe_output",
+    )
+    if not command_result.get("ok"):
+        return {"usable": False, "status": command_result.get("status") or "unavailable"}
+    result = command_result.get("payload") or {}
+    normalized = _normalize_public_prospect_result(result, inputs)
+    if phone_intelligence is not None:
+        phone_intelligence.cache_json_set(
+            "public_prospect",
+            cache_key,
+            cache_policy,
+            normalized,
+            ttl_seconds=DIALPAD_PUBLIC_PROSPECT_SEARCH_CACHE_TTL_SECONDS,
         )
-    except FileNotFoundError:
-        return {"usable": False, "status": "unavailable"}
-    except subprocess.TimeoutExpired:
-        return {"usable": False, "status": "timeout"}
-    except Exception as exc:  # noqa: BLE001 - public search must fail closed.
-        print(f"WARNING: Public prospect search failed ({type(exc).__name__})")
-        return {"usable": False, "status": "request_failed"}
-    if completed.returncode != 0:
-        return {"usable": False, "status": f"exit_{completed.returncode}"}
-    try:
-        result = json.loads(completed.stdout or "{}")
-    except json.JSONDecodeError:
-        return {"usable": False, "status": "unsafe_output"}
-    return _normalize_public_prospect_result(result, inputs)
+    return normalized
 
 
 def lookup_caller_intelligence(normalized_event, sender_enrichment=None):
@@ -2915,17 +2983,6 @@ def attach_caller_intelligence(normalized_event, sender_enrichment=None):
     if isinstance(inbound_context, dict):
         inbound_context["callerIntelligence"] = caller_context
         if isinstance(caller_context, dict):
-            status = caller_context.get("status") or "unavailable"
-            inbound_context.setdefault("sourceStatuses", {})["phone"] = {
-                "status": "usable" if caller_context.get("usable") else status,
-                "basis": caller_context.get("source") or "ipqs",
-            }
-            public_context = caller_context.get("publicProspect")
-            if isinstance(public_context, dict):
-                inbound_context.setdefault("sourceStatuses", {})["publicProspect"] = {
-                    "status": "usable" if public_context.get("usable") else public_context.get("status"),
-                    "basis": "public_search",
-                }
             risk = caller_context.get("risk") if isinstance(caller_context, dict) else None
             if isinstance(risk, dict) and risk.get("level") in {"medium", "high"}:
                 inbound_context["callerRiskLevel"] = risk.get("level")
@@ -2953,10 +3010,6 @@ def _split_person_name(name):
     return parts[0], " ".join(parts[1:])
 
 
-def _public_prospect_phone_corroborated(caller_context):
-    return _qualifying_phone_corroborated_business_evidence(caller_context) is not None
-
-
 def _evidence_business_like(evidence):
     business_terms = (
         "business",
@@ -2980,43 +3033,48 @@ def _evidence_business_like(evidence):
     return any(term in terms_text for term in business_terms)
 
 
+def _evidence_mentions_reverse_name(evidence, reverse_name):
+    required = {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(reverse_name or "").lower())
+        if len(token) > 1
+    }
+    if not required:
+        return False
+    haystack = " ".join(
+        [
+            str(evidence.get("sourceType") or ""),
+            str(evidence.get("domainOrTitle") or ""),
+            " ".join(evidence.get("matchedTerms") or []),
+        ]
+    ).lower()
+    available = set(re.findall(r"[a-z0-9]+", haystack))
+    return required.issubset(available)
+
+
 def _qualifying_phone_corroborated_business_evidence(caller_context):
     public_context = caller_context.get("publicProspect") if isinstance(caller_context, dict) else None
     if not isinstance(public_context, dict) or not public_context.get("usable"):
         return None
+    reverse_name = (caller_context.get("possibleIdentity") or {}).get("reverseName")
     for evidence in public_context.get("evidence") or []:
         if (
             isinstance(evidence, dict)
             and (evidence.get("phoneCorroboration") or {}).get("matched")
             and _evidence_business_like(evidence)
+            and _evidence_mentions_reverse_name(evidence, reverse_name)
         ):
             return evidence
     return None
 
 
 def _run_contact_wrapper(args):
-    try:
-        completed = subprocess.run(
-            args,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-    except FileNotFoundError:
-        return {"ok": False, "status": "unavailable"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "status": "timeout"}
-    except Exception as exc:  # noqa: BLE001 - contact sync must not block drafts.
-        print(f"WARNING: Dialpad contact sync failed ({type(exc).__name__})")
-        return {"ok": False, "status": "request_failed"}
-    if completed.returncode != 0:
-        return {"ok": False, "status": f"exit_{completed.returncode}"}
-    try:
-        payload = json.loads(completed.stdout or "{}")
-    except json.JSONDecodeError:
-        return {"ok": False, "status": "invalid_payload"}
-    return {"ok": True, "status": "ok", "payload": payload}
+    return _run_json_command(
+        args,
+        timeout=8,
+        warning_label="Dialpad contact sync",
+        invalid_json_status="invalid_payload",
+    )
 
 
 def _contact_wrapper_actions(payload):
@@ -3041,7 +3099,7 @@ def sync_dialpad_contact_from_enrichment(normalized_event, sender_enrichment=Non
     if not isinstance(caller_context, dict) or caller_context.get("status") in {"invalid", "inactive", "disposable", "risky", "timeout", "budget_exceeded", "rate_limited"}:
         return {"written": False, "status": "suggestion_only", "reason": "caller_intelligence_not_safe"}
     inbound_context = normalized_event.get("inbound_context") or {}
-    phone = normalize_phone_number(normalized_event.get("sender_number"))
+    phone = _canonical_e164_phone((caller_context.get("phone") or {}).get("e164")) or _canonical_e164_phone(normalized_event.get("sender_number"))
     if not phone:
         return {"written": False, "status": "not_applicable"}
 
@@ -3093,11 +3151,24 @@ def attach_contact_sync(normalized_event, sender_enrichment=None):
     inbound_context = normalized_event.get("inbound_context")
     if isinstance(inbound_context, dict):
         inbound_context["contactSync"] = contact_sync
-        inbound_context.setdefault("sourceStatuses", {})["contactSync"] = {
-            "status": contact_sync.get("status") or "not_applicable",
-            "basis": "dialpad_contact",
-        }
     return contact_sync
+
+
+def prepare_inbound_reply_event(normalized_event, sender_enrichment=None, line_display=None, recent_context=None):
+    normalized_event["first_contact"] = build_first_contact_context(
+        normalized_event,
+        sender_enrichment=sender_enrichment,
+        line_display=line_display,
+    )
+    normalized_event["inbound_context"] = build_inbound_context(
+        normalized_event,
+        sender_enrichment=sender_enrichment,
+        line_display=line_display,
+        recent_context=recent_context,
+    )
+    attach_caller_intelligence(normalized_event, sender_enrichment=sender_enrichment)
+    attach_contact_sync(normalized_event, sender_enrichment=sender_enrichment)
+    return normalized_event
 
 
 def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
@@ -5098,24 +5169,17 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             if inbound_alert_decision["eligible"]:
                 line_display = get_line_name(to_num)
                 normalized_sms = normalize_sms_payload(data, contact_info=contact_info)
-                normalized_sms["first_contact"] = build_first_contact_context(
-                    normalized_sms,
-                    sender_enrichment=sender_enrichment,
-                    line_display=line_display,
-                )
                 recent_context = lookup_recent_sms_context(
                     from_num,
                     current_dialpad_id=normalized_sms.get("message_id"),
                     current_timestamp_ms=_parse_timestamp_ms(normalized_sms.get("timestamp")),
                 )
-                normalized_sms["inbound_context"] = build_inbound_context(
+                prepare_inbound_reply_event(
                     normalized_sms,
                     sender_enrichment=sender_enrichment,
                     line_display=line_display,
                     recent_context=recent_context,
                 )
-                attach_caller_intelligence(normalized_sms, sender_enrichment=sender_enrichment)
-                attach_contact_sync(normalized_sms, sender_enrichment=sender_enrichment)
                 auto_reply_eligible = should_send_proactive_reply(
                     normalized_sms,
                     sender_enrichment=sender_enrichment,
@@ -5440,24 +5504,17 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 resolved,
                 contact_info=contact_info,
             )
-            normalized_event["first_contact"] = build_first_contact_context(
-                normalized_event,
-                sender_enrichment=sender_enrichment,
-                line_display=line_display,
-            )
             recent_context = lookup_recent_call_context(
                 from_num,
                 line_number=to_num,
                 event_ts_ms=_parse_timestamp_ms(normalized_event.get("timestamp")),
             )
-            normalized_event["inbound_context"] = build_inbound_context(
+            prepare_inbound_reply_event(
                 normalized_event,
                 sender_enrichment=sender_enrichment,
                 line_display=line_display,
                 recent_context=recent_context,
             )
-            attach_caller_intelligence(normalized_event, sender_enrichment=sender_enrichment)
-            attach_contact_sync(normalized_event, sender_enrichment=sender_enrichment)
             auto_reply_eligible = should_send_proactive_reply(
                 normalized_event,
                 sender_enrichment=sender_enrichment,

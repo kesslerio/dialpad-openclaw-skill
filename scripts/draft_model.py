@@ -136,18 +136,14 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
     }
     caller_intelligence = inbound_context.get("callerIntelligence") or normalized_event.get("caller_intelligence")
     if isinstance(caller_intelligence, dict):
-        phone = caller_intelligence.get("phone") if isinstance(caller_intelligence.get("phone"), dict) else {}
-        line = caller_intelligence.get("line") if isinstance(caller_intelligence.get("line"), dict) else {}
-        risk = caller_intelligence.get("risk") if isinstance(caller_intelligence.get("risk"), dict) else {}
-        possible = caller_intelligence.get("possibleIdentity") if isinstance(caller_intelligence.get("possibleIdentity"), dict) else {}
-        public = caller_intelligence.get("publicProspect") if isinstance(caller_intelligence.get("publicProspect"), dict) else {}
+        public_keys = ("status", "summary", "confidence") if identity_confidence == "high" else ("status", "confidence")
         facts["sources"]["callerIntelligence"] = {
             "status": _compact_scalar(caller_intelligence.get("status"), limit=40),
-            "phone": _compact_dict(phone, ("country", "region", "city")),
-            "line": _compact_dict(line, ("carrier", "type", "activeStatus")),
-            "risk": _compact_dict(risk, ("level",)),
-            "possibleIdentity": _compact_dict(possible, ("basis", "confidence")),
-            "publicProspect": _compact_dict(public, ("status", "summary", "confidence")),
+            "phone": _compact_dict(caller_intelligence.get("phone"), ("country", "region", "city")),
+            "line": _compact_dict(caller_intelligence.get("line"), ("carrier", "type", "activeStatus")),
+            "risk": _compact_dict(caller_intelligence.get("risk"), ("level",)),
+            "possibleIdentity": _compact_dict(caller_intelligence.get("possibleIdentity"), ("basis", "confidence")),
+            "publicProspect": _compact_dict(caller_intelligence.get("publicProspect"), public_keys),
         }
     rich = normalized_event.get("rich_reply")
     if isinstance(rich, dict):

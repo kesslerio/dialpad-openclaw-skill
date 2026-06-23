@@ -145,6 +145,25 @@ def test_cache_files_are_private(monkeypatch, tmp_path):
             assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
 
 
+def test_cache_preserves_existing_parent_permissions(monkeypatch, tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o755)
+    monkeypatch.setenv("IPQS_API_KEY", "secret-test-key")
+    monkeypatch.setenv("DIALPAD_PHONE_INTELLIGENCE_CACHE_DB", str(shared / "phone.db"))
+    monkeypatch.setenv("DIALPAD_PHONE_INTELLIGENCE_MAX_CALLS_PER_WINDOW", "120")
+    monkeypatch.setattr(
+        phone_intelligence.urllib.request,
+        "urlopen",
+        lambda _req, timeout: _FakeResponse({"success": True, "valid": True, "fraud_score": 0}),
+    )
+
+    phone_intelligence.lookup_phone_intelligence("+12025550149", now=100)
+
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+    assert stat.S_IMODE((shared / "phone.db").stat().st_mode) == 0o600
+
+
 def test_budget_exhaustion_returns_without_provider_call(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("DIALPAD_PHONE_INTELLIGENCE_MAX_CALLS_PER_WINDOW", "1")

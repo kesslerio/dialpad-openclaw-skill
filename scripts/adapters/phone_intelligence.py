@@ -279,7 +279,7 @@ def budget_available(kind, token, limit, window_seconds=None, now=None):
         return True
     path = cache_db_path()
     if not path:
-        return True
+        return False
     now = int(now or time.time())
     window = max(1, int(window_seconds or _env_int("DIALPAD_CALLER_INTELLIGENCE_BUDGET_WINDOW_SECONDS", DEFAULT_BUDGET_WINDOW_SECONDS)))
     window_start = now - (now % window)
@@ -314,7 +314,17 @@ def _risk_from_payload(payload):
     valid = _bool(payload.get("valid"))
     active = _bool(payload.get("active"))
     active_status = _clean(payload.get("active_status") or payload.get("line_status"), limit=40)
-    if active is False or (active_status and active_status.lower() == "inactive"):
+    inactive_status_terms = (
+        "inactive",
+        "disconnected",
+        "turned off",
+        "not in service",
+        "unreachable",
+    )
+    if active is False or (
+        active_status
+        and any(term in active_status.lower() for term in inactive_status_terms)
+    ):
         active_status = "inactive"
     elif active is True:
         active_status = "active"
@@ -357,8 +367,11 @@ def _risk_from_payload(payload):
 def normalize_ipqs_payload(phone, payload):
     if not isinstance(payload, dict):
         return degraded("unavailable", phone=phone)
-    if payload.get("success") is False and not payload.get("valid"):
-        return degraded("not_found", phone=phone)
+    if payload.get("success") is False and _bool(payload.get("valid")) is not False:
+        message = str(payload.get("message") or payload.get("error") or "").lower()
+        if any(term in message for term in ("rate", "quota", "limit", "too many")):
+            return degraded("rate_limited", phone=phone)
+        return degraded("unavailable", phone=phone)
 
     normalized = normalize_phone(payload.get("formatted") or payload.get("phone") or phone) or normalize_phone(phone)
     risk_level, reasons, active_status, fraud_score, temporary = _risk_from_payload(payload)

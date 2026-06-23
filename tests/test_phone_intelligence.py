@@ -89,6 +89,35 @@ def test_invalid_number_returns_unusable_high_risk():
     assert "invalid" in out["risk"]["reasons"]
 
 
+def test_ipqs_success_false_valid_false_stays_invalid():
+    out = phone_intelligence.normalize_ipqs_payload("+12025550144", {"success": False, "valid": False, "fraud_score": 0})
+
+    assert out["usable"] is False
+    assert out["status"] == "invalid"
+    assert out["risk"]["level"] == "high"
+    assert "invalid" in out["risk"]["reasons"]
+
+
+def test_ipqs_success_false_without_valid_is_unavailable_or_rate_limited():
+    unavailable = phone_intelligence.normalize_ipqs_payload("+12025550144", {"success": False, "message": "provider error"})
+    limited = phone_intelligence.normalize_ipqs_payload("+12025550144", {"success": False, "message": "quota limit exceeded"})
+
+    assert unavailable["status"] == "unavailable"
+    assert limited["status"] == "rate_limited"
+
+
+def test_disconnected_line_status_is_inactive():
+    out = phone_intelligence.normalize_ipqs_payload(
+        "+12025550144",
+        {"success": True, "valid": True, "active_status": "Disconnected Line", "fraud_score": 0},
+    )
+
+    assert out["usable"] is False
+    assert out["status"] == "inactive"
+    assert out["line"]["activeStatus"] == "inactive"
+    assert "inactive" in out["risk"]["reasons"]
+
+
 def test_medium_and_high_risk_thresholds():
     medium = phone_intelligence.normalize_ipqs_payload("+12025550145", {"success": True, "valid": True, "fraud_score": 75})
     high = phone_intelligence.normalize_ipqs_payload("+12025550146", {"success": True, "valid": True, "fraud_score": 85})
@@ -181,6 +210,14 @@ def test_budget_exhaustion_returns_without_provider_call(monkeypatch, tmp_path):
     assert first["status"] == "usable"
     assert second["status"] == "budget_exceeded"
     assert len(calls) == 1
+
+
+def test_missing_budget_store_fails_closed(monkeypatch):
+    monkeypatch.delenv("DIALPAD_PHONE_INTELLIGENCE_CACHE_DB", raising=False)
+    monkeypatch.delenv("DIALPAD_STATE_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+    assert phone_intelligence.budget_available("ipqs", "+12025550150", 1, now=100) is False
 
 
 def test_missing_secret_and_invalid_input_fail_closed(monkeypatch):

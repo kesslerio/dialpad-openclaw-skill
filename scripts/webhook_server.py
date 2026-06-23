@@ -3068,31 +3068,6 @@ def _qualifying_phone_corroborated_business_evidence(caller_context):
     return None
 
 
-def _run_contact_wrapper(args):
-    return _run_json_command(
-        args,
-        timeout=8,
-        warning_label="Dialpad contact sync",
-        invalid_json_status="invalid_payload",
-    )
-
-
-def _contact_wrapper_actions(payload):
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, dict):
-        return []
-    actions = []
-    shared = data.get("shared")
-    if isinstance(shared, dict) and shared.get("action"):
-        actions.append(shared.get("action"))
-    locals_payload = data.get("locals")
-    if isinstance(locals_payload, list):
-        for item in locals_payload:
-            if isinstance(item, dict) and item.get("action"):
-                actions.append(item.get("action"))
-    return actions
-
-
 def sync_dialpad_contact_from_enrichment(normalized_event, sender_enrichment=None):
     sender_enrichment = sender_enrichment or {}
     caller_context = normalized_event.get("caller_intelligence") or {}
@@ -3120,29 +3095,17 @@ def sync_dialpad_contact_from_enrichment(normalized_event, sender_enrichment=Non
     first_name, last_name = _split_person_name(reverse_name)
     if not first_name or not last_name:
         return {"written": False, "status": "suggestion_only", "reason": "missing_safe_name"}
-    public_context = caller_context.get("publicProspect") or {}
-    company = _compact_context_scalar(public_context.get("summary"), limit=80)
-    args = [
-        sys.executable,
-        str(skill_dir.parent / "bin" / "create_contact.py"),
-        "--first-name",
-        first_name,
-        "--last-name",
-        last_name,
-        "--phone",
-        phone,
-        "--json",
-    ]
-    if company:
-        args.extend(["--company-name", company])
-    result = _run_contact_wrapper(args)
-    if not result.get("ok"):
-        return {"written": False, "status": result.get("status") or "failed", "reason": "wrapper_failed"}
-    payload = result.get("payload") or {}
-    actions = _contact_wrapper_actions(payload)
-    if not actions or any(action != "created" for action in actions):
-        return {"written": False, "status": "suggestion_only", "reason": "create_wrapper_did_not_create"}
-    return {"written": True, "status": "created", "basis": "phone_corroborated_public_business"}
+    return {
+        "written": False,
+        "status": "suggestion_only",
+        "reason": "create_only_contact_wrapper_unavailable",
+        "basis": "phone_corroborated_public_business",
+        "suggestedContact": {
+            "firstName": first_name,
+            "lastName": last_name,
+            "phone": phone,
+        },
+    }
 
 
 def attach_contact_sync(normalized_event, sender_enrichment=None):

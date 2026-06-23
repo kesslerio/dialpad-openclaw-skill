@@ -597,7 +597,7 @@ def test_contact_sync_reverse_name_only_is_suggestion(monkeypatch):
     assert calls == []
 
 
-def test_contact_sync_requires_create_wrapper_created_action(monkeypatch):
+def test_contact_sync_with_qualified_public_business_is_suggestion_only(monkeypatch):
     event = _unknown_sales_event()
     event["caller_intelligence"] = {
         "usable": True,
@@ -625,21 +625,20 @@ def test_contact_sync_requires_create_wrapper_created_action(monkeypatch):
     }
 
     calls = []
-
-    def _fake_run(args, **kwargs):
-        calls.append(args)
-        return _FakeCompletedProcess(
-            stdout=json.dumps({"data": {"shared": {"action": "created"}}}),
-            returncode=0,
-        )
-
-    monkeypatch.setattr(webhook_server.subprocess, "run", _fake_run)
+    monkeypatch.setattr(webhook_server.subprocess, "run", lambda *args, **kwargs: calls.append(args) or None)
 
     out = webhook_server.sync_dialpad_contact_from_enrichment(event, sender_enrichment={"status": "not_found"})
 
-    assert out["written"] is True
-    assert out["status"] == "created"
-    assert calls[0][calls[0].index("--phone") + 1] == "+12025550142"
+    assert out["written"] is False
+    assert out["status"] == "suggestion_only"
+    assert out["reason"] == "create_only_contact_wrapper_unavailable"
+    assert out["basis"] == "phone_corroborated_public_business"
+    assert out["suggestedContact"] == {
+        "firstName": "Jordan",
+        "lastName": "Example",
+        "phone": "+12025550142",
+    }
+    assert calls == []
 
 
 def test_draft_model_redacts_low_confidence_public_prospect_summary():
@@ -670,7 +669,7 @@ def test_draft_model_redacts_low_confidence_public_prospect_summary():
     assert public == {"status": "usable", "confidence": "low"}
 
 
-def test_contact_sync_rejects_create_wrapper_updated_action(monkeypatch):
+def test_contact_sync_omits_public_summary_from_suggested_contact(monkeypatch):
     event = _unknown_sales_event()
     event["caller_intelligence"] = {
         "usable": True,
@@ -696,21 +695,14 @@ def test_contact_sync_rejects_create_wrapper_updated_action(monkeypatch):
             ],
         },
     }
-
-    monkeypatch.setattr(
-        webhook_server.subprocess,
-        "run",
-        lambda *args, **kwargs: _FakeCompletedProcess(
-            stdout=json.dumps({"data": {"shared": {"action": "updated"}}}),
-            returncode=0,
-        ),
-    )
+    calls = []
+    monkeypatch.setattr(webhook_server.subprocess, "run", lambda *args, **kwargs: calls.append(args) or None)
 
     out = webhook_server.sync_dialpad_contact_from_enrichment(event, sender_enrichment={"status": "not_found"})
 
-    assert out["written"] is False
-    assert out["status"] == "suggestion_only"
-    assert out["reason"] == "create_wrapper_did_not_create"
+    assert "company" not in out["suggestedContact"]
+    assert "companyName" not in out["suggestedContact"]
+    assert calls == []
 
 
 def test_inbound_webhook_hook_marks_unknown_sender_first_contact_candidate(monkeypatch, tmp_path):

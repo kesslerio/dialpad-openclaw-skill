@@ -42,6 +42,10 @@ RAW_COMMS_CLAIM_RE = re.compile(
 )
 INTERNAL_SOURCE_NAME_RE = re.compile(r"\b(?:attio|crm|gmail|qmd|provenance)\b", re.IGNORECASE)
 LOW_CONF_PERSONAL_GREETING_RE = re.compile(r"^\s*(?:hi|hello|hey)\s+(?!there\b)[^,!.]{2,40}[,!.]?", re.IGNORECASE)
+PUBLIC_LOOKUP_CLAIM_RE = re.compile(
+    r"\b(?:looked you up|found you online|saw your business|your company|your organization|your role)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,8 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
             "Do not invent scheduled meetings, replies, prices, or commitments.",
             "Do not mention internal tools, CRM, Gmail, Attio, QMD, or provenance.",
             "Do not quote raw email or SMS bodies.",
+            "Treat phone validation and public prospect facts as low-confidence operator evidence.",
+            "Do not greet by reverse-lookup name or mention an unconfirmed company/business.",
             "Return JSON like {\"message\":\"...\"}.",
         ],
         "maxChars": config.max_chars,
@@ -128,6 +134,21 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
             ) if identity_confidence == "high" else {},
         },
     }
+    caller_intelligence = inbound_context.get("callerIntelligence") or normalized_event.get("caller_intelligence")
+    if isinstance(caller_intelligence, dict):
+        phone = caller_intelligence.get("phone") if isinstance(caller_intelligence.get("phone"), dict) else {}
+        line = caller_intelligence.get("line") if isinstance(caller_intelligence.get("line"), dict) else {}
+        risk = caller_intelligence.get("risk") if isinstance(caller_intelligence.get("risk"), dict) else {}
+        possible = caller_intelligence.get("possibleIdentity") if isinstance(caller_intelligence.get("possibleIdentity"), dict) else {}
+        public = caller_intelligence.get("publicProspect") if isinstance(caller_intelligence.get("publicProspect"), dict) else {}
+        facts["sources"]["callerIntelligence"] = {
+            "status": _compact_scalar(caller_intelligence.get("status"), limit=40),
+            "phone": _compact_dict(phone, ("country", "region", "city")),
+            "line": _compact_dict(line, ("carrier", "type", "activeStatus")),
+            "risk": _compact_dict(risk, ("level",)),
+            "possibleIdentity": _compact_dict(possible, ("basis", "confidence")),
+            "publicProspect": _compact_dict(public, ("status", "summary", "confidence")),
+        }
     rich = normalized_event.get("rich_reply")
     if isinstance(rich, dict):
         facts["sources"]["currentDraftBasis"] = _compact_dict(
@@ -202,6 +223,8 @@ def _safe_message(text, normalized_event, config, greeting):
     if RAW_COMMS_CLAIM_RE.search(message):
         return None
     if INTERNAL_SOURCE_NAME_RE.search(message):
+        return None
+    if identity_confidence != "high" and PUBLIC_LOOKUP_CLAIM_RE.search(message):
         return None
     return message
 

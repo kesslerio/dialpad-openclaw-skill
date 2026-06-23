@@ -88,6 +88,10 @@ try:
     import attio_context
 except Exception:
     attio_context = None
+try:
+    import phone_intelligence
+except Exception:
+    phone_intelligence = None
 
 
 def parse_bool_env(raw_value, default=True):
@@ -165,6 +169,9 @@ DIALPAD_COMMS_CONTEXT_LOOKBACK_DAYS = int(os.environ.get("DIALPAD_COMMS_CONTEXT_
 DIALPAD_DRAFT_MODEL_COMMAND = os.environ.get("DIALPAD_DRAFT_MODEL_COMMAND", "")
 DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS", "4"))
 DIALPAD_DRAFT_MODEL_MAX_CHARS = int(os.environ.get("DIALPAD_DRAFT_MODEL_MAX_CHARS", "320"))
+DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND = os.environ.get("DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND", "")
+DIALPAD_PUBLIC_PROSPECT_SEARCH_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_PUBLIC_PROSPECT_SEARCH_TIMEOUT_SECONDS", "4"))
+DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW = int(os.environ.get("DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW", "30"))
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -556,6 +563,7 @@ def format_contact_enrichment(contact):
     if title:
         info = f"{title} | {info}"
     return {
+        "contact_id": contact.get("id"),
         "contact_name": info,
         "first_name": first_name or None,
         "last_name": last_name or None,
@@ -2673,6 +2681,12 @@ SOURCE_STATUS_LABELS = {
     "empty": "not found",
     "timeout": "unavailable",
     "request_failed": "unavailable",
+    "invalid": "invalid",
+    "inactive": "inactive",
+    "disposable": "disposable",
+    "risky": "risky",
+    "budget_exceeded": "budget exceeded",
+    "rate_limited": "rate limited",
 }
 
 
@@ -2719,6 +2733,371 @@ def _compact_context_scalar(value, limit=120):
     if not text:
         return None
     return text[:limit]
+
+
+def _caller_intelligence_allowed(normalized_event, sender_enrichment=None):
+    if (normalized_event.get("event_type") or "sms") not in {"sms", "missed_call"}:
+        return False
+    if normalize_phone_number(normalized_event.get("recipient_number")) != DIALPAD_AUTO_REPLY_SALES_LINE:
+        return False
+    sender = normalize_phone_number(normalized_event.get("sender_number"))
+    if not sender:
+        return False
+    inbound_context = normalized_event.get("inbound_context") or {}
+    first_contact = normalized_event.get("first_contact") or {}
+    lookup = first_contact.get("lookup") if isinstance(first_contact, dict) else {}
+    if inbound_context.get("identityConfidence") == "high" and not (lookup or {}).get("degraded"):
+        return False
+    if (sender_enrichment or {}).get("status") == "resolved":
+        return False
+    return True
+
+
+def _public_prospect_search_inputs(caller_intelligence):
+    if not isinstance(caller_intelligence, dict) or not caller_intelligence.get("usable"):
+        return None
+    risk = caller_intelligence.get("risk") or {}
+    line = caller_intelligence.get("line") or {}
+    if risk.get("level") != "low" or line.get("activeStatus") == "inactive":
+        return None
+    phone = caller_intelligence.get("phone") or {}
+    possible = caller_intelligence.get("possibleIdentity") or {}
+    reverse_name = _compact_context_scalar(possible.get("reverseName"), limit=120)
+    city = _compact_context_scalar(phone.get("city"), limit=80)
+    region = _compact_context_scalar(phone.get("region"), limit=80)
+    if not reverse_name or not (city or region):
+        return None
+    return {
+        "phone": phone.get("e164"),
+        "localFormat": phone.get("localFormat"),
+        "reverseName": reverse_name,
+        "city": city,
+        "region": region,
+        "country": phone.get("country"),
+        "riskLevel": risk.get("level"),
+    }
+
+
+def _sanitize_public_evidence(entry, normalized_phone):
+    if not isinstance(entry, dict):
+        return None
+    phone_corroboration = entry.get("phoneCorroboration")
+    if not isinstance(phone_corroboration, dict):
+        phone_corroboration = {}
+    matched_phone = normalize_phone_number(phone_corroboration.get("normalizedPhone"))
+    matched = bool(phone_corroboration.get("matched") and matched_phone == normalized_phone)
+    source_type = _compact_context_scalar(entry.get("sourceType"), limit=50)
+    domain_or_title = _compact_context_scalar(entry.get("domainOrTitle"), limit=120)
+    matched_terms = [
+        _compact_context_scalar(term, limit=60)
+        for term in (entry.get("matchedTerms") if isinstance(entry.get("matchedTerms"), list) else [])
+    ][:6]
+    basis = _compact_context_scalar(phone_corroboration.get("basis"), limit=80)
+    fields = [source_type, domain_or_title, basis, *[term for term in matched_terms if term]]
+    if any(_unsafe_public_text(field) for field in fields):
+        return None
+    evidence = {
+        "sourceType": source_type,
+        "domainOrTitle": domain_or_title,
+        "matchedTerms": matched_terms,
+        "phoneCorroboration": {
+            "matched": matched,
+            "normalizedPhone": matched_phone if matched else None,
+            "basis": basis,
+        },
+    }
+    evidence["matchedTerms"] = [term for term in evidence["matchedTerms"] if term]
+    if not (evidence["sourceType"] or evidence["domainOrTitle"] or evidence["matchedTerms"]):
+        return None
+    return evidence
+
+
+def _unsafe_public_text(text):
+    if text is None:
+        return False
+    body = str(text or "")
+    if re.search(r"\b(ignore|disregard|system prompt|developer message|secret|password|ssn|birthdate|home address)\b", body, re.IGNORECASE):
+        return True
+    return not bool(customer_safe_knowledge_text(body))
+
+
+def _normalize_public_prospect_result(result, inputs):
+    normalized_phone = normalize_phone_number(inputs.get("phone"))
+    if not isinstance(result, dict):
+        return {"usable": False, "status": "unsafe_output"}
+    if result.get("usable") is False:
+        return {"usable": False, "status": result.get("status") or "not_found"}
+    summary = _compact_context_scalar(result.get("summary"), limit=220)
+    if _unsafe_public_text(summary):
+        return {"usable": False, "status": "unsafe_output"}
+    raw_evidence = result.get("evidence") if isinstance(result.get("evidence"), list) else []
+    evidence = [
+        item for item in (
+            _sanitize_public_evidence(entry, normalized_phone)
+            for entry in raw_evidence
+        ) if item
+    ][:5]
+    business_like = any(_evidence_business_like(item) for item in evidence)
+    if not evidence or not business_like:
+        return {"usable": False, "status": "not_found", "evidence": evidence}
+    return {
+        "usable": True,
+        "status": result.get("status") or "usable",
+        "summary": summary or "Possible public business/professional match.",
+        "confidence": "low",
+        "evidence": evidence,
+    }
+
+
+def lookup_public_prospect_context(caller_intelligence):
+    inputs = _public_prospect_search_inputs(caller_intelligence)
+    if not inputs:
+        return {"usable": False, "status": "not_applicable"}
+    command = str(DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND or "").strip()
+    if not command:
+        return {"usable": False, "status": "not_configured"}
+    normalized_phone = normalize_phone_number(inputs.get("phone"))
+    if phone_intelligence is not None and not phone_intelligence.budget_available(
+        "public_prospect",
+        normalized_phone or json.dumps(inputs, sort_keys=True),
+        DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW,
+    ):
+        return {"usable": False, "status": "budget_exceeded"}
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        return {"usable": False, "status": "invalid_command"}
+    try:
+        completed = subprocess.run(
+            args,
+            input=json.dumps(inputs, separators=(",", ":")),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=DIALPAD_PUBLIC_PROSPECT_SEARCH_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return {"usable": False, "status": "unavailable"}
+    except subprocess.TimeoutExpired:
+        return {"usable": False, "status": "timeout"}
+    except Exception as exc:  # noqa: BLE001 - public search must fail closed.
+        print(f"WARNING: Public prospect search failed ({type(exc).__name__})")
+        return {"usable": False, "status": "request_failed"}
+    if completed.returncode != 0:
+        return {"usable": False, "status": f"exit_{completed.returncode}"}
+    try:
+        result = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return {"usable": False, "status": "unsafe_output"}
+    return _normalize_public_prospect_result(result, inputs)
+
+
+def lookup_caller_intelligence(normalized_event, sender_enrichment=None):
+    if not _caller_intelligence_allowed(normalized_event, sender_enrichment=sender_enrichment):
+        return {"usable": False, "status": "not_applicable"}
+    if phone_intelligence is None:
+        return {"usable": False, "status": "unavailable"}
+    result = phone_intelligence.lookup_phone_intelligence(normalized_event.get("sender_number"))
+    if not isinstance(result, dict):
+        return {"usable": False, "status": "unavailable"}
+    result = dict(result)
+    public_context = lookup_public_prospect_context(result)
+    result["publicProspect"] = public_context
+    return result
+
+
+def attach_caller_intelligence(normalized_event, sender_enrichment=None):
+    caller_context = normalized_event.get("caller_intelligence")
+    if caller_context is None:
+        caller_context = lookup_caller_intelligence(normalized_event, sender_enrichment=sender_enrichment)
+        normalized_event["caller_intelligence"] = caller_context
+    inbound_context = normalized_event.get("inbound_context")
+    if isinstance(inbound_context, dict):
+        inbound_context["callerIntelligence"] = caller_context
+        if isinstance(caller_context, dict):
+            status = caller_context.get("status") or "unavailable"
+            inbound_context.setdefault("sourceStatuses", {})["phone"] = {
+                "status": "usable" if caller_context.get("usable") else status,
+                "basis": caller_context.get("source") or "ipqs",
+            }
+            public_context = caller_context.get("publicProspect")
+            if isinstance(public_context, dict):
+                inbound_context.setdefault("sourceStatuses", {})["publicProspect"] = {
+                    "status": "usable" if public_context.get("usable") else public_context.get("status"),
+                    "basis": "public_search",
+                }
+            risk = caller_context.get("risk") if isinstance(caller_context, dict) else None
+            if isinstance(risk, dict) and risk.get("level") in {"medium", "high"}:
+                inbound_context["callerRiskLevel"] = risk.get("level")
+    return caller_context
+
+
+def caller_intelligence_blocks_customer_draft(normalized_event):
+    caller_context = normalized_event.get("caller_intelligence") or {}
+    if not isinstance(caller_context, dict):
+        return False
+    status = caller_context.get("status")
+    risk = caller_context.get("risk") or {}
+    return status in {"invalid", "inactive", "disposable", "risky"} or risk.get("level") == "high"
+
+
+def caller_intelligence_medium_risk(normalized_event):
+    caller_context = normalized_event.get("caller_intelligence") or {}
+    return isinstance(caller_context, dict) and (caller_context.get("risk") or {}).get("level") == "medium"
+
+
+def _split_person_name(name):
+    parts = [part for part in str(name or "").strip().split() if part]
+    if len(parts) < 2:
+        return None, None
+    return parts[0], " ".join(parts[1:])
+
+
+def _public_prospect_phone_corroborated(caller_context):
+    return _qualifying_phone_corroborated_business_evidence(caller_context) is not None
+
+
+def _evidence_business_like(evidence):
+    business_terms = (
+        "business",
+        "company",
+        "founder",
+        "owner",
+        "executive",
+        "professional",
+        "clinic",
+        "gym",
+        "studio",
+        "organization",
+    )
+    terms_text = " ".join(
+        [
+            str(evidence.get("sourceType") or ""),
+            str(evidence.get("domainOrTitle") or ""),
+            " ".join(evidence.get("matchedTerms") or []),
+        ]
+    ).lower()
+    return any(term in terms_text for term in business_terms)
+
+
+def _qualifying_phone_corroborated_business_evidence(caller_context):
+    public_context = caller_context.get("publicProspect") if isinstance(caller_context, dict) else None
+    if not isinstance(public_context, dict) or not public_context.get("usable"):
+        return None
+    for evidence in public_context.get("evidence") or []:
+        if (
+            isinstance(evidence, dict)
+            and (evidence.get("phoneCorroboration") or {}).get("matched")
+            and _evidence_business_like(evidence)
+        ):
+            return evidence
+    return None
+
+
+def _run_contact_wrapper(args):
+    try:
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "status": "unavailable"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "status": "timeout"}
+    except Exception as exc:  # noqa: BLE001 - contact sync must not block drafts.
+        print(f"WARNING: Dialpad contact sync failed ({type(exc).__name__})")
+        return {"ok": False, "status": "request_failed"}
+    if completed.returncode != 0:
+        return {"ok": False, "status": f"exit_{completed.returncode}"}
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return {"ok": False, "status": "invalid_payload"}
+    return {"ok": True, "status": "ok", "payload": payload}
+
+
+def _contact_wrapper_actions(payload):
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return []
+    actions = []
+    shared = data.get("shared")
+    if isinstance(shared, dict) and shared.get("action"):
+        actions.append(shared.get("action"))
+    locals_payload = data.get("locals")
+    if isinstance(locals_payload, list):
+        for item in locals_payload:
+            if isinstance(item, dict) and item.get("action"):
+                actions.append(item.get("action"))
+    return actions
+
+
+def sync_dialpad_contact_from_enrichment(normalized_event, sender_enrichment=None):
+    sender_enrichment = sender_enrichment or {}
+    caller_context = normalized_event.get("caller_intelligence") or {}
+    if not isinstance(caller_context, dict) or caller_context.get("status") in {"invalid", "inactive", "disposable", "risky", "timeout", "budget_exceeded", "rate_limited"}:
+        return {"written": False, "status": "suggestion_only", "reason": "caller_intelligence_not_safe"}
+    inbound_context = normalized_event.get("inbound_context") or {}
+    phone = normalize_phone_number(normalized_event.get("sender_number"))
+    if not phone:
+        return {"written": False, "status": "not_applicable"}
+
+    contact_id = sender_enrichment.get("contact_id")
+    if contact_id and inbound_context.get("identityConfidence") == "high":
+        return {"written": False, "status": "not_applicable", "reason": "owned_identity_already_resolved"}
+
+    qualifying_evidence = _qualifying_phone_corroborated_business_evidence(caller_context)
+    if qualifying_evidence is None:
+        possible = (caller_context.get("possibleIdentity") or {}).get("reverseName")
+        return {
+            "written": False,
+            "status": "suggestion_only" if possible else "not_applicable",
+            "reason": "no_phone_corroborated_business_evidence",
+        }
+
+    reverse_name = (caller_context.get("possibleIdentity") or {}).get("reverseName")
+    first_name, last_name = _split_person_name(reverse_name)
+    if not first_name or not last_name:
+        return {"written": False, "status": "suggestion_only", "reason": "missing_safe_name"}
+    public_context = caller_context.get("publicProspect") or {}
+    company = _compact_context_scalar(public_context.get("summary"), limit=80)
+    args = [
+        sys.executable,
+        str(skill_dir.parent / "bin" / "create_contact.py"),
+        "--first-name",
+        first_name,
+        "--last-name",
+        last_name,
+        "--phone",
+        phone,
+        "--json",
+    ]
+    if company:
+        args.extend(["--company-name", company])
+    result = _run_contact_wrapper(args)
+    if not result.get("ok"):
+        return {"written": False, "status": result.get("status") or "failed", "reason": "wrapper_failed"}
+    payload = result.get("payload") or {}
+    actions = _contact_wrapper_actions(payload)
+    if not actions or any(action != "created" for action in actions):
+        return {"written": False, "status": "suggestion_only", "reason": "create_wrapper_did_not_create"}
+    return {"written": True, "status": "created", "basis": "phone_corroborated_public_business"}
+
+
+def attach_contact_sync(normalized_event, sender_enrichment=None):
+    contact_sync = sync_dialpad_contact_from_enrichment(normalized_event, sender_enrichment=sender_enrichment)
+    normalized_event["contact_sync"] = contact_sync
+    inbound_context = normalized_event.get("inbound_context")
+    if isinstance(inbound_context, dict):
+        inbound_context["contactSync"] = contact_sync
+        inbound_context.setdefault("sourceStatuses", {})["contactSync"] = {
+            "status": contact_sync.get("status") or "not_applicable",
+            "basis": "dialpad_contact",
+        }
+    return contact_sync
 
 
 def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
@@ -3468,6 +3847,10 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
     event_type = _event_type(normalized_event)
     if event_type not in {"sms", "missed_call"}:
         return {"usable": False, "status": "unsupported_event"}
+    if caller_intelligence_blocks_customer_draft(normalized_event):
+        return {"usable": False, "status": "human_only_phone_risk"}
+    if caller_intelligence_medium_risk(normalized_event):
+        return {"usable": False, "status": "medium_risk_generic_only"}
 
     if _is_missed_call_event(normalized_event):
         text = str(normalized_event.get("text") or "").strip()
@@ -3598,6 +3981,8 @@ def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_d
             sender_enrichment=sender_enrichment,
         )
         normalized_event["rich_reply"] = rich_reply
+    if caller_intelligence_blocks_customer_draft(normalized_event):
+        return False
     if rich_reply.get("usable"):
         return True
     if inbound_context.get("contextDraftAllowed"):
@@ -3756,8 +4141,16 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
     source_statuses = inbound_context.get("sourceStatuses") or {}
     if isinstance(source_statuses, dict) and source_statuses:
         rendered = []
-        source_labels = {"crm": "CRM", "calendar": "Calendar", "comms": "Comms", "qmd": "QMD"}
-        for source in ("crm", "calendar", "comms", "qmd"):
+        source_labels = {
+            "crm": "CRM",
+            "calendar": "Calendar",
+            "comms": "Comms",
+            "qmd": "QMD",
+            "phone": "Phone",
+            "publicProspect": "Public prospect",
+            "contactSync": "Contact sync",
+        }
+        for source in ("crm", "calendar", "comms", "qmd", "phone", "publicProspect", "contactSync"):
             status = source_statuses.get(source)
             if not isinstance(status, dict):
                 continue
@@ -3766,13 +4159,34 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
             rendered.append(f"{source_labels[source]}: {label}")
         if rendered:
             lines.append(f"*Sources:* {escape_telegram_markdown('; '.join(rendered))}")
+    caller_context = inbound_context.get("callerIntelligence")
+    if isinstance(caller_context, dict):
+        risk = caller_context.get("risk") or {}
+        possible = caller_context.get("possibleIdentity") or {}
+        phone = caller_context.get("phone") or {}
+        facts = []
+        if phone.get("city") or phone.get("region"):
+            facts.append(" / ".join(str(part) for part in (phone.get("city"), phone.get("region")) if part))
+        line = caller_context.get("line") or {}
+        if line.get("type"):
+            facts.append(str(line.get("type")))
+        if risk.get("level"):
+            facts.append(f"risk {risk.get('level')}")
+        reverse_name = possible.get("reverseName")
+        if reverse_name:
+            facts.append(f"possible reverse lookup: {reverse_name}")
+        if facts:
+            lines.append(f"*Phone intel:* {escape_telegram_markdown('; '.join(facts))}")
+        public_context = caller_context.get("publicProspect")
+        if isinstance(public_context, dict) and public_context.get("usable") and public_context.get("summary"):
+            lines.append(f"*Possible prospect:* {escape_telegram_markdown(public_context.get('summary'))}")
     return "\n".join(lines)
 
 
 def build_human_only_blocked_suffix(reply_policy=None):
     """Build Telegram text when policy blocks SMS automation outright."""
     reply_policy = reply_policy or {}
-    if reply_policy.get("state") != "blocked_opt_out":
+    if reply_policy.get("state") not in {"blocked_opt_out", "human_only"}:
         return ""
 
     reason = reply_policy.get("risk_reason") or "automation is blocked for this thread"
@@ -3922,6 +4336,25 @@ def collect_enrichment_source_statuses(normalized_event):
         statuses["qmd"] = {"status": "not_applicable"}
     else:
         statuses["qmd"] = {"status": "not_found"}
+
+    caller_context = normalized_event.get("caller_intelligence")
+    if isinstance(caller_context, dict):
+        statuses["phone"] = {
+            "status": "usable" if caller_context.get("usable") else caller_context.get("status") or "unavailable",
+            "basis": caller_context.get("source") or "ipqs",
+        }
+        public_context = caller_context.get("publicProspect")
+        if isinstance(public_context, dict):
+            statuses["publicProspect"] = {
+                "status": "usable" if public_context.get("usable") else public_context.get("status") or "not_applicable",
+                "basis": "public_search",
+            }
+    contact_sync = normalized_event.get("contact_sync")
+    if isinstance(contact_sync, dict):
+        statuses["contactSync"] = {
+            "status": contact_sync.get("status") or "not_applicable",
+            "basis": "dialpad_contact",
+        }
     return statuses
 
 
@@ -4025,6 +4458,25 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             }
         return False, "blocked_opt_out", None, None, reply_policy
 
+    if caller_intelligence_blocks_customer_draft(normalized_event):
+        invalidate_pending_sms_drafts(
+            thread_key=thread_key,
+            customer_number=recipient_number,
+            reason="phone_intelligence_human_only",
+        )
+        return False, "human_only_phone_risk", None, None, {
+            "state": "human_only",
+            "reason_code": "phone_intelligence_risk",
+            "risk_reason": "phone validation marked this caller invalid, inactive, disposable, abusive, or high risk",
+        }
+    if caller_intelligence_medium_risk(normalized_event):
+        reply_policy = {
+            **reply_policy,
+            "state": "risky",
+            "reason_code": "phone_intelligence_medium_risk",
+            "risk_reason": "phone validation marked this caller medium risk; approve only conservative generic text",
+        }
+
     if not should_send_proactive_reply(
         normalized_event,
         sender_enrichment=sender_enrichment,
@@ -4080,6 +4532,8 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             "crm_context": normalized_event.get("crm_context"),
             "calendar_context": normalized_event.get("calendar_context"),
             "comms_context": normalized_event.get("comms_context"),
+            "caller_intelligence": normalized_event.get("caller_intelligence"),
+            "contact_sync": normalized_event.get("contact_sync"),
             "source_statuses": source_statuses,
         }
     )
@@ -4117,6 +4571,8 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "crm_context": normalized_event.get("crm_context"),
                     "calendar_context": normalized_event.get("calendar_context"),
                     "comms_context": normalized_event.get("comms_context"),
+                    "caller_intelligence": normalized_event.get("caller_intelligence"),
+                    "contact_sync": normalized_event.get("contact_sync"),
                     "source_statuses": source_statuses,
                     "provenance": _build_draft_provenance(normalized_event),
                     # S4 SHADOW MODE decision (booleans/enums only, no PII) for S6.
@@ -4236,6 +4692,10 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
     inbound_context = normalized_event.get("inbound_context")
     if inbound_context is not None:
         payload["inboundContext"] = inbound_context
+
+    caller_context = normalized_event.get("caller_intelligence")
+    if caller_context is not None:
+        payload["callerIntelligence"] = caller_context
 
     auto_reply = normalized_event.get("auto_reply")
     if auto_reply is not None:
@@ -4654,6 +5114,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     line_display=line_display,
                     recent_context=recent_context,
                 )
+                attach_caller_intelligence(normalized_sms, sender_enrichment=sender_enrichment)
+                attach_contact_sync(normalized_sms, sender_enrichment=sender_enrichment)
                 auto_reply_eligible = should_send_proactive_reply(
                     normalized_sms,
                     sender_enrichment=sender_enrichment,
@@ -4994,6 +5456,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 line_display=line_display,
                 recent_context=recent_context,
             )
+            attach_caller_intelligence(normalized_event, sender_enrichment=sender_enrichment)
+            attach_contact_sync(normalized_event, sender_enrichment=sender_enrichment)
             auto_reply_eligible = should_send_proactive_reply(
                 normalized_event,
                 sender_enrichment=sender_enrichment,

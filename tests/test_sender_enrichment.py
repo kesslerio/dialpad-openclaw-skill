@@ -1354,7 +1354,7 @@ def test_model_draft_uses_compact_tool_facts_for_crm_reply(monkeypatch):
         )
 
     monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
-    monkeypatch.setattr(webhook_server.subprocess, "run", _draft_model)
+    monkeypatch.setattr(webhook_server.draft_model.subprocess, "run", _draft_model)
 
     normalized_event = {
         "event_type": "missed_call",
@@ -1414,7 +1414,7 @@ def test_model_draft_uses_compact_tool_facts_for_crm_reply(monkeypatch):
 def test_model_draft_fails_closed_on_unsafe_output(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
     monkeypatch.setattr(
-        webhook_server.subprocess,
+        webhook_server.draft_model.subprocess,
         "run",
         lambda *_args, **_kwargs: _FakeCompletedProcess(
             stdout=json.dumps({"message": "Hi Dr. Chris, I saw your Gmail and your demo is scheduled for tomorrow."})

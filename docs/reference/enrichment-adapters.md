@@ -13,7 +13,7 @@ appends the query as a single final CLI arg and reads a JSON object from stdout
 | Calendar | `scripts/adapters/calendar_context.py` | `"<name> <email> <company> <deal> <timestamp>"` | `{usable, status, basis, summary, startsInMinutes}` |
 | Prior comms | built into `scripts/webhook_server.py` | phone + CRM email/company | `{usable, status, basis, summary, smsOutboundCount, smsInboundCount, gmailMessageCount}` |
 | QMD | existing `qmd` binary (no adapter) | `search "<query>"` | `@@`-delimited snippet |
-| Draft model | configured command | compact facts JSON on stdin | JSON `{message}` or plain text |
+| Draft model | `scripts/draft_model.py` + configured command | compact facts JSON on stdin | JSON `{message}` or plain text |
 
 All adapters fail closed (`{"usable": false, ...}`) and exit 0 on any miss, auth
 error, or timeout — the webhook treats a non-zero exit as failure.

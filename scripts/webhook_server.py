@@ -62,6 +62,7 @@ sys.path.insert(0, str(skill_dir))
 
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook
+import draft_model
 try:
     from sms_sqlite import init_db as init_sms_history_db
 except Exception:
@@ -3282,184 +3283,23 @@ def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _c
     return f"Hi {greeting}, thanks for the heads up. See you shortly."
 
 
-def _compact_context_dict(data, keys):
-    if not isinstance(data, dict):
-        return {}
-    compact = {}
-    for key in keys:
-        value = _compact_context_scalar(data.get(key), limit=240)
-        if value is not None:
-            compact[key] = value
-    return compact
-
-
-def _model_draft_facts(normalized_event, sender_enrichment, fallback_message, category, payload=None):
-    inbound_context = normalized_event.get("inbound_context") or {}
-    payload = payload if isinstance(payload, dict) else {}
-    facts = {
-        "task": "draft_operator_reviewed_sales_sms",
-        "constraints": [
-            "Write one concise SMS under the max character limit.",
-            "Use only the supplied facts.",
-            "Do not invent scheduled meetings, replies, prices, or commitments.",
-            "Do not mention internal tools, CRM, Gmail, Attio, QMD, or provenance.",
-            "Do not quote raw email or SMS bodies.",
-            "Return JSON like {\"message\":\"...\"}.",
-        ],
-        "maxChars": DIALPAD_DRAFT_MODEL_MAX_CHARS,
-        "fallbackMessage": fallback_message,
-        "event": {
-            "type": _event_type(normalized_event),
-            "isMissedCall": _is_missed_call_event(normalized_event),
-            "lineDisplay": normalized_event.get("line_display"),
-            "customerText": _compact_context_scalar(normalized_event.get("text"), limit=240),
-            "identityConfidence": inbound_context.get("identityConfidence"),
-            "category": category,
-        },
-        "candidate": _compact_context_dict(
-            payload,
-            ("basis", "category", "message"),
-        ),
-        "recipient": {
-            "greetingName": _draft_greeting(normalized_event, sender_enrichment),
-        },
-        "sources": {
-            "crm": _compact_context_dict(
-                normalized_event.get("crm_context"),
-                ("company", "deal", "stage", "summary"),
-            ),
-            "calendar": _compact_context_dict(
-                normalized_event.get("calendar_context"),
-                ("status", "basis", "summary", "demoState"),
-            ),
-            "comms": _compact_context_dict(
-                normalized_event.get("comms_context"),
-                ("status", "basis", "summary", "smsStatus", "gmailStatus"),
-            ),
-        },
-    }
-    rich = normalized_event.get("rich_reply")
-    if isinstance(rich, dict):
-        facts["sources"]["currentDraftBasis"] = _compact_context_dict(
-            rich,
-            ("basis", "category", "message"),
-        )
-    return facts
-
-
-def _extract_model_message(output):
-    text = str(output or "").strip()
-    if not text:
-        return None
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return text
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("usable") is False:
-        return None
-    for key in ("message", "draft", "text"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _approved_url_only(text):
-    urls = re.findall(r"https?://\S+|(?:bysha\.pe|shape\.scale|shapescale\.com)/\S*", text or "", flags=re.IGNORECASE)
-    for url in urls:
-        clean = url.rstrip(".,;)")
-        if clean == DIALPAD_BOOK_DEMO_URL or clean.startswith("https://bysha.pe/book-demo"):
-            continue
-        return False
-    return True
-
-
-def _model_draft_safe(text, normalized_event):
-    message = " ".join(str(text or "").split())
-    if not message or len(message) > DIALPAD_DRAFT_MODEL_MAX_CHARS:
-        return None
-    if not customer_safe_knowledge_text(message):
-        return None
-    if not _approved_url_only(message):
-        return None
-    calendar_context = normalized_event.get("calendar_context")
-    calendar_usable = isinstance(calendar_context, dict) and calendar_context.get("usable")
-    if not calendar_usable and re.search(r"\b(?:is|was|'s)\s+scheduled\b|\bscheduled\s+(?:for|at|on)\b", message, re.IGNORECASE):
-        return None
-    if re.search(r"\b(?:i|we)\s+(?:read|saw|found)\s+(?:your\s+)?(?:email|gmail|sms|text)\b", message, re.IGNORECASE):
-        return None
-    return message
-
-
-def _model_draft_message(normalized_event, sender_enrichment, fallback_message, category, payload=None):
-    command = str(DIALPAD_DRAFT_MODEL_COMMAND or "").strip()
-    if not command:
-        return None, "disabled"
-    try:
-        args = shlex.split(command)
-    except ValueError:
-        return None, "invalid_command"
-    if not args:
-        return None, "disabled"
-    facts = _model_draft_facts(normalized_event, sender_enrichment, fallback_message, category, payload=payload)
-    try:
-        completed = subprocess.run(
-            args,
-            input=json.dumps(facts, separators=(",", ":")),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS,
-        )
-    except FileNotFoundError:
-        return None, "unavailable"
-    except subprocess.TimeoutExpired:
-        return None, "timeout"
-    except Exception as exc:  # noqa: BLE001 - model drafting must fail closed.
-        print(f"⚠️  Draft model failed ({type(exc).__name__})")
-        return None, "request_failed"
-    if completed.returncode != 0:
-        return None, f"exit_{completed.returncode}"
-    candidate = _extract_model_message(completed.stdout)
-    safe = _model_draft_safe(candidate, normalized_event)
-    if not safe:
-        return None, "unsafe_output"
-    return safe, "ok"
-
-
 def _apply_model_draft(normalized_event, sender_enrichment, payload):
-    if not str(DIALPAD_DRAFT_MODEL_COMMAND or "").strip():
-        return payload
-    fallback = payload.get("message")
-    if not fallback:
-        return payload
-    message, status = _model_draft_message(
+    sender_enrichment = sender_enrichment or {}
+    return draft_model.apply_model_draft(
         normalized_event,
-        sender_enrichment,
-        fallback,
-        payload.get("category"),
-        payload=payload,
+        payload,
+        draft_model.DraftModelConfig(
+            command=DIALPAD_DRAFT_MODEL_COMMAND,
+            timeout_seconds=DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS,
+            max_chars=DIALPAD_DRAFT_MODEL_MAX_CHARS,
+            approved_booking_url=DIALPAD_BOOK_DEMO_URL,
+        ),
+        greeting=_draft_greeting(normalized_event, sender_enrichment),
     )
-    payload["modelDraft"] = {
-        "status": status,
-        "basis": "draft_model" if message else None,
-    }
-    if not message:
-        return payload
-    payload["message"] = message
-    payload["modelDraft"]["basis"] = "draft_model"
-    payload["modelDraft"]["fallbackBasis"] = payload.get("basis")
-    payload["basis"] = f"model_{payload.get('basis') or 'draft'}"
-    return payload
 
 
 def _base_draft_basis(basis):
-    text = str(basis or "")
-    if text.startswith("model_"):
-        return text[len("model_"):]
-    return text
+    return draft_model.base_draft_basis(basis)
 
 
 def _crm_reply_payload(normalized_event, sender_enrichment, crm_context):

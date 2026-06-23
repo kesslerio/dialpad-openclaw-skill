@@ -52,12 +52,18 @@ That is safe, but it leaves the operator without evidence that the number is act
 - R14. Add deterministic per-window provider-call budgets so unique-number spam cannot burn unbounded IPQS or public-search credits.
 - R15. Document secrets and runtime configuration using environment references, not literal keys.
 - R16. Add tests that prove both webhook surfaces use the same logic and preserve low-confidence safety invariants.
+- R17. Automatically create or update Dialpad contacts from enriched information only when identity and writeback confidence is clear.
+- R18. Never use IPQS reverse name alone, area code, same-name personal search, or weak public search to overwrite or create a Dialpad contact.
+- R19. Fill missing Dialpad contact fields or append confirmed identifiers; do not overwrite populated fields with lower-confidence data.
+- R20. Surface ambiguous contact-sync suggestions in Telegram/metadata instead of writing back automatically.
 
 ### Non-Goals
 
 - No voicemail transcription or call recording analysis in this PR.
 - No automatic CRM write-back.
 - No automatic sending based only on IPQS or public search.
+- No automatic Dialpad contact overwrite or merge from reverse-name-only, same-name, area-code, or weak public-search evidence.
+- No automatic Dialpad contact writeback before webhook ACK or before the idempotency claim succeeds.
 - No broad person-search dossier, home address enrichment, relatives, age, or other sensitive identity expansion.
 - No direct browser automation inside the webhook request path.
 
@@ -147,8 +153,8 @@ The model should not decide whether a caller is safe or abusive.
 Decision:
 
 - Normalize deterministic risk first.
-- Mark invalid, inactive, known spammer, recent-abuse, risky, or `fraud_score >= 90` numbers as `riskLevel:"high"`.
-- Mark `fraud_score >= 75` as `riskLevel:"medium"` when no high-risk flag is present.
+- Mark invalid, inactive, known spammer, recent-abuse, risky, or `fraud_score >= 85` numbers as `riskLevel:"high"`.
+- Mark `fraud_score >= 75` and `< 85` as `riskLevel:"medium"` when no high-risk flag is present.
 - Mark all remaining usable numbers as `riskLevel:"low"`.
 - High-risk callers are human-only in v1: render the reason for the operator and do not generate a customer-facing draft.
 - Medium-risk callers may receive only the conservative generic approval draft, with a visible operator warning.
@@ -158,14 +164,15 @@ Rationale:
 - IPQS documents high-risk interpretations for invalid/inactive numbers and high fraud scores.
 - This is routing and safety policy, not prose generation.
 
-### KTD-6: External enrichment runs after ACK and inside budgets
+### KTD-6: External enrichment runs after the idempotency claim and ACK
 
 IPQS and public search must not become part of webhook receipt availability.
 
 Decision:
 
+- Claim the inbound/user-visible idempotency key before webhook ACK, storage, draft creation, hooks, or Telegram side effects.
 - Acknowledge webhook receipt before IPQS or public-search calls.
-- Run missed-call enrichment only after the missed-call idempotency claim succeeds.
+- Run missed-call and SMS caller-intelligence enrichment only after the relevant idempotency claim succeeds and the webhook ACK has been sent.
 - Use deterministic per-window budgets for IPQS and public search; expose `budget_exceeded` or `rate_limited` source statuses when a cap is hit.
 - Use `DIALPAD_CALLER_INTELLIGENCE_BUDGET_WINDOW_SECONDS` for the budget window, defaulting to one hour.
 - Use `DIALPAD_PHONE_INTELLIGENCE_MAX_CALLS_PER_WINDOW` and `DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW`, initially defaulting to 120 IPQS validations/hour and 30 public searches/hour.
@@ -176,15 +183,33 @@ Rationale:
 - Preserves the ACK-first/idempotency invariant from `docs/solutions/ack-first-webhook-idempotency.md`.
 - Prevents provider stalls or unique-number spam from delaying receipt handling or burning unbounded credits.
 
+### KTD-7: Dialpad contact writeback is confidence-gated
+
+Enrichment should keep Dialpad contacts current, but contact mutation has higher blast radius than operator context or approval drafts.
+
+Decision:
+
+- Use existing `bin/create_contact.py` and `bin/update_contact.py` wrappers for writeback.
+- Run contact sync only after the enrichment/idempotency path has settled, never before webhook ACK.
+- Automatically update an existing Dialpad contact only when the contact ID or exact phone match is unambiguous and the new field is confirmed by owned-source identity or bounded business/professional evidence with no conflict.
+- Automatically create a contact only when duplicate checks find no existing match and the evidence supplies the required safe fields; otherwise render a suggested contact sync in Telegram/metadata.
+- Never overwrite populated Dialpad fields with lower-confidence data; only fill missing fields or append confirmed phone/email/URL identifiers.
+- Treat reverse-name-only, area-code, weak public search, same-name personal search, risky, inactive, invalid, or budget-degraded cases as suggestion-only.
+
+Rationale:
+
+- Reuses the repo's supported Dialpad writeback wrappers instead of inventing a new API surface.
+- Preserves the ambiguity guardrail from `docs/ideation/2026-03-26-dialpad-contact-merge-ambiguity-ideation.md`.
+
 ---
 
 ## High-Level Technical Design
 
 ```mermaid
 flowchart TD
-  A[Inbound Sales SMS or missed call] --> AA[ACK webhook receipt]
-  AA --> AB[Claim idempotency for user-visible output]
-  AB --> B[Dialpad contact enrichment]
+  A[Inbound Sales SMS or missed call] --> AB[Claim idempotency for user-visible output]
+  AB --> AA[ACK webhook receipt]
+  AA --> B[Dialpad contact enrichment]
   B --> C[Owned-source identity gate: identity resolver and CRM]
   C --> E{Identity confidence high?}
   E -- yes --> F[Use confirmed identity plus calendar/comms facts]
@@ -199,6 +224,7 @@ flowchart TD
   L --> M
   M --> N[Existing safety validators]
   N --> O[Approval draft and Telegram context]
+  L --> P[Confidence-gated Dialpad contact sync]
 ```
 
 ### Data Contract
@@ -208,15 +234,15 @@ Add a new `callerIntelligence` object to inbound context metadata:
 ```json
 {
   "usable": true,
-  "status": "found",
+  "status": "usable",
   "source": "ipqs",
   "phone": {
-    "e164": "+18178460085",
-    "localFormat": "(817) 846-0085",
+    "e164": "+12025550142",
+    "localFormat": "(202) 555-0142",
     "country": "US",
-    "region": "TX",
-    "city": "FORT WORTH",
-    "timezone": "America/Chicago"
+    "region": "DC",
+    "city": "WASHINGTON",
+    "timezone": "America/New_York"
   },
   "line": {
     "carrier": "Verizon Wireless",
@@ -232,20 +258,20 @@ Add a new `callerIntelligence` object to inbound context metadata:
     "spammer": false
   },
   "possibleIdentity": {
-    "reverseName": "BILL H HARTIN",
+    "reverseName": "JORDAN EXAMPLE",
     "basis": "ipqs_reverse_lookup",
     "confidence": "low"
   },
   "publicProspect": {
     "usable": true,
-    "status": "found",
-    "summary": "Possible Fort Worth business/professional match.",
+    "status": "usable",
+    "summary": "Possible Washington business/professional match.",
     "confidence": "low",
     "evidence": [
       {
         "sourceType": "business_directory",
         "domainOrTitle": "Example public business profile",
-        "matchedTerms": ["BILL H HARTIN", "Fort Worth"]
+        "matchedTerms": ["JORDAN EXAMPLE", "Washington"]
       }
     ]
   }
@@ -291,8 +317,8 @@ Tests:
 
 - valid active wireless number normalizes expected fields;
 - invalid number returns unusable/high-risk context;
-- high risk is assigned for invalid, inactive, `recent_abuse`, `risky`, `spammer`, or `fraud_score >= 90`;
-- medium risk is assigned for `fraud_score >= 75` when no high-risk flag is present;
+- high risk is assigned for invalid, inactive, `recent_abuse`, `risky`, `spammer`, or `fraud_score >= 85`;
+- medium risk is assigned for `fraud_score >= 75` and `< 85` when no high-risk flag is present;
 - provider timeout returns degraded unusable context;
 - malformed response returns degraded unusable context;
 - secret is never printed or stored in cached payload;
@@ -313,7 +339,8 @@ Files:
 Work:
 
 - Add one shared `lookup_caller_intelligence` helper used by both inbound Sales SMS and missed-call flows.
-- Run it only after webhook receipt acknowledgement and, for missed calls, after the missed-call idempotency claim succeeds.
+- Claim the relevant inbound/user-visible idempotency key before webhook ACK, storage, draft creation, hooks, or Telegram side effects.
+- Run caller intelligence only after webhook receipt acknowledgement and after the relevant idempotency claim succeeds.
 - Define one shared Sales enrichment order: Dialpad contact enrichment, owned-source identity check through the existing resolver/CRM path, caller-intelligence eligibility, then metadata/Telegram/model-facts threading from the same enriched context object.
 - Run caller intelligence only for inbound external Sales numbers and only when owned-source identity is not already high confidence.
 - Thread `callerIntelligence` into approval metadata, hook payloads, and Telegram context.
@@ -325,6 +352,7 @@ Tests:
 
 - Sales SMS with low identity confidence gets caller-intelligence context;
 - missed call with low identity confidence gets the same context shape;
+- idempotency claim occurs before ACK, while IPQS/public search occurs after ACK and after a successful claim;
 - the owned-source resolver/CRM gate runs before caller intelligence eligibility;
 - high-confidence CRM/Dialpad identity does not rely on IPQS for identity;
 - duplicate missed call does not create duplicate phone-intelligence-rendered drafts;
@@ -343,13 +371,14 @@ Work:
 
 - Add optional `DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND`.
 - Pass only minimal inputs: phone local format, reverse name, city, region, country, and risk classification.
+- Check `DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW` before invoking the command and return `budget_exceeded` or `rate_limited` when the cap is hit.
 - Use a strict timeout and compact JSON response.
 - Require returned confidence plus bounded evidence entries with source type, domain or title, and matched terms.
 - Reject `publicProspect.usable` unless at least one evidence entry ties the reverse name plus location to a business, role, or organization relevant to ShapeScale for Business.
 - Sanitize all public-search output before prompt/model facts: cap field lengths, strip instruction-like text, strip sensitive personal details, and never keep page snippets.
 - Cache sanitized search summaries separately from IPQS results.
 - Do not call public search for invalid, inactive, high-risk, or insufficient-input cases.
-- Distinguish search miss, timeout, unavailable, unsafe output, and budget-exhausted statuses.
+- Distinguish search miss, timeout, unavailable, unsafe output, `budget_exceeded`, and `rate_limited` statuses.
 
 Tests:
 
@@ -358,7 +387,8 @@ Tests:
 - public search summary appears only in operator context/model facts with low-confidence labeling;
 - malformed command output is ignored safely;
 - malicious search summaries cannot alter model instructions or customer-facing draft behavior;
-- same-name personal results without business/professional evidence are rejected as unusable.
+- same-name personal results without business/professional evidence are rejected as unusable;
+- public-search budget exhaustion skips the command and preserves the generic fallback/source-status behavior.
 
 ### Unit 4: Model Draft Facts and Safety
 
@@ -402,6 +432,7 @@ Work:
 - Document the IPQS secret setup using env var references only.
 - Document optional public prospect search command contract.
 - Document cache DB, TTL, policy-version, file-permission, purge, and rate-budget configuration.
+- Document automatic Dialpad contact sync guardrails and the suggestion-only fallback for ambiguous matches.
 - Document source-status behavior and draft safety boundaries.
 - Add a concise operational example for an unknown Fort Worth caller.
 - Run focused unit tests plus the existing webhook/enrichment safety suite.
@@ -411,6 +442,35 @@ Verification commands:
 - `python -m pytest tests/test_phone_intelligence.py`
 - `python -m pytest tests/test_sender_enrichment.py tests/test_webhook_hooks.py tests/test_ungate_provenance.py`
 - `python -m pytest tests/test_auto_send_shadow.py tests/test_deal_segment.py`
+
+### Unit 6: Dialpad Contact Sync Writeback
+
+Files:
+
+- `scripts/webhook_server.py`
+- `bin/create_contact.py`
+- `bin/update_contact.py`
+- `tests/test_sender_enrichment.py`
+- `tests/test_webhook_hooks.py`
+
+Work:
+
+- Add a post-enrichment contact-sync helper that uses existing contact create/update wrappers.
+- Run the helper only after the idempotency claim, webhook ACK, and caller-intelligence/owned-source context assembly.
+- Update existing Dialpad contacts only when an exact contact ID or exact phone match is unambiguous.
+- Create contacts only when duplicate checks find no existing contact and the evidence supplies safe required fields.
+- Fill missing non-sensitive fields or append confirmed identifiers; never overwrite populated fields with lower-confidence values.
+- Treat reverse-name-only, weak public search, same-name personal results, risky, inactive, invalid, conflict, timeout, or budget-degraded cases as suggestion-only.
+- Include contact-sync status in approval metadata, hook payloads, and Telegram context.
+
+Tests:
+
+- high-confidence owned-source identity fills a missing Dialpad contact field through `bin/update_contact.py`;
+- validated low-risk public business evidence can create a contact only when duplicate checks are clean and required fields are present;
+- reverse-name-only evidence produces a suggested contact update and no wrapper invocation;
+- conflicting or ambiguous contact candidates block writeback and surface a warning;
+- populated Dialpad fields are not overwritten by lower-confidence enrichment;
+- contact-sync failure degrades to operator context without blocking drafts, hooks, or Telegram.
 
 ---
 
@@ -432,6 +492,19 @@ Customer-facing draft text may not:
 - state that ShapeScale looked the caller up publicly;
 - state that a public-search result is definitely the caller;
 - generate any reply for high-risk, invalid, or inactive callers in v1.
+
+Dialpad contact writeback may:
+
+- fill missing fields from confirmed owned-source evidence;
+- append confirmed phone, email, or URL identifiers;
+- create a new contact only after duplicate checks find no existing match and required safe fields are present.
+
+Dialpad contact writeback may not:
+
+- use IPQS reverse name alone as a contact name;
+- use same-name personal search results as identity;
+- overwrite populated fields with lower-confidence enrichment;
+- run when evidence is ambiguous, conflicting, risky, inactive, invalid, timed out, or budget-degraded.
 
 Operator-facing Telegram context may show:
 
@@ -478,6 +551,8 @@ Operator-facing Telegram context may show:
 - Brainstorm requirements: `docs/brainstorms/2026-06-23-phone-validation-prospect-enrichment-requirements.md`
 - Existing adapter pattern: `docs/reference/enrichment-adapters.md`
 - Existing identity resolver: `scripts/adapters/identity_resolver.py`
+- Existing Dialpad contact writeback wrappers: `bin/create_contact.py`, `bin/update_contact.py`
+- Contact ambiguity guardrails: `docs/ideation/2026-03-26-dialpad-contact-merge-ambiguity-ideation.md`
 - PII and low-confidence safety: `docs/solutions/ungate-enrichment-customer-pii.md`
 - ACK/idempotency behavior: `docs/solutions/ack-first-webhook-idempotency.md`
 - IPQS Phone Number Validation overview: `https://www.ipqualityscore.com/documentation/phone-number-validation-api/overview`

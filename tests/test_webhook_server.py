@@ -426,6 +426,20 @@ class LineTopicRoutingTests(unittest.TestCase):
         self.assertEqual(chat_id, "-1003882776023")
         self.assertEqual(thread_id, "3537")
 
+    def test_hook_payload_routes_by_recipient_line_topic(self):
+        with patch.object(webhook_server, "LINE_TOPIC_ROUTES", self._routes_map()), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TO", "-1003882776023"), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""):
+            payload = webhook_server.build_openclaw_hook_payload({
+                "event_type": "sms",
+                "sender_number": "+17018333346",
+                "recipient_number": "+14155201316",
+                "text": "Hi I got a confirmation?",
+            })
+
+        self.assertEqual(payload["to"], "telegram:group:-1003882776023:topic:3530")
+
     def test_malformed_routes_behave_as_unset(self):
         with patch.object(
             webhook_server,
@@ -836,7 +850,7 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
 
     def test_non_terminal_actor_failure_keeps_existing_approval_buttons(self):
         callback_query = {
-            "message": {"message_id": 99, "chat": {"id": "-100123"}},
+            "message": {"message_id": 99, "message_thread_id": 3530, "chat": {"id": "-100123"}},
         }
 
         with patch.object(webhook_server, "edit_telegram_message_reply_markup") as edit_markup, \
@@ -855,6 +869,8 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
 
         edit_markup.assert_not_called()
         send_status.assert_called_once()
+        self.assertEqual(send_status.call_args.kwargs["chat_id"], "-100123")
+        self.assertEqual(send_status.call_args.kwargs["message_thread_id"], 3530)
 
 
 class CallWebhookHandlerTests(unittest.TestCase):

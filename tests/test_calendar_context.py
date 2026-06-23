@@ -91,6 +91,68 @@ class ResolveAttioDemoTests(unittest.TestCase):
 
 
 class BuildCalendarContextTests(unittest.TestCase):
+    class Completed:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+            self.stderr = ""
+
+    def test_google_calendar_path_wins_when_configured(self):
+        events = [
+            {
+                "summary": "ShapeScale Demo - Synergy Wellness",
+                "start": {"dateTime": "2026-06-20T18:15:00Z"},
+                "attendees": [{"email": "jane@example.test"}],
+            }
+        ]
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_ACCOUNT", "martin@shapescale.com"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary"), \
+                patch("subprocess.run", return_value=self.Completed(json.dumps(events))), \
+                patch.object(attio, "_query_records", return_value=[DEAL]) as attio_query:
+            ctx = cal.build_calendar_context("Jane jane@example.test Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)
+        self.assertTrue(ctx["usable"])
+        self.assertEqual(ctx["basis"], "google_calendar")
+        self.assertEqual(ctx["startsInMinutes"], 15)
+        self.assertIn("ShapeScale Demo", ctx["summary"])
+        self.assertIn("(Work)", ctx["summary"])
+        attio_query.assert_not_called()
+
+    def test_google_calendar_checks_sales_team_calendars(self):
+        responses = [
+            self.Completed(json.dumps([])),
+            self.Completed(json.dumps([
+                {
+                    "summary": "ShapeScale Demo - Synergy Wellness",
+                    "start": {"dateTime": "2026-06-20T18:10:00Z"},
+                }
+            ])),
+            self.Completed(json.dumps([])),
+        ]
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary,alex@shapescale.com,lilla@shapescale.com"), \
+                patch("subprocess.run", side_effect=responses) as run, \
+                patch.object(attio, "_query_records", return_value=[]):
+            ctx = cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)
+        self.assertTrue(ctx["usable"])
+        self.assertEqual(ctx["basis"], "google_calendar")
+        self.assertEqual(ctx["startsInMinutes"], 10)
+        self.assertIn("(Alex)", ctx["summary"])
+        queried_calendars = [call.args[0][3] for call in run.call_args_list]
+        self.assertEqual(queried_calendars, ["primary", "alex@shapescale.com", "lilla@shapescale.com"])
+
+    def test_google_calendar_weak_match_falls_through_to_attio(self):
+        events = [{"summary": "Unrelated Demo", "start": {"dateTime": "2026-06-20T18:15:00Z"}}]
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary"), \
+                patch("subprocess.run", return_value=self.Completed(json.dumps(events))), \
+                patch.object(attio, "_query_records", return_value=[DEAL]):
+            ctx = cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)
+        self.assertTrue(ctx["usable"])
+        self.assertEqual(ctx["basis"], "attio")
+        self.assertEqual(ctx["startsInMinutes"], 30)
+
     def test_attio_path_strips_timestamp(self):
         with patch.object(attio, "_query_records", return_value=[DEAL]):
             ctx = cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)

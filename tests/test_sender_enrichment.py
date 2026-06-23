@@ -1359,6 +1359,7 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
             "deal": "ShapeScale demo",
             "stage": "Demo Scheduled",
             "owner": "Martin",
+            "email": "gabriela@example.test",
             "summary": "Demo Scheduled",
             "raw": {"internal_id": "secret-crm-record"},
         },
@@ -1373,7 +1374,13 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
         },
     ]
 
-    monkeypatch.setattr(webhook_server, "_run_context_command", lambda *_args: raw_results.pop(0))
+    command_queries = []
+
+    def _context_command(_command, query):
+        command_queries.append(query)
+        return raw_results.pop(0)
+
+    monkeypatch.setattr(webhook_server, "_run_context_command", _context_command)
 
     crm_context = webhook_server.lookup_sales_crm_context(normalized_event, sender_enrichment=sender_enrichment)
     calendar_context = webhook_server.lookup_sales_calendar_context(
@@ -1390,6 +1397,7 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
         "deal": "ShapeScale demo",
         "stage": "Demo Scheduled",
         "owner": "Martin",
+        "email": "gabriela@example.test",
         "summary": "Demo Scheduled ShapeScale demo Demo Scheduled Evolve from within medspa",
     }
     assert calendar_context == {
@@ -1400,7 +1408,122 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
         "startsInMinutes": 0,
         "demoState": None,
     }
+    assert "gabriela@example.test" in command_queries[1]
     assert "secret" not in json.dumps({"crm": crm_context, "calendar": calendar_context})
+
+
+def test_sales_comms_context_summarizes_sms_and_gmail_without_message_bodies(monkeypatch, tmp_path):
+    db_path = tmp_path / "sms.db"
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", db_path)
+    monkeypatch.setattr(webhook_server, "init_sms_history_db", sms_sqlite.init_db)
+    conn = sms_sqlite.init_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO messages (
+                contact_number, direction, from_number, to_number, text, timestamp, message_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "+16155574482",
+                "outbound",
+                "+14155201316",
+                "+16155574482",
+                "Looks like the demo booking did not finish. https://bysha.pe/book-demo",
+                1760000000000 - 1000,
+                "pending",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+                contact_number, direction, from_number, to_number, text, timestamp, message_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "+16155574482",
+                "outbound",
+                "+14155201316",
+                "+16155574482",
+                "Second private booking-link follow-up https://bysha.pe/book-demo",
+                1760000000000 - 500,
+                "pending",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    gmail_queries = []
+
+    def _fake_run(args, **_kwargs):
+        gmail_queries.append(args[3])
+        return _FakeCompletedProcess(
+            stdout=json.dumps([
+                {
+                    "date": "2026-06-22 09:00",
+                    "from": "Dr Chris <drchris@example.test>",
+                    "subject": "Private subject should not be surfaced",
+                }
+            ])
+        )
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_GMAIL_CONTEXT_COMMAND", "/bin/gog-shapescale")
+    monkeypatch.setattr(webhook_server.subprocess, "run", _fake_run)
+
+    ctx = webhook_server.lookup_sales_comms_context(
+        {
+            "event_type": "missed_call",
+            "sender_number": "+16155574482",
+            "recipient_number": "+14155201316",
+            "timestamp": 1760000000000,
+        },
+        crm_context={
+            "usable": True,
+            "stage": "Demo Request",
+            "company": "White House Chiropractic",
+            "email": "drchris@example.test",
+        },
+        sender_enrichment={"contact_name": "Dr Chris"},
+    )
+
+    assert ctx["usable"] is True
+    assert ctx["basis"] == "prior_comms"
+    assert ctx["smsOutboundCount"] == 2
+    assert ctx["smsInboundCount"] == 0
+    assert ctx["smsBookingLinkCount"] == 2
+    assert ctx["gmailMessageCount"] == 1
+    assert "SMS: 2 outbound, 0 inbound" in ctx["summary"]
+    assert "booking link sent 2x" in ctx["summary"]
+    assert "Gmail: 1 exact-match message" in ctx["summary"]
+    assert "Private subject" not in json.dumps(ctx)
+    assert "drchris@example.test" in gmail_queries[0]
+
+
+def test_sales_comms_context_not_applicable_without_demo_missed_call(monkeypatch):
+    ctx = webhook_server.lookup_sales_comms_context(
+        {"event_type": "sms", "sender_number": "+16155574482", "recipient_number": "+14155201316"},
+        crm_context={"usable": True, "stage": "Demo Request"},
+    )
+    assert ctx == {"usable": False, "status": "not_applicable"}
+
+
+def test_gmail_comms_search_does_not_use_contact_name_only(monkeypatch):
+    calls = []
+    monkeypatch.setattr(webhook_server, "DIALPAD_GMAIL_CONTEXT_COMMAND", "/bin/gog-shapescale")
+    monkeypatch.setattr(
+        webhook_server.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append(args) or _FakeCompletedProcess(stdout="[]"),
+    )
+
+    gmail = webhook_server._summarize_gmail_comms(
+        crm_context={"usable": True, "stage": "Demo Request"},
+        sender_enrichment={"contact_name": "Dr Chris"},
+    )
+
+    assert gmail["status"] == "empty_query"
+    assert calls == []
 
 
 def test_sales_context_lookup_failures_store_only_status(monkeypatch):
@@ -1506,6 +1629,7 @@ def test_sales_crm_context_compacts_scalar_allowlisted_values(monkeypatch):
             "deal": " ShapeScale demo ",
             "stage": " Demo Scheduled ",
             "owner": 12345,
+            "email": " gabriela@example.test ",
         },
     )
 
@@ -1516,6 +1640,7 @@ def test_sales_crm_context_compacts_scalar_allowlisted_values(monkeypatch):
     assert crm_context["deal"] == "ShapeScale demo"
     assert crm_context["stage"] == "Demo Scheduled"
     assert crm_context["owner"] == "12345"
+    assert crm_context["email"] == "gabriela@example.test"
     assert crm_context["summary"] == "Demo scheduled ShapeScale demo Demo Scheduled Evolve from within medspa"
 
 

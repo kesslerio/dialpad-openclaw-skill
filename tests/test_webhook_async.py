@@ -249,6 +249,54 @@ class MissedCallAckFirstTests(unittest.TestCase):
         self.assertIn('"processing": "duplicate"', second.wfile.getvalue().decode())
         self.assertEqual(lookup.call_count, 1)
 
+    def test_backfilled_missed_call_duplicate_stops_before_side_effects(self):
+        first_payload = {
+            "direction": "inbound",
+            "call_direction": "inbound",
+            "call_missed": True,
+            "contact": {"phone": "+14155550123"},
+            "date_started": 1760000000000,
+            "webhook_event_id": "parent",
+        }
+        second_payload = {
+            **first_payload,
+            "webhook_event_id": "child",
+            "event": {"delivery": "retry"},
+        }
+        history_row = {
+            "direction": "inbound",
+            "state": "missed",
+            "duration": 0,
+            "date_started": 1760000000500,
+            "external_number": "+14155550123",
+            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+        }
+        lookup = MagicMock(return_value={
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        })
+        hooks = MagicMock(return_value=(False, "disabled_by_config"))
+        telegram = MagicMock(return_value=True)
+
+        with patch.object(ws, "_fetch_recent_calls_around", return_value=[history_row]), \
+                patch.object(ws, "lookup_contact_enrichment", lookup), \
+                patch.object(ws, "send_to_openclaw_hooks", hooks), \
+                patch.object(ws, "send_to_telegram", telegram):
+            first, first_status = _build_handler(first_payload)
+            first.handle_call_webhook()
+            second, second_status = _build_handler(second_payload)
+            second.handle_call_webhook()
+
+        self.assertEqual(first_status["code"], 200)
+        self.assertEqual(second_status["code"], 200)
+        self.assertIn('"processing": "async"', first.wfile.getvalue().decode())
+        self.assertIn('"processing": "async"', second.wfile.getvalue().decode())
+        self.assertEqual(lookup.call_count, 1)
+        self.assertEqual(hooks.call_count, 1)
+        self.assertEqual(telegram.call_count, 1)
+
 
 class ServerConfigTests(unittest.TestCase):
     def test_main_uses_threading_http_server(self):

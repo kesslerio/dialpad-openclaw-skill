@@ -156,6 +156,17 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(statuses["crm"]["status"], "usable")
         self.assertEqual(statuses["qmd"]["status"], "not_applicable")
 
+    def test_source_statuses_show_crm_not_applicable_when_qmd_skipped_crm(self):
+        ev = {
+            "event_type": "sms",
+            "rich_reply": {"usable": True, "status": "ok", "basis": "shapescale_knowledge"},
+            "text": "how do I reset the app?",
+        }
+        with patch.object(ws, "DIALPAD_CRM_CONTEXT_COMMAND", "crm-lookup"):
+            statuses = ws.collect_enrichment_source_statuses(ev)
+        self.assertEqual(statuses["crm"]["status"], "not_applicable")
+        self.assertEqual(statuses["qmd"]["status"], "usable")
+
 
 class CustomerTextSafetyTests(unittest.TestCase):
     CRM = {"usable": True, "company": "Acme Corp", "stage": "Demo Booked"}

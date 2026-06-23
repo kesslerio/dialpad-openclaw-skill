@@ -3590,11 +3590,19 @@ def _source_status(status):
 def collect_enrichment_source_statuses(normalized_event):
     statuses = {}
     crm = normalized_event.get("crm_context")
+    rich = normalized_event.get("rich_reply")
+    qmd_answered = (
+        isinstance(rich, dict) and
+        rich.get("basis") == "shapescale_knowledge" and
+        rich.get("usable")
+    )
     if isinstance(crm, dict):
         statuses["crm"] = {
             "status": "usable" if crm.get("usable") else _source_status(crm.get("status")),
             "basis": crm.get("basis"),
         }
+    elif qmd_answered:
+        statuses["crm"] = {"status": "not_applicable"}
     else:
         statuses["crm"] = {"status": "not_configured" if not DIALPAD_CRM_CONTEXT_COMMAND else "not_found"}
 
@@ -3607,8 +3615,7 @@ def collect_enrichment_source_statuses(normalized_event):
     else:
         statuses["calendar"] = {"status": "not_applicable"}
 
-    rich = normalized_event.get("rich_reply")
-    if isinstance(rich, dict) and rich.get("basis") == "shapescale_knowledge" and rich.get("usable"):
+    if qmd_answered:
         statuses["qmd"] = {"status": "usable", "basis": "shapescale_knowledge"}
     elif not str(normalized_event.get("text") or "").strip():
         statuses["qmd"] = {"status": "not_applicable"}
@@ -4605,6 +4612,25 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             from_num = resolved["from_number"]
             to_num = resolved["to_number"]
             call_ts = resolved["event_ts_ms"] or call_ts
+            canonical_dedupe_key = build_missed_call_dedupe_key(data, resolved)
+            if canonical_dedupe_key != missed_call_dedupe_key:
+                canonical_claim = claim_missed_call_notification(canonical_dedupe_key)
+                duplicate = bool(canonical_claim.get("duplicate"))
+                missed_call_dedupe_key = canonical_dedupe_key
+                missed_call_dedupe_status = canonical_claim.get("status")
+                if duplicate:
+                    print(f"[{datetime.now().isoformat()}]")
+                    print(f"   📞 MISSED CALL duplicate suppressed after backfill: {from_num} -> {resolved['line_display'] or get_line_name(to_num) or 'Unknown'}")
+                    print(f"   🧷 Dedupe: {missed_call_dedupe_key} ({missed_call_dedupe_status})")
+                    call_id = data.get("call_id") or data.get("id")
+                    entry_point_call_id = data.get("entry_point_call_id")
+                    if call_id:
+                        print(f"   📞 Call ID: {call_id}")
+                    if entry_point_call_id:
+                        print(f"   📞 Entry point call ID: {entry_point_call_id}")
+                    print()
+                    return
+
             sender_enrichment = (
                 lookup_contact_enrichment(from_num) if from_num != "Unknown" else {
                     "contact_name": None,

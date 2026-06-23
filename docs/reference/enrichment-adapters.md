@@ -10,7 +10,7 @@ appends the query as a single final CLI arg and reads a JSON object from stdout
 | Adapter | File | Query in | JSON out |
 |---|---|---|---|
 | Attio CRM | `scripts/adapters/attio_context.py` | `"<phone> <name> <company>"` | `{usable, status, basis, summary, deal, stage, company, owner, email}` |
-| Calendar | `scripts/adapters/calendar_context.py` | `"<name> <email> <company> <deal> <timestamp>"` | `{usable, status, basis, summary, startsInMinutes}` |
+| Calendar | `scripts/adapters/calendar_context.py` | `"<name> <email> <company> <deal> <timestamp>"` or `"intent:availability <text> <name> <email> <company> <deal> <timestamp>"` | `{usable, status, basis, summary, startsInMinutes}` for scheduled demos, or `{usable, status, basis, intent, summary, candidateWindows}` for availability |
 | Phone intelligence | `scripts/adapters/phone_intelligence.py` | `"<phone>"` | `{usable, status, phone, line, risk, possibleIdentity}` |
 | Public prospect search | `DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND` | compact JSON on stdin | `{usable, status, summary, evidence[]}` |
 | Prior comms | built into `scripts/webhook_server.py` | phone + CRM email/company | `{usable, status, basis, summary, smsOutboundCount, smsInboundCount, gmailMessageCount}` |
@@ -45,6 +45,13 @@ The calendar adapter surfaces both upcoming demos and bounded recent demos. A
 recent missed call after a demo/no-show can therefore become meeting-aware instead
 of falling through to generic copy solely because the meeting is already in the
 past.
+
+For demo-prospect availability requests such as "Do you have anything today?",
+the webhook prefixes the calendar query with `intent:availability`. The adapter
+then returns compact candidate windows from configured ShapeScale calendars
+without raw event bodies. If the calendar command is unavailable, times out, or
+finds no bounded windows, it returns `usable=false`; the webhook treats that as a
+human/context-only scheduling outcome instead of falling back to generic CRM copy.
 
 Phone intelligence runs after the webhook idempotency claim and ACK. It is used
 only for unknown or low-confidence inbound Sales SMS and missed calls. IPQS

@@ -260,6 +260,80 @@ def test_inbound_webhook_hook_uses_enriched_sender(monkeypatch, tmp_path):
     assert normalized_sms["first_contact"]["lookup"]["degraded"] is False
 
 
+def test_inbound_sms_same_target_local_success_makes_hook_context_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: tmp_path / "dedupe.db")
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_CHAT_ID", "-5102073225")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "-5102073225")
+    monkeypatch.setattr(webhook_server, "DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY", False)
+    monkeypatch.setattr(webhook_server, "handle_sms_webhook", lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}})
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {"contact_name": "Jane Doe", "status": "resolved", "degraded": False, "degraded_reason": None},
+    )
+    telegram_messages = []
+    hook_payloads = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_messages.append(text) or True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_payloads.append(webhook_server.build_openclaw_hook_payload(normalized_sms, line_display=line_display)) or (True, "http_200"),
+    )
+
+    handler, status = _build_handler({
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Inbound hello",
+    })
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    assert status["code"] == 200
+    assert len(telegram_messages) == 1
+    assert hook_payloads[0]["deliver"] is False
+    assert hook_payloads[0]["operatorNotification"]["hookDelivery"] == "context_only"
+
+
+def test_inbound_sms_same_target_local_failure_keeps_hook_visible(monkeypatch, tmp_path):
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: tmp_path / "dedupe.db")
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_CHAT_ID", "-5102073225")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "-5102073225")
+    monkeypatch.setattr(webhook_server, "DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY", False)
+    monkeypatch.setattr(webhook_server, "handle_sms_webhook", lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}})
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {"contact_name": "Jane Doe", "status": "resolved", "degraded": False, "degraded_reason": None},
+    )
+    hook_payloads = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_payloads.append(webhook_server.build_openclaw_hook_payload(normalized_sms, line_display=line_display)) or (True, "http_200"),
+    )
+
+    handler, status = _build_handler({
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Inbound hello",
+    })
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    assert status["code"] == 200
+    assert hook_payloads[0]["deliver"] is True
+    assert hook_payloads[0]["operatorNotification"]["hookDelivery"] == "visible"
+
+
 def _unknown_sales_event(text="Need help"):
     event = {
         "event_type": "sms",
@@ -1779,6 +1853,308 @@ def test_running_late_sms_creates_meeting_aware_approval_draft(monkeypatch, tmp_
     assert "meeting-aware" in telegram_messages[0]
 
 
+def test_availability_sms_uses_calendar_aware_reply_for_demo_prospect(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Natalie Lindo",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Embody Wellness Retreat",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with Embody Wellness Retreat",
+        },
+    }
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "intent": "availability",
+            "summary": "Candidate windows: Alex 2:30 PM UTC-3:00 PM UTC; Lilla 4:00 PM UTC-4:30 PM UTC",
+            "candidateWindows": [
+                {"calendar": "Alex", "start": "2026-06-23T14:30:00Z", "end": "2026-06-23T15:00:00Z"},
+                {"calendar": "Lilla", "start": "2026-06-23T16:00:00Z", "end": "2026-06-23T16:30:00Z"},
+            ],
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert calendar_calls
+    assert rich_reply["usable"] is True
+    assert rich_reply["basis"] == "calendar_availability"
+    assert rich_reply["category"] == "scheduling_availability"
+    assert rich_reply["calendarContext"]["candidateWindows"]
+    assert "Candidate windows" in rich_reply["message"]
+    assert "demo conversation" not in rich_reply["message"]
+
+
+def test_availability_sms_without_calendar_match_does_not_create_crm_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Natalie Lindo",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Embody Wellness Retreat",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with Embody Wellness Retreat",
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: {"usable": False, "status": "not_found"},
+    )
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_not_found"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+    assert normalized_event["calendar_context"]["status"] == "not_found"
+    assert "richDraftBasis" not in normalized_event["inbound_context"]
+
+
+def test_non_scheduling_anything_question_does_not_trigger_availability():
+    assert webhook_server.scheduling_availability_intent("Do you have anything on pricing?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything to send me?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything this morning?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything this week?") is False
+
+
+def test_availability_sms_without_crm_context_does_not_create_generic_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Natalie Lindo",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {"usable": False, "status": "not_configured"},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: pytest.fail("calendar lookup requires usable CRM demo context"),
+    )
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "crm_not_configured"
+    assert rich_reply["category"] == "scheduling_availability"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+
+
+def test_low_confidence_availability_sms_does_not_create_customer_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": False,
+            "needsDraftReply": True,
+            "contactName": None,
+            "lookup": {"status": "not_found", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "low",
+            "contextDraftAllowed": False,
+            "genericDraftAllowed": True,
+            "recency": {"state": "unknown"},
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Embody Wellness Retreat",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with Embody Wellness Retreat",
+        },
+    }
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "intent": "availability",
+            "summary": "Candidate windows: Alex 2:30 PM UTC-3:00 PM UTC",
+            "candidateWindows": [
+                {"calendar": "Alex", "start": "2026-06-23T14:30:00Z", "end": "2026-06-23T15:00:00Z"},
+            ],
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert calendar_calls
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_identity_unverified"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+
+
+def test_calendar_context_sanitizes_candidate_windows(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    crm_context = {
+        "usable": True,
+        "status": "ok",
+        "basis": "attio",
+        "company": "Embody Wellness Retreat",
+        "deal": "ShapeScale demo",
+        "stage": "Demo Request",
+        "summary": "Demo Request",
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "intent": "availability",
+            "summary": "Candidate windows: Team 2:30 PM UTC-3:00 PM UTC",
+            "candidateWindows": [
+                {
+                    "calendar": "Team",
+                    "start": "2026-06-23T14:30:00Z",
+                    "end": "2026-06-23T15:00:00Z",
+                    "label": "Team 2:30 PM UTC-3:00 PM UTC",
+                    "raw": {"calendar_id": "secret"},
+                },
+                {"calendar": {"raw": "bad"}, "start": "2026-06-23T16:00:00Z", "end": "2026-06-23T16:30:00Z"},
+            ],
+        },
+    )
+
+    calendar_context = webhook_server.lookup_sales_calendar_context(normalized_event, crm_context=crm_context)
+
+    assert calendar_context["candidateWindows"] == [
+        {
+            "calendar": "Team",
+            "start": "2026-06-23T14:30:00Z",
+            "end": "2026-06-23T15:00:00Z",
+            "label": "Team 2:30 PM UTC-3:00 PM UTC",
+        },
+        {
+            "start": "2026-06-23T16:00:00Z",
+            "end": "2026-06-23T16:30:00Z",
+        },
+    ]
+    assert "secret" not in json.dumps(calendar_context).lower()
+
+
+def test_high_confidence_non_demo_availability_sms_does_not_lookup_calendar(monkeypatch):
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Example Customer",
+            "deal": "Support conversation",
+            "stage": "Customer",
+            "summary": "Customer support conversation",
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: calendar_calls.append(_args) or {"usable": True, "status": "ok"},
+    )
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(normalized_event)
+
+    assert calendar_calls == []
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_not_applicable"
+
+
 def test_meeting_logistics_without_calendar_match_falls_back_safely(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
@@ -2118,6 +2494,46 @@ def test_model_draft_rejects_future_schedule_claim_for_recent_demo(monkeypatch):
     assert result["basis"] == "calendar_meeting"
     assert result["modelDraft"]["status"] == "unsafe_output"
     assert "scheduled for tomorrow" not in result["message"]
+
+
+def test_model_draft_rejects_booked_claim_for_availability_windows(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Natalie, you're booked for 2:30 PM today."})
+        ),
+    )
+    event = {
+        "event_type": "sms",
+        "text": "Do you have anything today?",
+        "inbound_context": {"identityConfidence": "high"},
+        "calendar_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "summary": "Candidate windows: Alex 2:30 PM UTC-3:00 PM UTC",
+            "intent": "availability",
+        },
+    }
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_availability",
+        "category": "scheduling_availability",
+        "message": "Hi Natalie, yes, we can make something work today. Would 2:30 PM work?",
+    }
+
+    result = webhook_server.draft_model.apply_model_draft(
+        event,
+        payload,
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="Natalie",
+    )
+
+    assert result["basis"] == "calendar_availability"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "booked" not in result["message"]
 
 
 def test_model_draft_rejects_bare_unapproved_links(monkeypatch):

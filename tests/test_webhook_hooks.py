@@ -21,6 +21,7 @@ from webhook_server import (
     normalize_sms_payload,
     parse_signature_candidates,
     parse_bool_env,
+    resolve_operator_notification_delivery,
     verify_bearer_jwt,
     verify_hmac_signature,
     verify_webhook_auth,
@@ -193,6 +194,155 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
     assert payload["firstContact"]["needsDraftReply"] is True
     assert payload["firstContact"]["identityState"] == "not_found"
     assert payload["autoReply"]["sent"] is True
+
+
+def test_hook_payload_suppresses_same_target_visible_delivery(monkeypatch):
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "-5102073225")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_CHAT_ID", "-5102073225")
+    monkeypatch.setattr(webhook_server, "DIALPAD_LINE_TOPIC_ROUTES", "")
+    monkeypatch.setattr(webhook_server, "LINE_TOPIC_ROUTES", {})
+    monkeypatch.setattr(webhook_server, "DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY", False)
+
+    normalized = {
+        "sender": "Jane Doe",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155559876",
+        "text": "Ping",
+        "conversation_id": "conv-123",
+    }
+    normalized["operator_notification"] = resolve_operator_notification_delivery(
+        normalized,
+        local_telegram_enabled=True,
+    )
+
+    payload = build_openclaw_hook_payload(normalized, line_display="Support")
+
+    assert payload["deliver"] is False
+    assert payload["operatorNotification"]["visibleOwner"] == "dialpad_telegram"
+    assert payload["operatorNotification"]["hookDelivery"] == "context_only"
+
+
+def test_hook_payload_keeps_visible_delivery_for_different_topic(monkeypatch):
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", "telegram:group:-5102073225:topic:99")
+    monkeypatch.setattr(webhook_server, "PRIORITY_ROUTE_PHONES", {"4155550123"})
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_CHAT_ID", "-5102073225")
+    monkeypatch.setattr(
+        webhook_server,
+        "LINE_TOPIC_ROUTES",
+        webhook_server.parse_line_topic_routes('{"14155559876":"telegram:group:-5102073225:topic:42"}'),
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY", False)
+
+    normalized = {
+        "sender": "Jane Doe",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155559876",
+        "text": "Ping",
+        "conversation_id": "conv-123",
+    }
+    normalized["operator_notification"] = resolve_operator_notification_delivery(
+        normalized,
+        local_telegram_enabled=True,
+    )
+
+    payload = build_openclaw_hook_payload(normalized, line_display="Support")
+
+    assert payload["deliver"] is True
+    assert payload["operatorNotification"]["visibleOwner"] == "openclaw_hook"
+    assert payload["operatorNotification"]["hookDelivery"] == "visible"
+
+
+def test_hook_payload_suppresses_route_encoded_telegram_target_without_channel(monkeypatch):
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_CHAT_ID", "-5102073225")
+    monkeypatch.setattr(
+        webhook_server,
+        "LINE_TOPIC_ROUTES",
+        webhook_server.parse_line_topic_routes('{"14155559876":"telegram:group:-5102073225:topic:42"}'),
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY", False)
+
+    normalized = {
+        "sender": "Jane Doe",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155559876",
+        "text": "Ping",
+        "conversation_id": "conv-123",
+    }
+    normalized["operator_notification"] = resolve_operator_notification_delivery(
+        normalized,
+        local_telegram_enabled=True,
+    )
+
+    payload = build_openclaw_hook_payload(normalized, line_display="Support")
+
+    assert payload["deliver"] is False
+    assert payload["to"] == "telegram:group:-5102073225:topic:42"
+    assert payload["operatorNotification"]["hookDelivery"] == "context_only"
+
+
+def test_hook_payload_keeps_visible_delivery_when_local_telegram_unconfigured(monkeypatch):
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "-5102073225")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_CHAT_ID", "-5102073225")
+    monkeypatch.setattr(webhook_server, "LINE_TOPIC_ROUTES", {})
+    monkeypatch.setattr(webhook_server, "DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY", False)
+
+    normalized = {
+        "sender": "Jane Doe",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155559876",
+        "text": "Ping",
+        "conversation_id": "conv-123",
+    }
+    normalized["operator_notification"] = resolve_operator_notification_delivery(
+        normalized,
+        local_telegram_enabled=True,
+    )
+
+    payload = build_openclaw_hook_payload(normalized, line_display="Support")
+
+    assert payload["deliver"] is True
+    assert payload["operatorNotification"]["hookDelivery"] == "visible"
+
+
+def test_hook_payload_marks_calendar_miss_availability_as_human_needed(monkeypatch):
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "-5102073225")
+    normalized = {
+        "sender": "Jane Doe",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155559876",
+        "text": "Do you have anything today?",
+        "conversation_id": "conv-123",
+        "auto_reply": {
+            "eligible": False,
+            "sent": False,
+            "draftCreated": False,
+            "status": "not_eligible",
+            "message": None,
+            "richReply": {
+                "usable": False,
+                "status": "calendar_not_found",
+                "category": "scheduling_availability",
+            },
+        },
+    }
+
+    payload = build_openclaw_hook_payload(normalized, line_display="Support")
+
+    assert payload["recommendationOwner"]["owner"] == "human_needed"
+    assert payload["recommendationOwner"]["canonical"] is True
+    assert payload["recommendationOwner"]["allowDownstreamSuggestion"] is False
+    assert payload["recommendationOwner"]["reason"] == "calendar_availability_human_needed"
 
 
 def test_build_hook_session_key_for_missed_call_fallback_order():

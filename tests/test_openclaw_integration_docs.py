@@ -72,6 +72,34 @@ def test_openclaw_docs_require_sms_approval_drafts_not_autonomous_send():
     assert "autonomous sms send is not supported" in integration
 
 
+def test_openclaw_docs_require_single_operator_notification_ownership():
+    readme = (ROOT / "README.md").read_text().lower()
+    skill = (ROOT / "SKILL.md").read_text().lower()
+    integration = (ROOT / "references/openclaw-integration.md").read_text().lower()
+
+    assert "deliver=false" in readme
+    assert "deliver=false" in integration
+    assert "operatornotification.hookdelivery=context_only" in integration
+    assert "recommendationowner.canonical" in integration
+    assert "recommendationowner.allowdownstreamsuggestion" in integration
+    assert "dialpad_allow_duplicate_operator_delivery" in readme
+    assert "dialpad_allow_duplicate_operator_delivery" in skill
+    assert "dialpad_allow_duplicate_operator_delivery" in integration
+    assert "same-target" in skill
+
+
+def test_openclaw_docs_require_availability_no_crm_fallback():
+    readme = (ROOT / "README.md").read_text().lower()
+    skill = (ROOT / "SKILL.md").read_text().lower()
+    integration = (ROOT / "references/openclaw-integration.md").read_text().lower()
+
+    assert "do you have anything today?" in readme
+    assert "availability-aware" in skill
+    assert "availability requests" in integration
+    assert "generic crm follow-up copy is suppressed" in integration
+    assert "do not turn the crm generic fallback into a scheduling reply" in skill
+
+
 def test_openclaw_docs_require_telegram_inline_button_safety_preflight():
     readme = (ROOT / "README.md").read_text().lower()
     integration = (ROOT / "references/openclaw-integration.md").read_text().lower()

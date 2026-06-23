@@ -22,7 +22,7 @@ The current fallback path handles unknown callers conservatively:
 - Dialpad contact lookup can provide only webhook-level identity.
 - Attio can be missing or not match the number.
 - Calendar and comms context are only useful after a stronger identity signal exists.
-- Generic fallback drafts are safe, but they miss useful signals such as valid active number, city/state, line type, carrier, abuse risk, and possible reverse-name context.
+- Generic fallback drafts are safe, but they miss useful signals such as validity, active-line status, city/state, line type, carrier, abuse risk, and possible reverse-name context.
 
 For example, an unknown Fort Worth wireless caller can currently produce only:
 
@@ -40,7 +40,7 @@ That is safe, but it leaves the operator without evidence that the number is act
 - R2. Run phone intelligence only for external inbound Sales contacts after owned-source identity resolution, primarily when Dialpad/CRM identity confidence is not high.
 - R3. Validate and normalize IPQS phone data: valid, active status, fraud/risk signals, carrier, line type, country, region, city, timezone, local format, and reverse name when available.
 - R4. Keep IPQS reverse name as possible caller evidence, not confirmed identity.
-- R5. Add optional bounded public prospect enrichment when a valid active low-risk number has enough public signals to search, such as reverse name plus city/state.
+- R5. Add optional bounded public prospect enrichment when a valid, not-inactive, low-risk number has enough public signals to search, such as reverse name plus city/state.
 - R6. Treat public search output as operator context unless another owned source confirms it.
 - R7. Feed the draft model a compact fact set that includes safe caller-intelligence facts and explicit constraints.
 - R8. Let the model produce the final draft text from tool-call facts, but preserve existing safety validators and deterministic fallbacks.
@@ -73,7 +73,7 @@ That is safe, but it leaves the operator without evidence that the number is act
 
 ### KTD-1: Use the existing context-adapter pattern
 
-Add a focused phone-intelligence adapter instead of embedding IPQS calls inside webhook handlers. The repo already uses subprocess JSON adapters for Attio and calendar context, with a fail-closed contract and compact returned payloads. The owned-source identity gate should reuse the existing `scripts/adapters/identity_resolver.py` path before deciding whether caller intelligence is eligible.
+Add a focused phone-intelligence adapter instead of embedding IPQS calls inside webhook handlers. The repo already uses subprocess JSON adapters for Attio and calendar context, with a fail-closed contract and compact returned payloads. The owned-source identity gate should reuse the existing `scripts/adapters/identity_resolver.py` path before deciding whether caller intelligence is eligible, while preserving the resolver's wrong-match warning.
 
 Decision:
 
@@ -81,6 +81,7 @@ Decision:
 - Wire it through a shared helper in `scripts/webhook_server.py`.
 - Configure it with environment variables and make it optional by default.
 - Use the existing identity resolver/CRM confidence before invoking phone intelligence; keep IPQS and public search in a separate operator-only `callerIntelligence` lane.
+- Re-apply the wrong-match/collision guard from `docs/solutions/ungate-enrichment-customer-pii.md` before treating a resolver `high` result as customer-facing identity or writeback authority.
 
 Rationale:
 
@@ -88,6 +89,7 @@ Rationale:
 - Avoids duplicating lookup behavior between SMS and missed calls.
 - Matches existing degraded-source behavior in `lookup_sales_crm_context`, `lookup_sales_calendar_context`, and adapter docs.
 - Prevents phone validation from becoming a parallel identity resolver with conflicting provenance.
+- Prevents a single stale/shared Attio phone match from suppressing caller intelligence or authorizing personalization/writeback on its own.
 
 ### KTD-2: Use IPQS as validation evidence, not identity authority
 
@@ -112,7 +114,7 @@ The webhook service should not hardwire live web search or browser automation. I
 Decision:
 
 - Add optional `DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND`.
-- Invoke it only after phone validation produces a usable, active, low-risk number with enough search inputs.
+- Invoke it only after phone validation produces a usable, not-inactive, low-risk number with enough search inputs.
 - Require the command response to include bounded evidence entries: source type, domain or title, matched terms, and no page snippets.
 - Mark `publicProspect.usable` true only when at least one evidence entry ties the reverse name plus location to a business, role, or organization relevant to ShapeScale for Business.
 - Cap and sanitize summaries, sources, and evidence before model facts; strip instruction-like text and sensitive personal details.
@@ -153,6 +155,7 @@ The model should not decide whether a caller is safe or abusive.
 Decision:
 
 - Normalize deterministic risk first.
+- Treat `active == null` or missing `active_status` as `activeStatus:"unknown"`; do not classify unknown active-line state as inactive or high-risk by itself.
 - Mark invalid, inactive, known spammer, recent-abuse, risky, or `fraud_score >= 85` numbers as `riskLevel:"high"`.
 - Mark `fraud_score >= 75` and `< 85` as `riskLevel:"medium"` when no high-risk flag is present.
 - Mark all remaining usable numbers as `riskLevel:"low"`.
@@ -192,9 +195,10 @@ Decision:
 - Use existing `bin/create_contact.py` and `bin/update_contact.py` wrappers for writeback.
 - Run contact sync only after the enrichment/idempotency path has settled, never before webhook ACK.
 - Automatically update an existing Dialpad contact only when the contact ID or exact phone match is unambiguous and the new field is confirmed by owned-source identity or bounded business/professional evidence with no conflict.
-- Automatically create a contact only when duplicate checks find no existing match and the evidence supplies the required safe fields; otherwise render a suggested contact sync in Telegram/metadata.
-- Never overwrite populated Dialpad fields with lower-confidence data; only fill missing fields or append confirmed phone/email/URL identifiers.
-- Treat reverse-name-only, area-code, weak public search, same-name personal search, risky, inactive, invalid, or budget-degraded cases as suggestion-only.
+- Automatically create a contact only when duplicate checks find no existing match, the create wrapper is create-only or its returned action is verified as `created`, and the evidence supplies the required safe fields; otherwise render a suggested contact sync in Telegram/metadata.
+- Never overwrite populated Dialpad fields with lower-confidence data; fetch current contact values and merge phones, emails, and URLs before calling `bin/update_contact.py`.
+- Treat reverse-name-only, reverse-name-plus-location, area-code, weak public search, same-name personal search, risky, inactive, invalid, or budget-degraded cases as suggestion-only.
+- Require public writeback evidence to directly corroborate the validated phone number or be backed by owned-source identity; name/location public matches are operator context only.
 
 Rationale:
 
@@ -215,7 +219,7 @@ flowchart TD
   E -- yes --> F[Use confirmed identity plus calendar/comms facts]
   E -- no --> G[Phone intelligence helper]
   G --> H[IPQS adapter and sanitized cache]
-  H --> I{Valid active low risk with search inputs?}
+  H --> I{Valid not-inactive low risk with search inputs?}
   I -- yes --> J[Optional public prospect search command]
   I -- no --> K[Skip public search]
   J --> L[Caller intelligence context]
@@ -308,6 +312,7 @@ Work:
 - Normalize provider output into compact statused fields.
 - Return exit code `0` for expected misses/degraded states with `usable:false`.
 - Add cache support for sanitized normalized results.
+- Add optional `enhanced_line_check` configuration, but handle `active == null` or missing `active_status` as `activeStatus:"unknown"` when enhanced checks are unavailable.
 - Add `DIALPAD_PHONE_INTELLIGENCE_CACHE_DB`, `DIALPAD_PHONE_INTELLIGENCE_CACHE_TTL_SECONDS` with a 24-hour default, and `DIALPAD_PUBLIC_PROSPECT_SEARCH_CACHE_TTL_SECONDS` with a 6-hour default.
 - Store cache entries with a lookup-policy version that covers endpoint, strictness, country hint, and risk-threshold version.
 - Create cache parent directories with `0700`, cache files with `0600`, expired-row purging, and the existing SQLite `busy_timeout`/best-effort-WAL pattern.
@@ -316,6 +321,7 @@ Work:
 Tests:
 
 - valid active wireless number normalizes expected fields;
+- valid number with unknown active-line fields remains usable with `activeStatus:"unknown"` and does not become inactive/high-risk by that fact alone;
 - invalid number returns unusable/high-risk context;
 - high risk is assigned for invalid, inactive, `recent_abuse`, `risky`, `spammer`, or `fraud_score >= 85`;
 - medium risk is assigned for `fraud_score >= 75` and `< 85` when no high-risk flag is present;
@@ -341,7 +347,7 @@ Work:
 - Add one shared `lookup_caller_intelligence` helper used by both inbound Sales SMS and missed-call flows.
 - Claim the relevant inbound/user-visible idempotency key before webhook ACK, storage, draft creation, hooks, or Telegram side effects.
 - Run caller intelligence only after webhook receipt acknowledgement and after the relevant idempotency claim succeeds.
-- Define one shared Sales enrichment order: Dialpad contact enrichment, owned-source identity check through the existing resolver/CRM path, caller-intelligence eligibility, then metadata/Telegram/model-facts threading from the same enriched context object.
+- Define one shared Sales enrichment order: Dialpad contact enrichment, owned-source identity check through the existing resolver/CRM path plus wrong-match/collision guard, caller-intelligence eligibility, then metadata/Telegram/model-facts threading from the same enriched context object.
 - Run caller intelligence only for inbound external Sales numbers and only when owned-source identity is not already high confidence.
 - Thread `callerIntelligence` into approval metadata, hook payloads, and Telegram context.
 - Add source-status reporting alongside CRM, calendar, comms, and QMD.
@@ -354,6 +360,7 @@ Tests:
 - missed call with low identity confidence gets the same context shape;
 - idempotency claim occurs before ACK, while IPQS/public search occurs after ACK and after a successful claim;
 - the owned-source resolver/CRM gate runs before caller intelligence eligibility;
+- resolver `high` without the wrong-match/collision guard cannot authorize customer-facing personalization or contact writeback;
 - high-confidence CRM/Dialpad identity does not rely on IPQS for identity;
 - duplicate missed call does not create duplicate phone-intelligence-rendered drafts;
 - source status renders degraded/missing states without breaking draft creation;
@@ -377,13 +384,14 @@ Work:
 - Reject `publicProspect.usable` unless at least one evidence entry ties the reverse name plus location to a business, role, or organization relevant to ShapeScale for Business.
 - Sanitize all public-search output before prompt/model facts: cap field lengths, strip instruction-like text, strip sensitive personal details, and never keep page snippets.
 - Cache sanitized search summaries separately from IPQS results.
-- Do not call public search for invalid, inactive, high-risk, or insufficient-input cases.
+- Do not call public search for invalid, inactive, medium-risk, high-risk, or insufficient-input cases.
 - Distinguish search miss, timeout, unavailable, unsafe output, `budget_exceeded`, and `rate_limited` statuses.
 
 Tests:
 
 - command timeout degrades cleanly;
 - high-risk number skips public search;
+- medium-risk number skips public search;
 - public search summary appears only in operator context/model facts with low-confidence labeling;
 - malformed command output is ignored safely;
 - malicious search summaries cannot alter model instructions or customer-facing draft behavior;
@@ -458,17 +466,21 @@ Work:
 - Add a post-enrichment contact-sync helper that uses existing contact create/update wrappers.
 - Run the helper only after the idempotency claim, webhook ACK, and caller-intelligence/owned-source context assembly.
 - Update existing Dialpad contacts only when an exact contact ID or exact phone match is unambiguous.
-- Create contacts only when duplicate checks find no existing contact and the evidence supplies safe required fields.
+- Create contacts only when duplicate checks find no existing contact, the wrapper path is create-only or the wrapper result is verified as `created`, and the evidence supplies safe required fields.
+- Before updating identifiers, fetch the existing contact and merge current phones/emails/URLs with newly confirmed identifiers before invoking `bin/update_contact.py`.
 - Fill missing non-sensitive fields or append confirmed identifiers; never overwrite populated fields with lower-confidence values.
-- Treat reverse-name-only, weak public search, same-name personal results, risky, inactive, invalid, conflict, timeout, or budget-degraded cases as suggestion-only.
+- Treat reverse-name-only, reverse-name-plus-location, weak public search, same-name personal results, risky, inactive, invalid, conflict, timeout, or budget-degraded cases as suggestion-only.
+- Require public business/professional writeback evidence to directly corroborate the validated phone number or have owned-source corroboration.
 - Include contact-sync status in approval metadata, hook payloads, and Telegram context.
 
 Tests:
 
 - high-confidence owned-source identity fills a missing Dialpad contact field through `bin/update_contact.py`;
-- validated low-risk public business evidence can create a contact only when duplicate checks are clean and required fields are present;
-- reverse-name-only evidence produces a suggested contact update and no wrapper invocation;
+- validated low-risk public business evidence can create a contact only when it directly corroborates the validated phone number, duplicate checks are clean, required fields are present, and the create wrapper result is `created`;
+- reverse-name-only or reverse-name-plus-location evidence produces a suggested contact update and no wrapper invocation;
 - conflicting or ambiguous contact candidates block writeback and surface a warning;
+- create wrapper returning `updated` from an upsert path is rejected for create-only sync;
+- identifier updates merge existing phones/emails/URLs instead of replacing them;
 - populated Dialpad fields are not overwritten by lower-confidence enrichment;
 - contact-sync failure degrades to operator context without blocking drafts, hooks, or Telegram.
 
@@ -496,12 +508,13 @@ Customer-facing draft text may not:
 Dialpad contact writeback may:
 
 - fill missing fields from confirmed owned-source evidence;
-- append confirmed phone, email, or URL identifiers;
-- create a new contact only after duplicate checks find no existing match and required safe fields are present.
+- append confirmed phone, email, or URL identifiers after merging existing contact values;
+- create a new contact only after duplicate checks find no existing match, required safe fields are present, and the wrapper result confirms a create action.
 
 Dialpad contact writeback may not:
 
 - use IPQS reverse name alone as a contact name;
+- use reverse-name-plus-location public matches as identity unless public evidence directly corroborates the validated phone number;
 - use same-name personal search results as identity;
 - overwrite populated fields with lower-confidence enrichment;
 - run when evidence is ambiguous, conflicting, risky, inactive, invalid, timed out, or budget-degraded.
@@ -525,6 +538,9 @@ Operator-facing Telegram context may show:
 - Risk: Public search finds a same-name person in the same area.
   Mitigation: Require at least one business/professional evidence entry tied to reverse name plus location, and treat it as low-confidence operator context unless owned sources confirm it.
 
+- Risk: Public search plus stale reverse lookup writes the wrong Dialpad contact.
+  Mitigation: Keep name/location public matches suggestion-only for writeback; require owned-source corroboration or public evidence that directly corroborates the validated phone number.
+
 - Risk: Provider latency slows webhook handling.
   Mitigation: Run provider calls only after webhook ACK and idempotency claim, use strict timeouts, cache sanitized results, and fail closed.
 
@@ -532,7 +548,10 @@ Operator-facing Telegram context may show:
   Mitigation: Normalize allowlisted fields only, sanitize public-search output before model facts, avoid storing raw payloads, and avoid logging cached values.
 
 - Risk: Risk scoring blocks useful prospects.
-  Mitigation: Use explicit thresholds; high-risk callers become human-only, while medium-risk callers can still get conservative generic drafts with operator warnings.
+  Mitigation: Use explicit thresholds and keep unknown active-line status separate from inactive; high-risk callers become human-only, while medium-risk callers can still get conservative generic drafts with operator warnings.
+
+- Risk: Contact wrapper upsert or array replacement overwrites data.
+  Mitigation: Require create-only behavior or verify a `created` result for create paths, and fetch/merge existing identifier arrays before update paths.
 
 - Risk: Unique-number spam burns provider credits.
   Mitigation: Add deterministic per-window budgets with `budget_exceeded` or `rate_limited` source statuses and existing fallback behavior.

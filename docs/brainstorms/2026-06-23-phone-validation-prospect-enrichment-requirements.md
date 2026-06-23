@@ -34,7 +34,7 @@ IPQualityScore can provide phone validation, carrier, line type, active-line, ri
 **Phone intelligence**
 
 - R1. Inbound Sales SMS and Sales missed-call events must attempt shared phone validation when Dialpad contact lookup and CRM lookup do not produce high-confidence identity.
-- R2. Phone validation must surface compact operator-facing facts for validity, active-line status, country, city, region, carrier, line type, reverse name, and abusive/fraud status when the provider returns them.
+- R2. Phone validation must surface compact operator-facing facts for validity, active-line status, country, city, region, carrier, line type, reverse name, and abusive/fraud status when the provider returns them; missing active-line fields must remain unknown, not inactive.
 - R3. Phone validation status must distinguish `usable`, `not_configured`, `not_found`, `invalid`, `inactive`, `risky`, `unavailable`, `timeout`, `budget_exceeded`, `rate_limited`, and `unsafe_output`.
 - R4. Invalid, inactive, or abusive-number signals must be visible in Telegram and draft metadata before any operator approves a reply.
 - R5. Phone validation must fail closed to the existing generic or CRM-aware behavior when the provider is missing, slow, or unavailable.
@@ -42,7 +42,7 @@ IPQualityScore can provide phone validation, carrier, line type, active-line, ri
 **Identity and prospect context**
 
 - R6. Reverse-name or location facts from phone validation must not raise customer-facing identity confidence to high without an exact CRM/Dialpad match or other strong owned-source evidence.
-- R7. When phone validation returns a reverse name and location for a valid active number, the system may run a bounded public web search for business/professional context.
+- R7. When phone validation returns a reverse name and location for a valid, not-inactive, low-risk number, the system may run a bounded public web search for business/professional context.
 - R8. Public-search context must be summarized as operator-only prospect evidence only when bounded evidence ties the reverse name plus location to a business, role, or organization relevant to ShapeScale for Business.
 - R9. Public-search context must avoid sensitive personal details and must not store raw search-result pages or long snippets in approval metadata.
 - R10. The Telegram card must distinguish "possible caller identity" from "confirmed contact identity" so operators do not confuse reverse lookup with CRM identity.
@@ -51,7 +51,7 @@ IPQualityScore can provide phone validation, carrier, line type, active-line, ri
 
 - R11. The customer-facing draft must remain generic when only phone validation facts are available.
 - R12. The draft model may use phone validation and public-search facts to choose tone and context, but it must not greet by reverse name or mention a business unless the final facts meet the same safety bar as other high-confidence personalization.
-- R13. For valid active unknown Sales callers with no risky signals, the generic fallback should remain helpful and human: acknowledge the missed call or inbound SMS and ask how Sales can help.
+- R13. For valid, not-inactive, low-risk unknown Sales callers, the generic fallback should remain helpful and human: acknowledge the missed call or inbound SMS and ask how Sales can help.
 - R14. For high-risk, inactive, or invalid numbers, the system must withhold generated customer-facing drafts and route the event to human-only handling.
 - R15. Model-generated drafts must be rejected when they introduce unsupported identity claims, unsupported business claims, raw internal source names, unapproved links, or sensitive personal details.
 
@@ -65,9 +65,9 @@ IPQualityScore can provide phone validation, carrier, line type, active-line, ri
 
 **Dialpad contact sync**
 
-- R21. When enrichment produces high-confidence owned-source identity or an unambiguous public business/professional match for the validated phone number, the system should automatically create or update the Dialpad contact using the existing contact wrappers.
+- R21. When enrichment produces high-confidence owned-source identity or public business/professional evidence that directly corroborates the validated phone number, the system should automatically create or update the Dialpad contact using the existing contact wrappers.
 - R22. Automatic contact sync must never use IPQS reverse name alone, area code, weak public search, or same-name personal results as the basis for a contact name, company, or merge.
-- R23. Automatic updates must fill missing non-sensitive fields or append confirmed identifiers, not overwrite populated Dialpad fields with lower-confidence data.
+- R23. Automatic updates must fill missing non-sensitive fields or append confirmed identifiers by merging current contact values before writeback, not overwrite populated Dialpad fields with lower-confidence data.
 - R24. Ambiguous, conflicting, risky, inactive, invalid, or budget-degraded enrichment must produce an operator-visible contact-sync suggestion or warning instead of a writeback.
 
 ---
@@ -113,7 +113,7 @@ IPQualityScore can provide phone validation, carrier, line type, active-line, ri
 - AE3. **Covers R3, R4, R14.** Given IPQS marks a number invalid, inactive, or abusive, when the webhook processes the event, then the Telegram card shows the risk status and no generated customer-facing draft is created.
 - AE4. **Covers R5, R17, R19.** Given IPQS times out and web search is unavailable, when a Sales SMS arrives, then the webhook still ACKs, creates the existing safe fallback when eligible, and records phone intelligence as unavailable.
 - AE5. **Covers R20.** Given equivalent unknown caller facts for SMS and missed-call events, when tests run, then both paths use the same helper output and render consistent source statuses.
-- AE6. **Covers R21-R24.** Given a validated active number and a single unambiguous owned-source/public-business match, when enrichment completes, then Dialpad contact sync fills missing confirmed fields; given only reverse-name or conflicting evidence, then no writeback occurs and Telegram shows a suggested contact update.
+- AE6. **Covers R21-R24.** Given a validated active number and a single unambiguous owned-source or phone-corroborated public-business match, when enrichment completes, then Dialpad contact sync fills missing confirmed fields; given only reverse-name/location or conflicting evidence, then no writeback occurs and Telegram shows a suggested contact update.
 
 ---
 

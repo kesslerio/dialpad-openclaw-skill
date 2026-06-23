@@ -62,6 +62,7 @@ sys.path.insert(0, str(skill_dir))
 
 # Import existing SQLite storage handler
 from webhook_sqlite import handle_sms_webhook
+import draft_model
 try:
     from sms_sqlite import init_db as init_sms_history_db
 except Exception:
@@ -156,6 +157,14 @@ DIALPAD_BOOK_DEMO_URL = os.environ.get("DIALPAD_BOOK_DEMO_URL", "https://bysha.p
 DIALPAD_CRM_CONTEXT_COMMAND = os.environ.get("DIALPAD_CRM_CONTEXT_COMMAND", "")
 DIALPAD_CALENDAR_CONTEXT_COMMAND = os.environ.get("DIALPAD_CALENDAR_CONTEXT_COMMAND", "")
 DIALPAD_CONTEXT_LOOKUP_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_CONTEXT_LOOKUP_TIMEOUT_SECONDS", "8"))
+DIALPAD_GMAIL_CONTEXT_COMMAND = os.environ.get("DIALPAD_GMAIL_CONTEXT_COMMAND", os.environ.get("DIALPAD_GOG_GMAIL_COMMAND", ""))
+DIALPAD_GMAIL_CONTEXT_ACCOUNT = os.environ.get("DIALPAD_GMAIL_CONTEXT_ACCOUNT", "martin@shapescale.com")
+DIALPAD_GMAIL_CONTEXT_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_GMAIL_CONTEXT_TIMEOUT_SECONDS", "2.5"))
+DIALPAD_GMAIL_CONTEXT_MAX_RESULTS = int(os.environ.get("DIALPAD_GMAIL_CONTEXT_MAX_RESULTS", "5"))
+DIALPAD_COMMS_CONTEXT_LOOKBACK_DAYS = int(os.environ.get("DIALPAD_COMMS_CONTEXT_LOOKBACK_DAYS", "14"))
+DIALPAD_DRAFT_MODEL_COMMAND = os.environ.get("DIALPAD_DRAFT_MODEL_COMMAND", "")
+DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS", "4"))
+DIALPAD_DRAFT_MODEL_MAX_CHARS = int(os.environ.get("DIALPAD_DRAFT_MODEL_MAX_CHARS", "320"))
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -2733,8 +2742,10 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
 
     context_fields = {
         key: _compact_context_scalar(result.get(key), limit=300 if key == "summary" else 120)
-        for key in ("summary", "deal", "stage", "company", "owner")
+        for key in ("summary", "deal", "stage", "company", "owner", "email")
     }
+    if context_fields["email"] and "@" not in context_fields["email"]:
+        context_fields["email"] = None
     summary = " ".join(context_fields[key] for key in ("summary", "deal", "stage", "company") if context_fields[key])
     if not summary:
         return {"usable": False, "status": "empty"}
@@ -2748,6 +2759,7 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
         "deal": context_fields["deal"],
         "stage": context_fields["stage"],
         "owner": context_fields["owner"],
+        "email": context_fields["email"],
         "summary": summary[:300],
     }
 
@@ -2933,6 +2945,8 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
 
     query_parts = [
         _context_name(sender_enrichment, normalized_event),
+        (crm_context or {}).get("email"),
+        sender_enrichment.get("email") or sender_enrichment.get("email_address"),
         (crm_context or {}).get("company"),
         (crm_context or {}).get("deal"),
         normalized_event.get("timestamp"),
@@ -2960,6 +2974,190 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
         "summary": summary,
         "startsInMinutes": starts_in_minutes,
         "demoState": result.get("demoState"),
+    }
+
+
+def _recent_sms_thread_context(normalized_event, limit=10):
+    sender_number = normalized_event.get("sender_number")
+    timestamp_ms = _parse_timestamp_ms(normalized_event.get("timestamp"))
+    return lookup_recent_sms_thread(
+        sender_number,
+        current_dialpad_id=normalized_event.get("message_id"),
+        current_timestamp_ms=timestamp_ms,
+        current_line_number=normalized_event.get("recipient_number"),
+        limit=limit,
+    )
+
+
+def _summarize_sms_comms(thread):
+    outbound = 0
+    inbound = 0
+    booking_links = 0
+    latest_ts = None
+    for item in thread or []:
+        direction = str(item.get("direction") or "").lower()
+        if direction == "outbound":
+            outbound += 1
+        elif direction == "inbound":
+            inbound += 1
+        text = str(item.get("text") or "")
+        if DIALPAD_BOOK_DEMO_URL in text or "bysha.pe/book-demo" in text:
+            booking_links += 1
+        ts = _parse_timestamp_ms(item.get("timestamp"))
+        if ts is not None and (latest_ts is None or ts > latest_ts):
+            latest_ts = ts
+    if outbound == 0 and inbound == 0:
+        return None
+    parts = [f"SMS: {outbound} outbound, {inbound} inbound"]
+    if booking_links:
+        parts.append(f"booking link sent {booking_links}x")
+    if latest_ts is not None:
+        parts.append(f"latest {datetime.fromtimestamp(latest_ts / 1000).strftime('%b %-d')}")
+    return {
+        "status": "usable",
+        "summary": "; ".join(parts),
+        "outboundCount": outbound,
+        "inboundCount": inbound,
+        "bookingLinkCount": booking_links,
+        "latestActivityAt": latest_ts,
+    }
+
+
+def _gmail_search_terms(crm_context=None, sender_enrichment=None):
+    crm_context = crm_context or {}
+    sender_enrichment = sender_enrichment or {}
+    terms = []
+    email = _compact_context_scalar(crm_context.get("email") or sender_enrichment.get("email"), limit=120)
+    if email and "@" in email:
+        terms.append(email)
+    company = _compact_context_scalar(crm_context.get("company") or sender_enrichment.get("company"), limit=120)
+    if company and len(company.split()) >= 2:
+        terms.append(f'"{company}"')
+    deal = _compact_context_scalar(crm_context.get("deal"), limit=120)
+    if deal and len(deal.split()) >= 2 and deal != company:
+        terms.append(f'"{deal}"')
+    seen = set()
+    unique_terms = []
+    for term in terms:
+        key = term.lower()
+        if key not in seen:
+            seen.add(key)
+            unique_terms.append(term)
+    return unique_terms[:3]
+
+
+def _run_gmail_context_search(term):
+    command = str(DIALPAD_GMAIL_CONTEXT_COMMAND or "").strip()
+    if not command:
+        return {"status": "not_configured", "messages": []}
+    query = f"{term} newer_than:{max(1, DIALPAD_COMMS_CONTEXT_LOOKBACK_DAYS)}d"
+    try:
+        args = shlex.split(command) + [
+            "gmail",
+            "search",
+            query,
+            "--max",
+            str(max(1, DIALPAD_GMAIL_CONTEXT_MAX_RESULTS)),
+            "--account",
+            DIALPAD_GMAIL_CONTEXT_ACCOUNT,
+            "--json",
+            "--results-only",
+            "--no-input",
+        ]
+    except ValueError:
+        return {"status": "invalid_command", "messages": []}
+    try:
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=DIALPAD_GMAIL_CONTEXT_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return {"status": "unavailable", "messages": []}
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "messages": []}
+    except Exception as exc:  # noqa: BLE001 - comms context must not break drafts.
+        print(f"⚠️  Gmail context lookup failed ({type(exc).__name__})")
+        return {"status": "request_failed", "messages": []}
+    if completed.returncode != 0:
+        return {"status": f"exit_{completed.returncode}", "messages": []}
+    try:
+        payload = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError:
+        return {"status": "invalid_payload", "messages": []}
+    if isinstance(payload, dict):
+        payload = payload.get("messages") or payload.get("items") or payload.get("collection") or []
+    messages = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+    return {"status": "usable" if messages else "not_found", "messages": messages}
+
+
+def _summarize_gmail_comms(crm_context=None, sender_enrichment=None):
+    terms = _gmail_search_terms(crm_context=crm_context, sender_enrichment=sender_enrichment)
+    if not terms:
+        return {"status": "empty_query", "summary": None, "messageCount": 0}
+    last_status = "not_found"
+    for term in terms:
+        result = _run_gmail_context_search(term)
+        last_status = result["status"]
+        messages = result["messages"]
+        if messages:
+            latest = _compact_context_scalar(messages[0].get("date"), limit=40)
+            summary = f"Gmail: {len(messages)} exact-match message"
+            if len(messages) != 1:
+                summary += "s"
+            if latest:
+                summary += f"; latest {latest}"
+            return {
+                "status": "usable",
+                "summary": summary,
+                "messageCount": len(messages),
+                "matchedTerm": term,
+            }
+        if last_status not in {"not_found", "not_configured"}:
+            break
+    return {"status": last_status, "summary": None, "messageCount": 0}
+
+
+def _context_comms_applicable(normalized_event, crm_context=None):
+    if not _is_missed_call_event(normalized_event):
+        return False
+    return _crm_has_demo_signal(crm_context)
+
+
+def lookup_sales_comms_context(normalized_event, crm_context=None, sender_enrichment=None):
+    """Return compact prior SMS/Gmail comms facts for operator-only provenance."""
+    if not _sales_context_draft_allowed(normalized_event):
+        return {"usable": False, "status": "not_allowed"}
+    if not _context_comms_applicable(normalized_event, crm_context=crm_context):
+        return {"usable": False, "status": "not_applicable"}
+
+    sms = _summarize_sms_comms(_recent_sms_thread_context(normalized_event))
+    gmail = _summarize_gmail_comms(crm_context=crm_context, sender_enrichment=sender_enrichment)
+    summary_parts = []
+    if sms:
+        summary_parts.append(sms["summary"])
+    if gmail.get("summary"):
+        summary_parts.append(gmail["summary"])
+    if not summary_parts:
+        return {
+            "usable": False,
+            "status": "not_found" if gmail.get("status") in {"not_found", "empty_query"} else gmail.get("status"),
+            "smsStatus": "not_found",
+            "gmailStatus": gmail.get("status"),
+        }
+    return {
+        "usable": True,
+        "status": "ok",
+        "basis": "prior_comms",
+        "summary": " | ".join(summary_parts)[:240],
+        "smsStatus": "usable" if sms else "not_found",
+        "smsOutboundCount": (sms or {}).get("outboundCount", 0),
+        "smsInboundCount": (sms or {}).get("inboundCount", 0),
+        "smsBookingLinkCount": (sms or {}).get("bookingLinkCount", 0),
+        "gmailStatus": gmail.get("status"),
+        "gmailMessageCount": gmail.get("messageCount", 0),
     }
 
 
@@ -3054,6 +3252,14 @@ def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
             return f"Hi {greeting}, {opening}. I have your ShapeScale account{with_company} here and will follow up shortly."
         return f"Hi {greeting}, great to hear from you again. I have your ShapeScale account{with_company} here and will follow up shortly."
     if segment == "prospect_demo":
+        calendar_context = normalized_event.get("calendar_context")
+        calendar_status = (calendar_context or {}).get("status") if isinstance(calendar_context, dict) else None
+        if is_missed_call and _normalize_stage_title(crm_context.get("stage")) == "demo request" and calendar_status == "not_found":
+            return (
+                f"Hi {greeting}, {opening}. I saw your ShapeScale demo request{with_company} "
+                f"and that booking may not have gone through. You can grab a time here: "
+                f"{DIALPAD_BOOK_DEMO_URL}, or text me a couple times that work and I'll help coordinate."
+            )
         return f"Hi {greeting}, {opening}. I have your ShapeScale demo conversation{with_company} here and will follow up shortly."
     if segment == "prospect_cold":
         if is_missed_call:
@@ -3077,8 +3283,27 @@ def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _c
     return f"Hi {greeting}, thanks for the heads up. See you shortly."
 
 
+def _apply_model_draft(normalized_event, sender_enrichment, payload):
+    sender_enrichment = sender_enrichment or {}
+    return draft_model.apply_model_draft(
+        normalized_event,
+        payload,
+        draft_model.DraftModelConfig(
+            command=DIALPAD_DRAFT_MODEL_COMMAND,
+            timeout_seconds=DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS,
+            max_chars=DIALPAD_DRAFT_MODEL_MAX_CHARS,
+            approved_booking_url=DIALPAD_BOOK_DEMO_URL,
+        ),
+        greeting=_draft_greeting(normalized_event, sender_enrichment),
+    )
+
+
+def _base_draft_basis(basis):
+    return draft_model.base_draft_basis(basis)
+
+
 def _crm_reply_payload(normalized_event, sender_enrichment, crm_context):
-    return {
+    payload = {
         "usable": True,
         "status": "ok",
         "basis": "attio_crm",
@@ -3092,6 +3317,7 @@ def _crm_reply_payload(normalized_event, sender_enrichment, crm_context):
             "owner": crm_context.get("owner"),
         },
     }
+    return _apply_model_draft(normalized_event, sender_enrichment, payload)
 
 
 def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
@@ -3106,6 +3332,16 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
         normalized_event["crm_context"] = crm_context
     if not crm_context.get("usable"):
         return {"usable": False, "status": f"crm_{crm_context.get('status') or 'unavailable'}"}
+
+    if _context_comms_applicable(normalized_event, crm_context=crm_context):
+        comms_context = normalized_event.get("comms_context")
+        if comms_context is None:
+            comms_context = lookup_sales_comms_context(
+                normalized_event,
+                crm_context=crm_context,
+                sender_enrichment=sender_enrichment,
+            )
+            normalized_event["comms_context"] = comms_context
 
     if _context_calendar_applicable(normalized_event, crm_context=crm_context):
         calendar_context = normalized_event.get("calendar_context")
@@ -3122,7 +3358,7 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
             return {"usable": False, "status": f"calendar_{calendar_context.get('status') or 'unavailable'}"}
         if not _is_missed_call_event(normalized_event) and calendar_context.get("demoState") == "recent":
             return {"usable": False, "status": "calendar_recent"}
-        return {
+        payload = {
             "usable": True,
             "status": "ok",
             "basis": "calendar_meeting",
@@ -3140,6 +3376,7 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
                 "summary": calendar_context.get("summary"),
             },
         }
+        return _apply_model_draft(normalized_event, sender_enrichment, payload)
 
     return _crm_reply_payload(normalized_event, sender_enrichment, crm_context)
 
@@ -3280,13 +3517,14 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
         message = f"Hi there, sorry about that. Try this link instead: {link}. If it still doesn't work, reply with a few times that work and we'll help schedule it."
         if _is_missed_call_event(normalized_event):
             message = _missed_call_followup_message(message)
-        return {
+        payload = {
             "usable": True,
             "status": "ok",
             "basis": "recent_thread_link",
             "category": category,
             "message": message,
         }
+        return payload
 
     knowledge = lookup_shapescale_knowledge(_knowledge_query_for_category(category, normalized_event.get("text")))
     if not knowledge.get("usable"):
@@ -3302,13 +3540,14 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
     if _is_missed_call_event(normalized_event):
         message = _missed_call_followup_message(message)
 
-    return {
+    payload = {
         "usable": True,
         "status": "ok",
         "basis": "shapescale_knowledge",
         "category": category,
         "message": message,
     }
+    return _apply_model_draft(normalized_event, sender_enrichment, payload)
 
 
 def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_display=None):
@@ -3517,8 +3756,8 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
     source_statuses = inbound_context.get("sourceStatuses") or {}
     if isinstance(source_statuses, dict) and source_statuses:
         rendered = []
-        source_labels = {"crm": "CRM", "calendar": "Calendar", "qmd": "QMD"}
-        for source in ("crm", "calendar", "qmd"):
+        source_labels = {"crm": "CRM", "calendar": "Calendar", "comms": "Comms", "qmd": "QMD"}
+        for source in ("crm", "calendar", "comms", "qmd"):
             status = source_statuses.get(source)
             if not isinstance(status, dict):
                 continue
@@ -3614,8 +3853,11 @@ def _build_draft_provenance(normalized_event):
     cal = normalized_event.get("calendar_context") or {}
     if isinstance(cal, dict) and cal.get("usable") and cal.get("summary"):
         parts.append(f"Calendar: {cal.get('summary')}")
+    comms = normalized_event.get("comms_context") or {}
+    if isinstance(comms, dict) and comms.get("usable") and comms.get("summary"):
+        parts.append(f"Comms: {comms.get('summary')}")
     rich = normalized_event.get("rich_reply") or {}
-    rich_basis = rich.get("basis") if isinstance(rich, dict) else None
+    rich_basis = _base_draft_basis(rich.get("basis")) if isinstance(rich, dict) else None
     if isinstance(rich, dict) and rich.get("usable"):
         # Label the source accurately — only a shapescale_knowledge reply is QMD;
         # recent_thread_link is a prior-SMS-history link resend, not QMD.
@@ -3639,7 +3881,7 @@ def collect_enrichment_source_statuses(normalized_event):
     rich = normalized_event.get("rich_reply")
     qmd_answered = (
         isinstance(rich, dict) and
-        rich.get("basis") == "shapescale_knowledge" and
+        _base_draft_basis(rich.get("basis")) == "shapescale_knowledge" and
         rich.get("usable")
     )
     if isinstance(crm, dict):
@@ -3660,6 +3902,15 @@ def collect_enrichment_source_statuses(normalized_event):
         }
     else:
         statuses["calendar"] = {"status": "not_applicable"}
+
+    comms = normalized_event.get("comms_context")
+    if isinstance(comms, dict):
+        statuses["comms"] = {
+            "status": "usable" if comms.get("usable") else _source_status(comms.get("status")),
+            "basis": comms.get("basis"),
+        }
+    else:
+        statuses["comms"] = {"status": "not_applicable"}
 
     if qmd_answered:
         statuses["qmd"] = {"status": "usable", "basis": "shapescale_knowledge"}
@@ -3788,14 +4039,15 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
 
     rich_reply = normalized_event.get("rich_reply")
     if isinstance(rich_reply, dict) and rich_reply.get("usable"):
+        base_basis = _base_draft_basis(rich_reply.get("basis"))
         inbound_context = normalized_event.get("inbound_context")
         if isinstance(inbound_context, dict):
             inbound_context["richDraftAllowed"] = True
             inbound_context["richDraftBasis"] = rich_reply.get("basis")
             inbound_context["richDraftCategory"] = rich_reply.get("category")
-            if rich_reply.get("basis") == "calendar_meeting":
+            if base_basis == "calendar_meeting":
                 inbound_context["draftMode"] = "meeting_aware"
-            elif rich_reply.get("basis") == "attio_crm":
+            elif base_basis == "attio_crm":
                 inbound_context["draftMode"] = "crm_aware"
             else:
                 inbound_context["draftMode"] = "knowledge_backed"
@@ -3827,6 +4079,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             "rich_reply": normalized_event.get("rich_reply"),
             "crm_context": normalized_event.get("crm_context"),
             "calendar_context": normalized_event.get("calendar_context"),
+            "comms_context": normalized_event.get("comms_context"),
             "source_statuses": source_statuses,
         }
     )
@@ -3863,6 +4116,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "rich_reply": normalized_event.get("rich_reply"),
                     "crm_context": normalized_event.get("crm_context"),
                     "calendar_context": normalized_event.get("calendar_context"),
+                    "comms_context": normalized_event.get("comms_context"),
                     "source_statuses": source_statuses,
                     "provenance": _build_draft_provenance(normalized_event),
                     # S4 SHADOW MODE decision (booleans/enums only, no PII) for S6.

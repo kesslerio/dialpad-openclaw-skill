@@ -108,6 +108,13 @@ class ProvenanceTests(unittest.TestCase):
         ev = {"rich_reply": {"usable": True, "basis": "shapescale_knowledge"}}
         self.assertEqual(ws._build_draft_provenance(ev), "QMD knowledge")
 
+    def test_model_qmd_provenance(self):
+        ev = {"text": "How does it work?", "rich_reply": {"usable": True, "basis": "model_shapescale_knowledge"}}
+        self.assertEqual(ws._build_draft_provenance(ev), "QMD knowledge")
+        statuses = ws.collect_enrichment_source_statuses(ev)
+        self.assertEqual(statuses["qmd"]["status"], "usable")
+        self.assertEqual(statuses["qmd"]["basis"], "shapescale_knowledge")
+
     def test_recent_thread_link_not_labeled_qmd(self):
         # link-resend from prior SMS history must not claim a QMD source
         ev = {"rich_reply": {"usable": True, "basis": "recent_thread_link"}}
@@ -143,6 +150,7 @@ class ProvenanceTests(unittest.TestCase):
         statuses = ws.collect_enrichment_source_statuses(ev)
         self.assertEqual(statuses["crm"]["status"], "not_found")
         self.assertEqual(statuses["calendar"]["status"], "not_applicable")
+        self.assertEqual(statuses["comms"]["status"], "not_applicable")
         self.assertEqual(statuses["qmd"]["status"], "not_applicable")
 
     def test_source_statuses_do_not_copy_crm_reply_status_into_qmd(self):
@@ -154,6 +162,7 @@ class ProvenanceTests(unittest.TestCase):
         }
         statuses = ws.collect_enrichment_source_statuses(ev)
         self.assertEqual(statuses["crm"]["status"], "usable")
+        self.assertEqual(statuses["comms"]["status"], "not_applicable")
         self.assertEqual(statuses["qmd"]["status"], "not_applicable")
 
     def test_source_statuses_show_crm_not_applicable_when_qmd_skipped_crm(self):
@@ -165,6 +174,7 @@ class ProvenanceTests(unittest.TestCase):
         with patch.object(ws, "DIALPAD_CRM_CONTEXT_COMMAND", "crm-lookup"):
             statuses = ws.collect_enrichment_source_statuses(ev)
         self.assertEqual(statuses["crm"]["status"], "not_applicable")
+        self.assertEqual(statuses["comms"]["status"], "not_applicable")
         self.assertEqual(statuses["qmd"]["status"], "usable")
 
 

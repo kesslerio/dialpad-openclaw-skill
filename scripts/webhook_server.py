@@ -2804,6 +2804,35 @@ def scheduling_availability_intent(text):
     return any(re.search(pattern, body) for pattern in patterns)
 
 
+def _calendar_context_intent(normalized_event):
+    if scheduling_availability_intent(normalized_event.get("text")):
+        return "scheduling_availability"
+    if meeting_logistics_intent(normalized_event.get("text")):
+        return "meeting_logistics"
+    if _is_missed_call_event(normalized_event):
+        return "missed_call"
+    return None
+
+
+def _calendar_failure(status, category):
+    payload = {"usable": False, "status": f"calendar_{status or 'unavailable'}"}
+    if category:
+        payload["category"] = category
+    return payload
+
+
+def _rich_reply_has_calendar_status(rich_reply):
+    return isinstance(rich_reply, dict) and str(rich_reply.get("status") or "").startswith("calendar_")
+
+
+def _rich_reply_blocks_generic_fallback(rich_reply):
+    return (
+        isinstance(rich_reply, dict)
+        and rich_reply.get("category") == "scheduling_availability"
+        and str(rich_reply.get("status") or "").startswith("calendar_")
+    )
+
+
 def _compact_context_scalar(value, limit=120):
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return None
@@ -3410,12 +3439,13 @@ def _crm_has_demo_signal(crm_context):
     return "demo" in text
 
 
-def _context_calendar_applicable(normalized_event, crm_context=None):
-    if meeting_logistics_intent(normalized_event.get("text")):
+def _context_calendar_applicable(normalized_event, crm_context=None, intent=None):
+    intent = intent or _calendar_context_intent(normalized_event)
+    if intent == "meeting_logistics":
         return True
-    if scheduling_availability_intent(normalized_event.get("text")):
+    if intent == "scheduling_availability":
         return _crm_has_demo_signal(crm_context)
-    if not _is_missed_call_event(normalized_event):
+    if intent != "missed_call":
         return False
     inbound_context = normalized_event.get("inbound_context") or {}
     return bool(inbound_context.get("contextDraftAllowed") or _crm_has_demo_signal(crm_context))
@@ -3426,11 +3456,12 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
     sender_enrichment = sender_enrichment or {}
     if not _sales_context_draft_allowed(normalized_event):
         return {"usable": False, "status": "not_allowed"}
-    if not _context_calendar_applicable(normalized_event, crm_context=crm_context):
+    intent = _calendar_context_intent(normalized_event)
+    if not _context_calendar_applicable(normalized_event, crm_context=crm_context, intent=intent):
         return {"usable": False, "status": "not_applicable"}
 
     query_parts = [
-        "intent:availability" if scheduling_availability_intent(normalized_event.get("text")) else None,
+        "intent:availability" if intent == "scheduling_availability" else None,
         normalized_event.get("text"),
         _context_name(sender_enrichment, normalized_event),
         (crm_context or {}).get("email"),
@@ -3861,6 +3892,42 @@ def _safe_candidate_windows(candidate_windows, limit=3):
     return safe or None
 
 
+def _build_calendar_contextual_reply(normalized_event, sender_enrichment, crm_context, calendar_context, intent):
+    if not calendar_context.get("usable"):
+        if intent == "missed_call":
+            return _crm_reply_payload(normalized_event, sender_enrichment, crm_context)
+        return _calendar_failure(calendar_context.get("status"), intent)
+
+    if not _is_missed_call_event(normalized_event) and calendar_context.get("demoState") == "recent":
+        return _calendar_failure("recent", intent)
+
+    if intent == "scheduling_availability":
+        inbound_context = normalized_event.get("inbound_context") or {}
+        if inbound_context.get("identityConfidence") != "high" or not inbound_context.get("contextDraftAllowed"):
+            return _calendar_failure("identity_unverified", intent)
+        payload = {
+            "usable": True,
+            "status": "ok",
+            "basis": "calendar_availability",
+            "category": "scheduling_availability",
+            "message": _availability_reply_message(normalized_event, sender_enrichment, crm_context, calendar_context),
+            "crmContext": _compact_rich_crm_context(crm_context),
+            "calendarContext": _compact_rich_calendar_context(calendar_context, include_candidate_windows=True),
+        }
+        return _apply_model_draft(normalized_event, sender_enrichment, payload)
+
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_meeting",
+        "category": "meeting_logistics",
+        "message": _meeting_reply_message(normalized_event, sender_enrichment, crm_context, calendar_context),
+        "crmContext": _compact_rich_crm_context(crm_context),
+        "calendarContext": _compact_rich_calendar_context(calendar_context),
+    }
+    return _apply_model_draft(normalized_event, sender_enrichment, payload)
+
+
 def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
     """Build CRM-aware or meeting-aware Sales SMS drafts from compact context."""
     sender_enrichment = sender_enrichment or {}
@@ -3884,8 +3951,8 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
             )
             normalized_event["comms_context"] = comms_context
 
-    availability_intent = scheduling_availability_intent(normalized_event.get("text"))
-    if _context_calendar_applicable(normalized_event, crm_context=crm_context):
+    calendar_intent = _calendar_context_intent(normalized_event)
+    if _context_calendar_applicable(normalized_event, crm_context=crm_context, intent=calendar_intent):
         calendar_context = normalized_event.get("calendar_context")
         if calendar_context is None:
             calendar_context = lookup_sales_calendar_context(
@@ -3894,42 +3961,17 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
                 sender_enrichment=sender_enrichment,
             )
             normalized_event["calendar_context"] = calendar_context
-        if not calendar_context.get("usable"):
-            if availability_intent:
-                return {"usable": False, "status": f"calendar_{calendar_context.get('status') or 'unavailable'}"}
-            if _is_missed_call_event(normalized_event):
-                return _crm_reply_payload(normalized_event, sender_enrichment, crm_context)
-            return {"usable": False, "status": f"calendar_{calendar_context.get('status') or 'unavailable'}"}
-        if not _is_missed_call_event(normalized_event) and calendar_context.get("demoState") == "recent":
-            return {"usable": False, "status": "calendar_recent"}
-        if availability_intent:
-            inbound_context = normalized_event.get("inbound_context") or {}
-            if inbound_context.get("identityConfidence") != "high" or not inbound_context.get("contextDraftAllowed"):
-                return {"usable": False, "status": "calendar_identity_unverified"}
-            payload = {
-                "usable": True,
-                "status": "ok",
-                "basis": "calendar_availability",
-                "category": "scheduling_availability",
-                "message": _availability_reply_message(normalized_event, sender_enrichment, crm_context, calendar_context),
-                "crmContext": _compact_rich_crm_context(crm_context),
-                "calendarContext": _compact_rich_calendar_context(calendar_context, include_candidate_windows=True),
-            }
-            return _apply_model_draft(normalized_event, sender_enrichment, payload)
-        payload = {
-            "usable": True,
-            "status": "ok",
-            "basis": "calendar_meeting",
-            "category": "meeting_logistics",
-            "message": _meeting_reply_message(normalized_event, sender_enrichment, crm_context, calendar_context),
-            "crmContext": _compact_rich_crm_context(crm_context),
-            "calendarContext": _compact_rich_calendar_context(calendar_context),
-        }
-        return _apply_model_draft(normalized_event, sender_enrichment, payload)
+        return _build_calendar_contextual_reply(
+            normalized_event,
+            sender_enrichment,
+            crm_context,
+            calendar_context,
+            calendar_intent,
+        )
 
-    if availability_intent:
+    if calendar_intent == "scheduling_availability":
         normalized_event["calendar_context"] = {"usable": False, "status": "not_applicable"}
-        return {"usable": False, "status": "calendar_not_applicable"}
+        return _calendar_failure("not_applicable", calendar_intent)
 
     return _crm_reply_payload(normalized_event, sender_enrichment, crm_context)
 
@@ -4037,14 +4079,15 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
                 return contextual_reply
             return {"usable": False, "status": contextual_reply.get("status") or "not_answerable"}
 
-    if meeting_logistics_intent(normalized_event.get("text")) or scheduling_availability_intent(normalized_event.get("text")):
+    calendar_intent = _calendar_context_intent(normalized_event)
+    if calendar_intent in {"meeting_logistics", "scheduling_availability"}:
         contextual_reply = build_contextual_sales_sms_reply(
             normalized_event,
             sender_enrichment=sender_enrichment,
         )
         if contextual_reply.get("usable"):
             return contextual_reply
-        if str(contextual_reply.get("status") or "").startswith("calendar_"):
+        if _rich_reply_has_calendar_status(contextual_reply):
             return contextual_reply
 
     sender_number = normalized_event.get("sender_number")
@@ -4159,7 +4202,7 @@ def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_d
         return False
     if rich_reply.get("usable"):
         return True
-    if scheduling_availability_intent(normalized_event.get("text")) and str(rich_reply.get("status") or "").startswith("calendar_"):
+    if _rich_reply_blocks_generic_fallback(rich_reply):
         return False
     if inbound_context.get("contextDraftAllowed"):
         return True
@@ -4892,11 +4935,7 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
         payload["autoReply"] = auto_reply
         rich_reply = auto_reply.get("richReply") if isinstance(auto_reply, dict) else None
         draft_created = bool(auto_reply.get("draftCreated")) if isinstance(auto_reply, dict) else False
-        rich_status = str(rich_reply.get("status") or "") if isinstance(rich_reply, dict) else ""
-        availability_human_needed = (
-            scheduling_availability_intent(normalized_event.get("text"))
-            and rich_status.startswith("calendar_")
-        )
+        availability_human_needed = _rich_reply_blocks_generic_fallback(rich_reply)
         allow_downstream_suggestion = (not draft_created) and not availability_human_needed
         payload["recommendationOwner"] = {
             "owner": "dialpad_approval_draft" if draft_created else "human_needed",

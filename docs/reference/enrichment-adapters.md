@@ -13,6 +13,7 @@ appends the query as a single final CLI arg and reads a JSON object from stdout
 | Calendar | `scripts/adapters/calendar_context.py` | `"<name> <email> <company> <deal> <timestamp>"` | `{usable, status, basis, summary, startsInMinutes}` |
 | Prior comms | built into `scripts/webhook_server.py` | phone + CRM email/company | `{usable, status, basis, summary, smsOutboundCount, smsInboundCount, gmailMessageCount}` |
 | QMD | existing `qmd` binary (no adapter) | `search "<query>"` | `@@`-delimited snippet |
+| Draft model | configured command | compact facts JSON on stdin | JSON `{message}` or plain text |
 
 All adapters fail closed (`{"usable": false, ...}`) and exit 0 on any miss, auth
 error, or timeout — the webhook treats a non-zero exit as failure.
@@ -24,9 +25,17 @@ transcript-like content. Generic missed-call approval cards render source
 statuses so the operator can distinguish not configured, not found, unsafe,
 unavailable, and not applicable outcomes.
 
-Prior comms is deterministic by default: local SMS counts/link evidence and
-Gmail message counts/dates only. It does not call a model, and it does not put raw
-SMS or email bodies into customer-facing draft text.
+Prior comms retrieval is deterministic by default: local SMS counts/link
+evidence and Gmail message counts/dates only. It does not put raw SMS or email
+bodies into customer-facing draft text.
+
+Final draft wording can optionally be delegated to a cheap model command via
+`DIALPAD_DRAFT_MODEL_COMMAND`. The webhook sends compact facts JSON on stdin:
+event metadata, recipient greeting, CRM/calendar/comms source summaries, the
+safe deterministic fallback draft, and constraints. The command should return
+`{"message":"..."}` or plain text. Output is accepted only if it passes safety
+checks; otherwise the deterministic fallback draft is used. The model is a
+wording layer, not a source of truth.
 
 The calendar adapter surfaces both upcoming demos and bounded recent demos. A
 recent missed call after a demo/no-show can therefore become meeting-aware instead
@@ -55,6 +64,10 @@ DIALPAD_GOG_CALENDAR_ACCOUNT=martin@shapescale.com
 DIALPAD_GOG_CALENDAR_IDS=primary,alex@shapescale.com,lilla@shapescale.com
 DIALPAD_GMAIL_CONTEXT_COMMAND=/home/art/.local/bin/shapescale-gog
 DIALPAD_GMAIL_CONTEXT_ACCOUNT=martin@shapescale.com
+# Optional cheap-model wording layer; default off.
+# DIALPAD_DRAFT_MODEL_COMMAND=/path/to/draft-model-command
+# DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS=4
+# DIALPAD_DRAFT_MODEL_MAX_CHARS=320
 # adapters read ATTIO_API_KEY / CALENDLY_API_KEY and gog config from the service environment
 ```
 

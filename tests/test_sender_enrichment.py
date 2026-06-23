@@ -1335,6 +1335,128 @@ def test_meeting_logistics_without_calendar_match_falls_back_safely(monkeypatch)
     assert "recent ShapeScale conversation" in webhook_server.build_proactive_reply_message(normalized_event)
 
 
+def test_model_draft_uses_compact_tool_facts_for_crm_reply(monkeypatch):
+    captured = {}
+
+    def _draft_model(args, **kwargs):
+        captured["args"] = args
+        captured["facts"] = json.loads(kwargs["input"])
+        return _FakeCompletedProcess(
+            stdout=json.dumps(
+                {
+                    "message": (
+                        "Hi Dr. Chris, sorry I missed your call. I saw your ShapeScale demo request "
+                        "for White House Chiropractic and booking may not have gone through. You can "
+                        "grab a time here: https://bysha.pe/book-demo."
+                    )
+                }
+            )
+        )
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(webhook_server.subprocess, "run", _draft_model)
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "line_display": "Sales",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "email": "drchris@example.test",
+            "summary": "Demo Request with White House Chiropractic",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+            "summary": "No scheduled demo found",
+        },
+        "comms_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "prior_comms",
+            "summary": "SMS: 2 outbound, 0 inbound; booking link sent 2x; latest Jun 22",
+            "smsStatus": "usable",
+            "gmailStatus": "not_found",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(
+        normalized_event,
+        sender_enrichment={"first_name": "Dr. Chris"},
+    )
+
+    assert captured["args"] == ["/usr/bin/fake-draft-model"]
+    facts = captured["facts"]
+    assert facts["fallbackMessage"].startswith("Hi Dr. Chris, sorry we missed your call")
+    assert facts["sources"]["crm"]["company"] == "White House Chiropractic"
+    assert facts["sources"]["calendar"]["status"] == "not_found"
+    assert facts["sources"]["comms"]["summary"].startswith("SMS: 2 outbound")
+    assert facts["candidate"]["basis"] == "attio_crm"
+    assert "secret-crm-record" not in json.dumps(facts).lower()
+    assert rich_reply["basis"] == "model_attio_crm"
+    assert rich_reply["modelDraft"]["status"] == "ok"
+    assert rich_reply["modelDraft"]["fallbackBasis"] == "attio_crm"
+    assert rich_reply["message"].startswith("Hi Dr. Chris, sorry I missed your call")
+
+
+def test_model_draft_fails_closed_on_unsafe_output(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(
+        webhook_server.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Dr. Chris, I saw your Gmail and your demo is scheduled for tomorrow."})
+        ),
+    )
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(
+        normalized_event,
+        sender_enrichment={"first_name": "Dr. Chris"},
+    )
+
+    assert rich_reply["basis"] == "attio_crm"
+    assert rich_reply["modelDraft"]["status"] == "unsafe_output"
+    assert "booking may not have gone through" in rich_reply["message"]
+    assert "Gmail" not in rich_reply["message"]
+    assert "scheduled for tomorrow" not in rich_reply["message"]
+
+
 def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
     normalized_event = {
         "event_type": "sms",

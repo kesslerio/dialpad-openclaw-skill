@@ -161,6 +161,9 @@ DIALPAD_GMAIL_CONTEXT_ACCOUNT = os.environ.get("DIALPAD_GMAIL_CONTEXT_ACCOUNT", 
 DIALPAD_GMAIL_CONTEXT_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_GMAIL_CONTEXT_TIMEOUT_SECONDS", "2.5"))
 DIALPAD_GMAIL_CONTEXT_MAX_RESULTS = int(os.environ.get("DIALPAD_GMAIL_CONTEXT_MAX_RESULTS", "5"))
 DIALPAD_COMMS_CONTEXT_LOOKBACK_DAYS = int(os.environ.get("DIALPAD_COMMS_CONTEXT_LOOKBACK_DAYS", "14"))
+DIALPAD_DRAFT_MODEL_COMMAND = os.environ.get("DIALPAD_DRAFT_MODEL_COMMAND", "")
+DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS = float(os.environ.get("DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS", "4"))
+DIALPAD_DRAFT_MODEL_MAX_CHARS = int(os.environ.get("DIALPAD_DRAFT_MODEL_MAX_CHARS", "320"))
 
 DEFAULT_LINE_NAMES = {
     "+14155201316": "Sales",
@@ -3279,8 +3282,188 @@ def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _c
     return f"Hi {greeting}, thanks for the heads up. See you shortly."
 
 
+def _compact_context_dict(data, keys):
+    if not isinstance(data, dict):
+        return {}
+    compact = {}
+    for key in keys:
+        value = _compact_context_scalar(data.get(key), limit=240)
+        if value is not None:
+            compact[key] = value
+    return compact
+
+
+def _model_draft_facts(normalized_event, sender_enrichment, fallback_message, category, payload=None):
+    inbound_context = normalized_event.get("inbound_context") or {}
+    payload = payload if isinstance(payload, dict) else {}
+    facts = {
+        "task": "draft_operator_reviewed_sales_sms",
+        "constraints": [
+            "Write one concise SMS under the max character limit.",
+            "Use only the supplied facts.",
+            "Do not invent scheduled meetings, replies, prices, or commitments.",
+            "Do not mention internal tools, CRM, Gmail, Attio, QMD, or provenance.",
+            "Do not quote raw email or SMS bodies.",
+            "Return JSON like {\"message\":\"...\"}.",
+        ],
+        "maxChars": DIALPAD_DRAFT_MODEL_MAX_CHARS,
+        "fallbackMessage": fallback_message,
+        "event": {
+            "type": _event_type(normalized_event),
+            "isMissedCall": _is_missed_call_event(normalized_event),
+            "lineDisplay": normalized_event.get("line_display"),
+            "customerText": _compact_context_scalar(normalized_event.get("text"), limit=240),
+            "identityConfidence": inbound_context.get("identityConfidence"),
+            "category": category,
+        },
+        "candidate": _compact_context_dict(
+            payload,
+            ("basis", "category", "message"),
+        ),
+        "recipient": {
+            "greetingName": _draft_greeting(normalized_event, sender_enrichment),
+        },
+        "sources": {
+            "crm": _compact_context_dict(
+                normalized_event.get("crm_context"),
+                ("company", "deal", "stage", "summary"),
+            ),
+            "calendar": _compact_context_dict(
+                normalized_event.get("calendar_context"),
+                ("status", "basis", "summary", "demoState"),
+            ),
+            "comms": _compact_context_dict(
+                normalized_event.get("comms_context"),
+                ("status", "basis", "summary", "smsStatus", "gmailStatus"),
+            ),
+        },
+    }
+    rich = normalized_event.get("rich_reply")
+    if isinstance(rich, dict):
+        facts["sources"]["currentDraftBasis"] = _compact_context_dict(
+            rich,
+            ("basis", "category", "message"),
+        )
+    return facts
+
+
+def _extract_model_message(output):
+    text = str(output or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("usable") is False:
+        return None
+    for key in ("message", "draft", "text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _approved_url_only(text):
+    urls = re.findall(r"https?://\S+|(?:bysha\.pe|shape\.scale|shapescale\.com)/\S*", text or "", flags=re.IGNORECASE)
+    for url in urls:
+        clean = url.rstrip(".,;)")
+        if clean == DIALPAD_BOOK_DEMO_URL or clean.startswith("https://bysha.pe/book-demo"):
+            continue
+        return False
+    return True
+
+
+def _model_draft_safe(text, normalized_event):
+    message = " ".join(str(text or "").split())
+    if not message or len(message) > DIALPAD_DRAFT_MODEL_MAX_CHARS:
+        return None
+    if not customer_safe_knowledge_text(message):
+        return None
+    if not _approved_url_only(message):
+        return None
+    calendar_context = normalized_event.get("calendar_context")
+    calendar_usable = isinstance(calendar_context, dict) and calendar_context.get("usable")
+    if not calendar_usable and re.search(r"\b(?:is|was|'s)\s+scheduled\b|\bscheduled\s+(?:for|at|on)\b", message, re.IGNORECASE):
+        return None
+    if re.search(r"\b(?:i|we)\s+(?:read|saw|found)\s+(?:your\s+)?(?:email|gmail|sms|text)\b", message, re.IGNORECASE):
+        return None
+    return message
+
+
+def _model_draft_message(normalized_event, sender_enrichment, fallback_message, category, payload=None):
+    command = str(DIALPAD_DRAFT_MODEL_COMMAND or "").strip()
+    if not command:
+        return None, "disabled"
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        return None, "invalid_command"
+    if not args:
+        return None, "disabled"
+    facts = _model_draft_facts(normalized_event, sender_enrichment, fallback_message, category, payload=payload)
+    try:
+        completed = subprocess.run(
+            args,
+            input=json.dumps(facts, separators=(",", ":")),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=DIALPAD_DRAFT_MODEL_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return None, "unavailable"
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    except Exception as exc:  # noqa: BLE001 - model drafting must fail closed.
+        print(f"⚠️  Draft model failed ({type(exc).__name__})")
+        return None, "request_failed"
+    if completed.returncode != 0:
+        return None, f"exit_{completed.returncode}"
+    candidate = _extract_model_message(completed.stdout)
+    safe = _model_draft_safe(candidate, normalized_event)
+    if not safe:
+        return None, "unsafe_output"
+    return safe, "ok"
+
+
+def _apply_model_draft(normalized_event, sender_enrichment, payload):
+    if not str(DIALPAD_DRAFT_MODEL_COMMAND or "").strip():
+        return payload
+    fallback = payload.get("message")
+    if not fallback:
+        return payload
+    message, status = _model_draft_message(
+        normalized_event,
+        sender_enrichment,
+        fallback,
+        payload.get("category"),
+        payload=payload,
+    )
+    payload["modelDraft"] = {
+        "status": status,
+        "basis": "draft_model" if message else None,
+    }
+    if not message:
+        return payload
+    payload["message"] = message
+    payload["modelDraft"]["basis"] = "draft_model"
+    payload["modelDraft"]["fallbackBasis"] = payload.get("basis")
+    payload["basis"] = f"model_{payload.get('basis') or 'draft'}"
+    return payload
+
+
+def _base_draft_basis(basis):
+    text = str(basis or "")
+    if text.startswith("model_"):
+        return text[len("model_"):]
+    return text
+
+
 def _crm_reply_payload(normalized_event, sender_enrichment, crm_context):
-    return {
+    payload = {
         "usable": True,
         "status": "ok",
         "basis": "attio_crm",
@@ -3294,6 +3477,7 @@ def _crm_reply_payload(normalized_event, sender_enrichment, crm_context):
             "owner": crm_context.get("owner"),
         },
     }
+    return _apply_model_draft(normalized_event, sender_enrichment, payload)
 
 
 def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
@@ -3334,7 +3518,7 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
             return {"usable": False, "status": f"calendar_{calendar_context.get('status') or 'unavailable'}"}
         if not _is_missed_call_event(normalized_event) and calendar_context.get("demoState") == "recent":
             return {"usable": False, "status": "calendar_recent"}
-        return {
+        payload = {
             "usable": True,
             "status": "ok",
             "basis": "calendar_meeting",
@@ -3352,6 +3536,7 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
                 "summary": calendar_context.get("summary"),
             },
         }
+        return _apply_model_draft(normalized_event, sender_enrichment, payload)
 
     return _crm_reply_payload(normalized_event, sender_enrichment, crm_context)
 
@@ -3492,13 +3677,14 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
         message = f"Hi there, sorry about that. Try this link instead: {link}. If it still doesn't work, reply with a few times that work and we'll help schedule it."
         if _is_missed_call_event(normalized_event):
             message = _missed_call_followup_message(message)
-        return {
+        payload = {
             "usable": True,
             "status": "ok",
             "basis": "recent_thread_link",
             "category": category,
             "message": message,
         }
+        return _apply_model_draft(normalized_event, sender_enrichment, payload)
 
     knowledge = lookup_shapescale_knowledge(_knowledge_query_for_category(category, normalized_event.get("text")))
     if not knowledge.get("usable"):
@@ -3514,13 +3700,14 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
     if _is_missed_call_event(normalized_event):
         message = _missed_call_followup_message(message)
 
-    return {
+    payload = {
         "usable": True,
         "status": "ok",
         "basis": "shapescale_knowledge",
         "category": category,
         "message": message,
     }
+    return _apply_model_draft(normalized_event, sender_enrichment, payload)
 
 
 def should_send_proactive_reply(normalized_event, sender_enrichment=None, line_display=None):
@@ -3830,7 +4017,7 @@ def _build_draft_provenance(normalized_event):
     if isinstance(comms, dict) and comms.get("usable") and comms.get("summary"):
         parts.append(f"Comms: {comms.get('summary')}")
     rich = normalized_event.get("rich_reply") or {}
-    rich_basis = rich.get("basis") if isinstance(rich, dict) else None
+    rich_basis = _base_draft_basis(rich.get("basis")) if isinstance(rich, dict) else None
     if isinstance(rich, dict) and rich.get("usable"):
         # Label the source accurately — only a shapescale_knowledge reply is QMD;
         # recent_thread_link is a prior-SMS-history link resend, not QMD.
@@ -3854,7 +4041,7 @@ def collect_enrichment_source_statuses(normalized_event):
     rich = normalized_event.get("rich_reply")
     qmd_answered = (
         isinstance(rich, dict) and
-        rich.get("basis") == "shapescale_knowledge" and
+        _base_draft_basis(rich.get("basis")) == "shapescale_knowledge" and
         rich.get("usable")
     )
     if isinstance(crm, dict):
@@ -4012,14 +4199,15 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
 
     rich_reply = normalized_event.get("rich_reply")
     if isinstance(rich_reply, dict) and rich_reply.get("usable"):
+        base_basis = _base_draft_basis(rich_reply.get("basis"))
         inbound_context = normalized_event.get("inbound_context")
         if isinstance(inbound_context, dict):
             inbound_context["richDraftAllowed"] = True
             inbound_context["richDraftBasis"] = rich_reply.get("basis")
             inbound_context["richDraftCategory"] = rich_reply.get("category")
-            if rich_reply.get("basis") == "calendar_meeting":
+            if base_basis == "calendar_meeting":
                 inbound_context["draftMode"] = "meeting_aware"
-            elif rich_reply.get("basis") == "attio_crm":
+            elif base_basis == "attio_crm":
                 inbound_context["draftMode"] = "crm_aware"
             else:
                 inbound_context["draftMode"] = "knowledge_backed"

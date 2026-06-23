@@ -108,6 +108,13 @@ class ProvenanceTests(unittest.TestCase):
         ev = {"rich_reply": {"usable": True, "basis": "shapescale_knowledge"}}
         self.assertEqual(ws._build_draft_provenance(ev), "QMD knowledge")
 
+    def test_model_qmd_provenance(self):
+        ev = {"text": "How does it work?", "rich_reply": {"usable": True, "basis": "model_shapescale_knowledge"}}
+        self.assertEqual(ws._build_draft_provenance(ev), "QMD knowledge")
+        statuses = ws.collect_enrichment_source_statuses(ev)
+        self.assertEqual(statuses["qmd"]["status"], "usable")
+        self.assertEqual(statuses["qmd"]["basis"], "shapescale_knowledge")
+
     def test_recent_thread_link_not_labeled_qmd(self):
         # link-resend from prior SMS history must not claim a QMD source
         ev = {"rich_reply": {"usable": True, "basis": "recent_thread_link"}}

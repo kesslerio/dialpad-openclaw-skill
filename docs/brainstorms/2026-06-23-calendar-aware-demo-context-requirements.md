@@ -28,7 +28,7 @@ Three current facts explain the miss:
 
 - **Treat ShapeScale Google Calendar as the calendar source of truth.** If CRM says the sender is in a demo-request or demo-stage segment, the card should check the Work/Martin, Alex, and Lilla calendars before treating scheduling context as absent.
 - **Distinguish absence from misconfiguration.** Operators need to know whether calendar lookup was not configured, attempted but not found, or found a scheduled demo.
-- **Use deterministic comms retrieval before models.** SMS/Gmail comms context should expose bounded counts/facts to the operator; any model summarization should be optional, cheap, and off the customer-facing path.
+- **Use deterministic tool retrieval before model drafting.** SMS/Gmail comms context should expose bounded counts/facts to the operator; final customer-facing wording may use an explicitly configured cheap model, with deterministic draft copy as the fallback.
 - **Prefer warmer operator-approved drafts, not autonomous sends.** The improvement changes approval draft quality and provenance, not the no-auto-send boundary.
 
 ---
@@ -48,6 +48,7 @@ Three current facts explain the miss:
 - R5. Demo-request missed-call drafts should acknowledge the missed call and the demo-request context in a warm way.
 - R6. If booking appears incomplete, the draft should offer both the booking link and a human coordination path.
 - R7. Customer-facing draft text must not claim there is or is not a scheduled meeting unless calendar context supports that claim.
+- R7a. If model drafting is enabled, the model must receive compact tool-call facts and the deterministic fallback draft, and its output must fail closed when unsafe, too long, or unsupported by the retrieved facts.
 
 **Operational readiness**
 
@@ -82,7 +83,7 @@ Three current facts explain the miss:
 - Calendly lookup depends on resolving or carrying an invitee email into the calendar query.
 - ShapeScale Google Calendar reads should use `shapescale-gog` through `martin@shapescale.com`, querying the Work/Martin, Alex, and Lilla calendars as the sales demo search set.
 - ShapeScale Gmail reads should use `shapescale-gog` through `martin@shapescale.com` with strict exact-match queries; weak Gmail results should be ignored rather than summarized.
-- No model is required for the first comms implementation. If summarization is later needed, it should run through an explicitly configured cheap model command and remain operator-only by default.
+- Model drafting is optional and default-off. When enabled, it should run through an explicitly configured cheap model command, use only tool-call facts, and remain approval-gated by default.
 
 ---
 

@@ -114,7 +114,7 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
             "calendar": _compact_dict(
                 normalized_event.get("calendar_context"),
                 ("status", "basis", "summary", "demoState"),
-            ),
+            ) if identity_confidence == "high" else {},
             "comms": _compact_dict(
                 normalized_event.get("comms_context"),
                 ("status", "basis", "summary", "smsStatus", "gmailStatus"),
@@ -181,7 +181,9 @@ def _safe_message(text, normalized_event, config):
         return None
     calendar_context = normalized_event.get("calendar_context")
     calendar_usable = isinstance(calendar_context, dict) and calendar_context.get("usable")
-    if not calendar_usable and UNSUPPORTED_SCHEDULE_CLAIM_RE.search(message):
+    demo_state = calendar_context.get("demoState") if isinstance(calendar_context, dict) else None
+    calendar_supports_scheduled_claim = bool(calendar_usable and demo_state != "recent")
+    if not calendar_supports_scheduled_claim and UNSUPPORTED_SCHEDULE_CLAIM_RE.search(message):
         return None
     if RAW_COMMS_CLAIM_RE.search(message):
         return None

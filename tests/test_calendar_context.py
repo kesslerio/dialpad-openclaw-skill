@@ -210,6 +210,15 @@ class BuildCalendarContextTests(unittest.TestCase):
         self.assertFalse(ctx["usable"])
         self.assertEqual(ctx["status"], "not_configured")
 
+    def test_google_calendar_command_failure_reports_unavailable(self):
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/missing/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary"), \
+                patch("subprocess.run", side_effect=FileNotFoundError()), \
+                patch.object(attio, "_query_records", return_value=[]):
+            ctx = cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)
+        self.assertFalse(ctx["usable"])
+        self.assertEqual(ctx["status"], "unavailable")
+
     def test_empty_query(self):
         ctx = cal.build_calendar_context("", now=NOW)
         self.assertFalse(ctx["usable"])

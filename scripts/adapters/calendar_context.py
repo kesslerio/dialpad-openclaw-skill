@@ -202,7 +202,7 @@ def _gog_events_for_calendar(command, calendar_id, now):
             "--no-input",
         ]
     except ValueError:
-        return []
+        return "invalid_command", []
     try:
         completed = subprocess.run(
             args,
@@ -211,17 +211,23 @@ def _gog_events_for_calendar(command, calendar_id, now):
             text=True,
             timeout=GOG_CALENDAR_TIMEOUT,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return []
+    except FileNotFoundError:
+        return "unavailable", []
+    except subprocess.TimeoutExpired:
+        return "timeout", []
+    except OSError:
+        return "unavailable", []
     if completed.returncode != 0:
-        return []
+        return f"exit_{completed.returncode}", []
     try:
         events = json.loads(completed.stdout or "[]")
     except json.JSONDecodeError:
-        return []
+        return "unavailable", []
     if isinstance(events, dict):
         events = events.get("events") or events.get("items") or events.get("collection") or []
-    return events if isinstance(events, list) else []
+    if not isinstance(events, list):
+        return "unavailable", []
+    return "ok", events
 
 
 def gog_next_event(remainder, now=None):
@@ -240,8 +246,13 @@ def gog_next_event(remainder, now=None):
 
     best = None
     best_key = None
+    failure_status = None
     for calendar_id in _gog_calendar_ids():
-        for event in _gog_events_for_calendar(command, calendar_id, now):
+        status, events = _gog_events_for_calendar(command, calendar_id, now)
+        if status != "ok":
+            failure_status = failure_status or status
+            continue
+        for event in events:
             if not isinstance(event, dict):
                 continue
             start = _event_start(event)
@@ -260,7 +271,7 @@ def gog_next_event(remainder, now=None):
                 best = (sim, event.get("summary") or "scheduled meeting", _gog_calendar_label(calendar_id))
                 best_key = key
     if best is None:
-        return None, None, None, "not_found"
+        return None, None, None, failure_status or "not_found"
     sim, summary, calendar_label = best
     clean_summary = attio._clean(summary) or "scheduled meeting"
     if sim < 0:
@@ -353,7 +364,7 @@ def build_calendar_context(query, now=None):
             basis = "calendly"
 
     if sim is None or not summary:
-        return {"usable": False, "status": gog_status if gog_status == "not_configured" else "not_found"}
+        return {"usable": False, "status": gog_status if gog_status != "not_found" else "not_found"}
     return {
         "usable": True,
         "status": "ok",

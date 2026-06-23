@@ -1546,6 +1546,86 @@ def test_model_draft_rejects_internal_tool_names(monkeypatch):
     assert "CRM" not in rich_reply["message"]
 
 
+def test_model_draft_omits_low_confidence_calendar_facts(monkeypatch):
+    captured = {}
+
+    def _draft_model(_args, **kwargs):
+        captured["facts"] = json.loads(kwargs["input"])
+        return _FakeCompletedProcess(stdout=json.dumps({"message": "Hi there, thanks for the update. We'll follow up shortly."}))
+
+    monkeypatch.setattr(webhook_server.draft_model.subprocess, "run", _draft_model)
+    event = {
+        "event_type": "missed_call",
+        "text": "",
+        "inbound_context": {"identityConfidence": "medium"},
+        "calendar_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar",
+            "summary": "Upcoming demo: Other Prospect",
+            "demoState": "upcoming",
+        },
+    }
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_meeting",
+        "category": "meeting_logistics",
+        "message": "Hi there, thanks for the update.",
+    }
+
+    result = webhook_server.draft_model.apply_model_draft(
+        event,
+        payload,
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert captured["facts"]["sources"]["calendar"] == {}
+    assert "Other Prospect" not in json.dumps(captured["facts"])
+    assert result["basis"] == "model_calendar_meeting"
+
+
+def test_model_draft_rejects_future_schedule_claim_for_recent_demo(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Dr. Chris, your demo is scheduled for tomorrow."})
+        ),
+    )
+    event = {
+        "event_type": "missed_call",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "calendar_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar",
+            "summary": "Recent demo: White House Chiropractic",
+            "demoState": "recent",
+        },
+    }
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_meeting",
+        "category": "meeting_logistics",
+        "message": "Hi Dr. Chris, sorry we missed your call. I saw your ShapeScale demo context and will follow up shortly.",
+    }
+
+    result = webhook_server.draft_model.apply_model_draft(
+        event,
+        payload,
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="Dr. Chris",
+    )
+
+    assert result["basis"] == "calendar_meeting"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "scheduled for tomorrow" not in result["message"]
+
+
 def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
     normalized_event = {
         "event_type": "sms",

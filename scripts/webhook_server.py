@@ -3812,6 +3812,21 @@ def send_to_openclaw_hooks(normalized_event, line_display=None):
             if 200 <= status_code < 300:
                 return True, f"http_{status_code}"
             return False, f"http_{status_code}"
+    except urllib.error.HTTPError as e:
+        # Surface the gateway's response body — it carries the actual rejection
+        # reason. A bare "HTTP Error 400" is undiagnosable; without this a hook
+        # outage looks identical regardless of cause. Truncate to keep logs sane.
+        try:
+            # Bounded read: the log keeps only 500 chars, but each post-ACK webhook
+            # runs this on its own thread, so reading a large error page in full would
+            # let a bad gateway response exhaust memory across concurrent requests.
+            # 2 KiB covers 500 chars even at 4 bytes/char.
+            body = e.read(2048).decode("utf-8", "replace").strip()
+        except Exception:
+            body = ""
+        detail = f": {body[:500]}" if body else ""
+        print(f"❌ Error forwarding {event_label} to OpenClaw hooks: HTTP {e.code}{detail}")
+        return False, f"http_{e.code}"
     except Exception as e:
         print(f"❌ Error forwarding {event_label} to OpenClaw hooks: {e}")
         return False, "request_failed"
@@ -4741,6 +4756,16 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
 def main():
     """Start the webhook server"""
+    # Line-buffer stdout/stderr so per-request log lines reach the journal as they
+    # happen. Under systemd, stdout is a pipe (not a TTY) and Python block-buffers
+    # it by default, so on sparse traffic logs surface minutes late in bursts with
+    # misleading timestamps — which masked a real hook outage and broke log tailing.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
     # ThreadingHTTPServer: each request runs on its own thread so the ACK-first
     # handlers' post-ACK work (draft generation, hooks, Telegram) never blocks or
     # delays other inbound webhooks.

@@ -46,7 +46,7 @@ That is safe, but it leaves the operator without evidence that the number is act
 - R8. Let the model produce the final draft text from tool-call facts, but preserve existing safety validators and deterministic fallbacks.
 - R9. Suppress customer-facing personalization from low-confidence phone intelligence: no named greeting, no unconfirmed company claim, no "I saw your business" claim.
 - R10. Escalate risky or invalid numbers in operator context and avoid warmer prospect drafts for those cases.
-- R11. Treat high-risk, invalid, or inactive callers as human-only in v1: create operator context and metadata, but do not generate a customer-facing draft.
+- R11. Treat high-risk, invalid, inactive, or disposable/temporary callers as human-only in v1: create operator context and metadata, but do not generate a customer-facing draft.
 - R12. Fail closed on missing secrets, provider errors, timeouts, malformed responses, search misses, and enrichment budget exhaustion.
 - R13. Cache sanitized phone-intelligence results to reduce latency and vendor calls without storing raw provider payloads.
 - R14. Add deterministic per-window provider-call budgets so unique-number spam cannot burn unbounded IPQS or public-search credits.
@@ -115,7 +115,7 @@ Decision:
 
 - Add optional `DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND`.
 - Invoke it only after phone validation produces a usable, not-inactive, low-risk number with enough search inputs.
-- Require the command response to include bounded evidence entries: source type, domain or title, matched terms, and no page snippets.
+- Require the command response to include bounded evidence entries: source type, domain or title, matched terms, explicit normalized-phone corroboration status, and no page snippets.
 - Mark `publicProspect.usable` true only when at least one evidence entry ties the reverse name plus location to a business, role, or organization relevant to ShapeScale for Business.
 - Cap and sanitize summaries, sources, and evidence before model facts; strip instruction-like text and sensitive personal details.
 - Treat search misses as `{usable:false,status:"not_found"}`. Treat search timeouts as `{usable:false,status:"timeout"}` and provider failures as a degraded unavailable status.
@@ -138,9 +138,9 @@ Decision:
 - Exclude sensitive expanded identity payloads if enabled by account tier, including addresses, emails, birthdates, and unrelated identity data.
 - Default phone-validation TTL to 24 hours and public-prospect-search TTL to 6 hours, with environment overrides.
 - Store cache files under the configured private runtime state/log directory; create parent directories with `0700` and SQLite files with `0600`.
-- Use the repo's SQLite concurrency pattern: `busy_timeout` plus best-effort WAL.
+- Use the repo's SQLite concurrency pattern: `busy_timeout` plus best-effort WAL, with private permissions for `*.db`, `*.db-wal`, and `*.db-shm` files or a private process umask before enabling WAL.
 - Purge expired rows on read/write and avoid logging cached values.
-- Include a lookup-policy version in the cache key or stored metadata covering provider endpoint, strictness, country hint, and risk-threshold version.
+- Include a lookup-policy version in the cache key or stored metadata covering provider endpoint, strictness, country hint, `enhanced_line_check`, and risk-threshold version.
 
 Rationale:
 
@@ -156,7 +156,7 @@ Decision:
 
 - Normalize deterministic risk first.
 - Treat `active == null` or missing `active_status` as `activeStatus:"unknown"`; do not classify unknown active-line state as inactive or high-risk by itself.
-- Mark invalid, inactive, known spammer, recent-abuse, risky, or `fraud_score >= 85` numbers as `riskLevel:"high"`.
+- Mark invalid, inactive, disposable/temporary, known spammer, recent-abuse, risky, or `fraud_score >= 85` numbers as `riskLevel:"high"`.
 - Mark `fraud_score >= 75` and `< 85` as `riskLevel:"medium"` when no high-risk flag is present.
 - Mark all remaining usable numbers as `riskLevel:"low"`.
 - High-risk callers are human-only in v1: render the reason for the operator and do not generate a customer-facing draft.
@@ -275,7 +275,12 @@ Add a new `callerIntelligence` object to inbound context metadata:
       {
         "sourceType": "business_directory",
         "domainOrTitle": "Example public business profile",
-        "matchedTerms": ["JORDAN EXAMPLE", "Washington"]
+        "matchedTerms": ["JORDAN EXAMPLE", "Washington"],
+        "phoneCorroboration": {
+          "matched": true,
+          "normalizedPhone": "+12025550142",
+          "basis": "public_page_lists_validated_phone"
+        }
       }
     ]
   }
@@ -314,8 +319,8 @@ Work:
 - Add cache support for sanitized normalized results.
 - Add optional `enhanced_line_check` configuration, but handle `active == null` or missing `active_status` as `activeStatus:"unknown"` when enhanced checks are unavailable.
 - Add `DIALPAD_PHONE_INTELLIGENCE_CACHE_DB`, `DIALPAD_PHONE_INTELLIGENCE_CACHE_TTL_SECONDS` with a 24-hour default, and `DIALPAD_PUBLIC_PROSPECT_SEARCH_CACHE_TTL_SECONDS` with a 6-hour default.
-- Store cache entries with a lookup-policy version that covers endpoint, strictness, country hint, and risk-threshold version.
-- Create cache parent directories with `0700`, cache files with `0600`, expired-row purging, and the existing SQLite `busy_timeout`/best-effort-WAL pattern.
+- Store cache entries with a lookup-policy version that covers endpoint, strictness, country hint, `enhanced_line_check`, and risk-threshold version.
+- Create cache parent directories with `0700`, cache files with `0600`, expired-row purging, private permissions for SQLite `*.db-wal`/`*.db-shm` sidecars or a private umask, and the existing SQLite `busy_timeout`/best-effort-WAL pattern.
 - Add provider-call budget checks for unique-number floods before making paid or external calls, using `DIALPAD_CALLER_INTELLIGENCE_BUDGET_WINDOW_SECONDS`, `DIALPAD_PHONE_INTELLIGENCE_MAX_CALLS_PER_WINDOW`, and `DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW`.
 
 Tests:
@@ -323,13 +328,14 @@ Tests:
 - valid active wireless number normalizes expected fields;
 - valid number with unknown active-line fields remains usable with `activeStatus:"unknown"` and does not become inactive/high-risk by that fact alone;
 - invalid number returns unusable/high-risk context;
-- high risk is assigned for invalid, inactive, `recent_abuse`, `risky`, `spammer`, or `fraud_score >= 85`;
+- high risk is assigned for invalid, inactive, disposable/temporary, `recent_abuse`, `risky`, `spammer`, or `fraud_score >= 85`;
 - medium risk is assigned for `fraud_score >= 75` and `< 85` when no high-risk flag is present;
 - provider timeout returns degraded unusable context;
 - malformed response returns degraded unusable context;
 - secret is never printed or stored in cached payload;
 - cache hit avoids provider call and returns the same normalized shape;
-- cache entries invalidate when the lookup-policy version changes;
+- cache entries invalidate when the lookup-policy version changes, including `enhanced_line_check` toggles;
+- SQLite WAL sidecar files inherit private cache permissions or are created under a private umask;
 - budget exhaustion returns a `budget_exceeded` or `rate_limited` status without a provider call.
 
 ### Unit 2: Shared Webhook Integration
@@ -377,25 +383,27 @@ Files:
 Work:
 
 - Add optional `DIALPAD_PUBLIC_PROSPECT_SEARCH_COMMAND`.
-- Pass only minimal inputs: phone local format, reverse name, city, region, country, and risk classification.
+- Pass only minimal inputs: normalized phone, phone local format, reverse name, city, region, country, and risk classification.
 - Check `DIALPAD_PUBLIC_PROSPECT_SEARCH_MAX_CALLS_PER_WINDOW` before invoking the command and return `budget_exceeded` or `rate_limited` when the cap is hit.
 - Use a strict timeout and compact JSON response.
-- Require returned confidence plus bounded evidence entries with source type, domain or title, and matched terms.
-- Reject `publicProspect.usable` unless at least one evidence entry ties the reverse name plus location to a business, role, or organization relevant to ShapeScale for Business.
+- Require returned confidence plus bounded evidence entries with source type, domain or title, matched terms, and an explicit `phoneCorroboration` object showing whether the evidence directly listed the validated normalized phone.
+- Reject `publicProspect.usable` unless at least one evidence entry ties the reverse name plus location to a business, role, or organization relevant to ShapeScale for Business; reserve automatic contact writeback for evidence whose `phoneCorroboration.matched` is true.
 - Sanitize all public-search output before prompt/model facts: cap field lengths, strip instruction-like text, strip sensitive personal details, and never keep page snippets.
 - Cache sanitized search summaries separately from IPQS results.
-- Do not call public search for invalid, inactive, medium-risk, high-risk, or insufficient-input cases.
+- Do not call public search for invalid, inactive, disposable/temporary, medium-risk, high-risk, or insufficient-input cases.
 - Distinguish search miss, timeout, unavailable, unsafe output, `budget_exceeded`, and `rate_limited` statuses.
 
 Tests:
 
 - command timeout degrades cleanly;
 - high-risk number skips public search;
+- disposable/temporary number is high-risk and skips public search;
 - medium-risk number skips public search;
 - public search summary appears only in operator context/model facts with low-confidence labeling;
 - malformed command output is ignored safely;
 - malicious search summaries cannot alter model instructions or customer-facing draft behavior;
 - same-name personal results without business/professional evidence are rejected as unusable;
+- same-name/location business evidence without `phoneCorroboration.matched` remains operator context and cannot authorize contact creation;
 - public-search budget exhaustion skips the command and preserves the generic fallback/source-status behavior.
 
 ### Unit 4: Model Draft Facts and Safety
@@ -415,14 +423,14 @@ Work:
 - Treat public-search facts as untrusted data that arrive after sanitization and under explicit constraints.
 - Keep existing URL allowlist and unsupported-claim validators.
 - Add deterministic fallback drafts for degraded, low-risk, and medium-risk cases.
-- For high-risk, invalid, or inactive callers, produce operator metadata and human-only Telegram context without a generated customer-facing draft.
+- For high-risk, invalid, inactive, or disposable/temporary callers, produce operator metadata and human-only Telegram context without a generated customer-facing draft.
 
 Tests:
 
 - model facts include low-risk phone validation context;
 - low-confidence reverse name cannot appear as a greeting;
 - unconfirmed business/professional search result cannot appear as a confirmed company claim;
-- high-risk, invalid, or inactive caller produces human-only escalation with no generated customer-facing draft;
+- high-risk, invalid, inactive, or disposable/temporary caller produces human-only escalation with no generated customer-facing draft;
 - medium-risk caller produces only the conservative generic approval draft with an operator warning;
 - unsafe model output falls back to the deterministic draft.
 
@@ -503,7 +511,7 @@ Customer-facing draft text may not:
 - use low-confidence phone intelligence to claim the caller's profession;
 - state that ShapeScale looked the caller up publicly;
 - state that a public-search result is definitely the caller;
-- generate any reply for high-risk, invalid, or inactive callers in v1.
+- generate any reply for high-risk, invalid, inactive, or disposable/temporary callers in v1.
 
 Dialpad contact writeback may:
 
@@ -526,7 +534,7 @@ Operator-facing Telegram context may show:
 - fraud/risk signals;
 - possible reverse name;
 - sanitized public-search evidence with low-confidence labeling;
-- human-only escalation for high-risk, invalid, or inactive callers.
+- human-only escalation for high-risk, invalid, inactive, or disposable/temporary callers.
 
 ---
 
@@ -547,8 +555,11 @@ Operator-facing Telegram context may show:
 - Risk: Raw provider data leaks into prompts or logs.
   Mitigation: Normalize allowlisted fields only, sanitize public-search output before model facts, avoid storing raw payloads, and avoid logging cached values.
 
+- Risk: SQLite WAL sidecar files expose cached phone-intelligence data.
+  Mitigation: Require a private cache directory plus `0600` permissions for main and sidecar files, or set a private umask before enabling WAL.
+
 - Risk: Risk scoring blocks useful prospects.
-  Mitigation: Use explicit thresholds and keep unknown active-line status separate from inactive; high-risk callers become human-only, while medium-risk callers can still get conservative generic drafts with operator warnings.
+  Mitigation: Use explicit thresholds, classify disposable/temporary phone signals as high risk, and keep unknown active-line status separate from inactive; high-risk callers become human-only, while medium-risk callers can still get conservative generic drafts with operator warnings.
 
 - Risk: Contact wrapper upsert or array replacement overwrites data.
   Mitigation: Require create-only behavior or verify a `created` result for create paths, and fetch/merge existing identifier arrays before update paths.

@@ -9,8 +9,8 @@ appends the query as a single final CLI arg and reads a JSON object from stdout
 
 | Adapter | File | Query in | JSON out |
 |---|---|---|---|
-| Attio CRM | `scripts/adapters/attio_context.py` | `"<phone> <name> <company>"` | `{usable, status, basis, summary, deal, stage, company, owner}` |
-| Calendar | `scripts/adapters/calendar_context.py` | `"<name> <company> <deal> <timestamp>"` | `{usable, status, basis, summary, startsInMinutes}` |
+| Attio CRM | `scripts/adapters/attio_context.py` | `"<phone> <name> <company>"` | `{usable, status, basis, summary, deal, stage, company, owner, email}` |
+| Calendar | `scripts/adapters/calendar_context.py` | `"<name> <email> <company> <deal> <timestamp>"` | `{usable, status, basis, summary, startsInMinutes}` |
 | QMD | existing `qmd` binary (no adapter) | `search "<query>"` | `@@`-delimited snippet |
 
 All adapters fail closed (`{"usable": false, ...}`) and exit 0 on any miss, auth
@@ -32,19 +32,22 @@ past.
 - `ATTIO_API_KEY` — Attio REST bearer token (the adapter calls Attio directly, not the MCP).
 - `CALENDLY_API_KEY` — Calendly personal access token (best-effort calendar fallback).
 
-## Env wiring — apply at deploy time (U8), NOT yet
+## Env wiring
 
 > **Sequencing:** `DIALPAD_CRM_CONTEXT_COMMAND` and
 > `DIALPAD_CALENDAR_CONTEXT_COMMAND` must only be enabled on builds where SMS and
 > missed-call draft generation run after the webhook ACK. `.env` is gitignored,
-> so these lines are a deploy action, not a committed change.
+> so these lines remain deploy configuration, not committed state.
 
 ```sh
 # scripts/adapters invoked by absolute path (systemd PATH is nix-store only)
 DIALPAD_QMD_COMMAND=/home/art/.local/bin/qmd
-DIALPAD_CRM_CONTEXT_COMMAND=/home/linuxbrew/.linuxbrew/bin/python3 /home/art/projects/skills/work/dialpad/scripts/adapters/attio_context.py
-DIALPAD_CALENDAR_CONTEXT_COMMAND=/home/linuxbrew/.linuxbrew/bin/python3 /home/art/projects/skills/work/dialpad/scripts/adapters/calendar_context.py
-# adapters read ATTIO_API_KEY / CALENDLY_API_KEY from the service environment
+DIALPAD_CRM_CONTEXT_COMMAND=/run/current-system/sw/bin/python3 /home/art/projects/skills/work/dialpad/scripts/adapters/attio_context.py
+DIALPAD_CALENDAR_CONTEXT_COMMAND=/run/current-system/sw/bin/python3 /home/art/projects/skills/work/dialpad/scripts/adapters/calendar_context.py
+DIALPAD_GOG_CALENDAR_COMMAND=/home/art/.local/bin/shapescale-gog
+DIALPAD_GOG_CALENDAR_ACCOUNT=martin@shapescale.com
+DIALPAD_GOG_CALENDAR_IDS=primary,alex@shapescale.com,lilla@shapescale.com
+# adapters read ATTIO_API_KEY / CALENDLY_API_KEY and gog config from the service environment
 ```
 
 The `qmd` fix alone (absolute path) is safe to land earlier than CRM/calendar —

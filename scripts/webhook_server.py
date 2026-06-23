@@ -2733,8 +2733,10 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
 
     context_fields = {
         key: _compact_context_scalar(result.get(key), limit=300 if key == "summary" else 120)
-        for key in ("summary", "deal", "stage", "company", "owner")
+        for key in ("summary", "deal", "stage", "company", "owner", "email")
     }
+    if context_fields["email"] and "@" not in context_fields["email"]:
+        context_fields["email"] = None
     summary = " ".join(context_fields[key] for key in ("summary", "deal", "stage", "company") if context_fields[key])
     if not summary:
         return {"usable": False, "status": "empty"}
@@ -2748,6 +2750,7 @@ def lookup_sales_crm_context(normalized_event, sender_enrichment=None):
         "deal": context_fields["deal"],
         "stage": context_fields["stage"],
         "owner": context_fields["owner"],
+        "email": context_fields["email"],
         "summary": summary[:300],
     }
 
@@ -2933,6 +2936,8 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
 
     query_parts = [
         _context_name(sender_enrichment, normalized_event),
+        (crm_context or {}).get("email"),
+        sender_enrichment.get("email") or sender_enrichment.get("email_address"),
         (crm_context or {}).get("company"),
         (crm_context or {}).get("deal"),
         normalized_event.get("timestamp"),
@@ -3054,6 +3059,14 @@ def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
             return f"Hi {greeting}, {opening}. I have your ShapeScale account{with_company} here and will follow up shortly."
         return f"Hi {greeting}, great to hear from you again. I have your ShapeScale account{with_company} here and will follow up shortly."
     if segment == "prospect_demo":
+        calendar_context = normalized_event.get("calendar_context")
+        calendar_status = (calendar_context or {}).get("status") if isinstance(calendar_context, dict) else None
+        if is_missed_call and _normalize_stage_title(crm_context.get("stage")) == "demo request" and calendar_status == "not_found":
+            return (
+                f"Hi {greeting}, {opening}. I saw your ShapeScale demo request{with_company} "
+                f"and that booking may not have gone through. You can grab a time here: "
+                f"{DIALPAD_BOOK_DEMO_URL}, or text me a couple times that work and I'll help coordinate."
+            )
         return f"Hi {greeting}, {opening}. I have your ShapeScale demo conversation{with_company} here and will follow up shortly."
     if segment == "prospect_cold":
         if is_missed_call:

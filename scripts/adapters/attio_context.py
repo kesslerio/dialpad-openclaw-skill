@@ -335,6 +335,7 @@ def crm_context_from_records(person, deal):
     deal_name = _text_value(deal_values, "name")
     stage = _status_title(deal_values, "stage")
     company = _company_name(deal_values) if deal else None
+    email = person_primary_email(person)
 
     if not (company or deal_name or stage):
         return {"usable": False, "status": "no_context"}
@@ -354,6 +355,7 @@ def crm_context_from_records(person, deal):
         "deal": deal_name,
         "stage": stage,
         "company": company,
+        "email": email,
         "owner": None,  # owner is an actor_id; name resolution needs a scope this key lacks
     }
 

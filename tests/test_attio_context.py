@@ -14,7 +14,10 @@ import attio_context as attio  # noqa: E402
 
 PERSON = {
     "id": {"record_id": "person-1"},
-    "values": {"associated_deals": [{"target_record_id": "deal-1", "target_object": "deals"}]},
+    "values": {
+        "associated_deals": [{"target_record_id": "deal-1", "target_object": "deals"}],
+        "email_addresses": [{"email_address": "jane@acme.example", "active_until": None}],
+    },
 }
 DEAL = {
     "id": {"record_id": "deal-1"},
@@ -110,6 +113,7 @@ class CrmContextFromRecordsTests(unittest.TestCase):
         self.assertEqual(ctx["company"], "Acme Corp")
         self.assertEqual(ctx["deal"], "Acme (Inbound Demo Request)")
         self.assertEqual(ctx["stage"], "Demo Booked")
+        self.assertEqual(ctx["email"], "jane@acme.example")
         self.assertIn("Acme Corp", ctx["summary"])
         self.assertIn("stage: Demo Booked", ctx["summary"])
         self.assertIsNone(ctx["owner"])

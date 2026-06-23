@@ -1359,6 +1359,7 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
             "deal": "ShapeScale demo",
             "stage": "Demo Scheduled",
             "owner": "Martin",
+            "email": "gabriela@example.test",
             "summary": "Demo Scheduled",
             "raw": {"internal_id": "secret-crm-record"},
         },
@@ -1373,7 +1374,13 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
         },
     ]
 
-    monkeypatch.setattr(webhook_server, "_run_context_command", lambda *_args: raw_results.pop(0))
+    command_queries = []
+
+    def _context_command(_command, query):
+        command_queries.append(query)
+        return raw_results.pop(0)
+
+    monkeypatch.setattr(webhook_server, "_run_context_command", _context_command)
 
     crm_context = webhook_server.lookup_sales_crm_context(normalized_event, sender_enrichment=sender_enrichment)
     calendar_context = webhook_server.lookup_sales_calendar_context(
@@ -1390,6 +1397,7 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
         "deal": "ShapeScale demo",
         "stage": "Demo Scheduled",
         "owner": "Martin",
+        "email": "gabriela@example.test",
         "summary": "Demo Scheduled ShapeScale demo Demo Scheduled Evolve from within medspa",
     }
     assert calendar_context == {
@@ -1400,6 +1408,7 @@ def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
         "startsInMinutes": 0,
         "demoState": None,
     }
+    assert "gabriela@example.test" in command_queries[1]
     assert "secret" not in json.dumps({"crm": crm_context, "calendar": calendar_context})
 
 
@@ -1506,6 +1515,7 @@ def test_sales_crm_context_compacts_scalar_allowlisted_values(monkeypatch):
             "deal": " ShapeScale demo ",
             "stage": " Demo Scheduled ",
             "owner": 12345,
+            "email": " gabriela@example.test ",
         },
     )
 
@@ -1516,6 +1526,7 @@ def test_sales_crm_context_compacts_scalar_allowlisted_values(monkeypatch):
     assert crm_context["deal"] == "ShapeScale demo"
     assert crm_context["stage"] == "Demo Scheduled"
     assert crm_context["owner"] == "12345"
+    assert crm_context["email"] == "gabriela@example.test"
     assert crm_context["summary"] == "Demo scheduled ShapeScale demo Demo Scheduled Evolve from within medspa"
 
 

@@ -1500,9 +1500,9 @@ class CallWebhookHandlerTests(unittest.TestCase):
         crm_payload = {
             "usable": True,
             "basis": "attio",
-            "summary": "Acme Corp Demo Booked",
+            "summary": "Acme Corp Demo Request",
             "company": "Acme Corp",
-            "stage": "Demo Booked",
+            "stage": "Demo Request",
             "deal": "Acme",
             "owner": None,
         }
@@ -1580,6 +1580,10 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(hook_calls[0]["normalized_event"]["auto_reply"]["status"], "draft_created")
         self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftId"])
         self.assertEqual(hook_calls[0]["normalized_event"]["auto_reply"]["richReply"]["basis"], "attio_crm")
+        draft_text = hook_calls[0]["normalized_event"]["auto_reply"]["message"]
+        self.assertIn("booking may not have gone through", draft_text)
+        self.assertIn("https://bysha.pe/book-demo", draft_text)
+        self.assertIn("help coordinate", draft_text)
         self.assertIn("Inbound context", telegram_messages[0])
         self.assertIn("Ann Harper", telegram_messages[0])
         self.assertIn("SMS approval draft", telegram_messages[0])

@@ -1960,6 +1960,48 @@ def test_availability_sms_without_calendar_match_does_not_create_crm_draft(monke
 def test_non_scheduling_anything_question_does_not_trigger_availability():
     assert webhook_server.scheduling_availability_intent("Do you have anything on pricing?") is False
     assert webhook_server.scheduling_availability_intent("Do you have anything to send me?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything this morning?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything this week?") is False
+
+
+def test_availability_sms_without_crm_context_does_not_create_generic_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Natalie Lindo",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {"usable": False, "status": "not_configured"},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: pytest.fail("calendar lookup requires usable CRM demo context"),
+    )
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "crm_not_configured"
+    assert rich_reply["category"] == "scheduling_availability"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
 
 
 def test_low_confidence_availability_sms_does_not_create_customer_draft(monkeypatch):
@@ -2452,6 +2494,46 @@ def test_model_draft_rejects_future_schedule_claim_for_recent_demo(monkeypatch):
     assert result["basis"] == "calendar_meeting"
     assert result["modelDraft"]["status"] == "unsafe_output"
     assert "scheduled for tomorrow" not in result["message"]
+
+
+def test_model_draft_rejects_booked_claim_for_availability_windows(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Natalie, you're booked for 2:30 PM today."})
+        ),
+    )
+    event = {
+        "event_type": "sms",
+        "text": "Do you have anything today?",
+        "inbound_context": {"identityConfidence": "high"},
+        "calendar_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "summary": "Candidate windows: Alex 2:30 PM UTC-3:00 PM UTC",
+            "intent": "availability",
+        },
+    }
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_availability",
+        "category": "scheduling_availability",
+        "message": "Hi Natalie, yes, we can make something work today. Would 2:30 PM work?",
+    }
+
+    result = webhook_server.draft_model.apply_model_draft(
+        event,
+        payload,
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="Natalie",
+    )
+
+    assert result["basis"] == "calendar_availability"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "booked" not in result["message"]
 
 
 def test_model_draft_rejects_bare_unapproved_links(monkeypatch):

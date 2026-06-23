@@ -216,7 +216,7 @@ def _safe_message(text, normalized_event, config, greeting):
     calendar_context = normalized_event.get("calendar_context")
     calendar_usable = isinstance(calendar_context, dict) and calendar_context.get("usable")
     demo_state = calendar_context.get("demoState") if isinstance(calendar_context, dict) else None
-    calendar_supports_scheduled_claim = bool(calendar_usable and demo_state != "recent")
+    calendar_supports_scheduled_claim = bool(calendar_usable and demo_state == "upcoming")
     if not calendar_supports_scheduled_claim and UNSUPPORTED_SCHEDULE_CLAIM_RE.search(message):
         return None
     if RAW_COMMS_CLAIM_RE.search(message):

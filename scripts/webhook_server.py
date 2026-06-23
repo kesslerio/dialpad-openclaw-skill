@@ -2795,11 +2795,11 @@ def scheduling_availability_intent(text):
     if not body:
         return False
     patterns = (
-        r"\b(?:anything|any\s+(?:time|times|slots?|openings?|availability))\s+(?:today|tomorrow|this\s+(?:afternoon|morning|week))\b",
-        r"\b(?:do|would)\s+you\s+have\s+(?:anything|any\s+(?:time|times|slots?|openings?))\s+(?:today|tomorrow|this\s+(?:afternoon|morning|week))\b",
-        r"\b(?:are|r)\s+(?:you|we)\s+available\s+(?:today|tomorrow|this\s+(?:afternoon|morning|week))\b",
-        r"\b(?:can|could)\s+(?:we|you)\s+(?:meet|talk|chat|do\s+(?:a\s+)?demo)\s+(?:today|tomorrow|this\s+(?:afternoon|morning|week))\b",
-        r"\b(?:have|got)\s+(?:time|availability|an?\s+opening)\s+(?:today|tomorrow|this\s+(?:afternoon|morning|week))\b",
+        r"\b(?:anything|any\s+(?:time|times|slots?|openings?|availability))\s+(?:today|tomorrow)\b",
+        r"\b(?:do|would)\s+you\s+have\s+(?:anything|any\s+(?:time|times|slots?|openings?))\s+(?:today|tomorrow)\b",
+        r"\b(?:are|r)\s+(?:you|we)\s+available\s+(?:today|tomorrow)\b",
+        r"\b(?:can|could)\s+(?:we|you)\s+(?:meet|talk|chat|do\s+(?:a\s+)?demo)\s+(?:today|tomorrow)\b",
+        r"\b(?:have|got)\s+(?:time|availability|an?\s+opening)\s+(?:today|tomorrow)\b",
     )
     return any(re.search(pattern, body) for pattern in patterns)
 
@@ -2829,7 +2829,7 @@ def _rich_reply_blocks_generic_fallback(rich_reply):
     return (
         isinstance(rich_reply, dict)
         and rich_reply.get("category") == "scheduling_availability"
-        and str(rich_reply.get("status") or "").startswith("calendar_")
+        and rich_reply.get("usable") is not True
     )
 
 
@@ -3939,7 +3939,10 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
         crm_context = lookup_sales_crm_context(normalized_event, sender_enrichment=sender_enrichment)
         normalized_event["crm_context"] = crm_context
     if not crm_context.get("usable"):
-        return {"usable": False, "status": f"crm_{crm_context.get('status') or 'unavailable'}"}
+        failure = {"usable": False, "status": f"crm_{crm_context.get('status') or 'unavailable'}"}
+        if _calendar_context_intent(normalized_event) == "scheduling_availability":
+            failure["category"] = "scheduling_availability"
+        return failure
 
     if _context_comms_applicable(normalized_event, crm_context=crm_context):
         comms_context = normalized_event.get("comms_context")
@@ -4087,7 +4090,7 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
         )
         if contextual_reply.get("usable"):
             return contextual_reply
-        if _rich_reply_has_calendar_status(contextual_reply):
+        if _rich_reply_has_calendar_status(contextual_reply) or _rich_reply_blocks_generic_fallback(contextual_reply):
             return contextual_reply
 
     sender_number = normalized_event.get("sender_number")

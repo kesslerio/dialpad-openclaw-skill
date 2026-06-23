@@ -68,3 +68,19 @@ For generic missed-call fallbacks, source status is part of the safety story:
 `not_applicable` QMD for silent calls is different from a failed knowledge lookup,
 and `unsafe` CRM/calendar output is different from no match. Keep those statuses
 operator-facing and out of customer SMS text.
+
+## Phone intelligence follows the same boundary
+
+IPQS reverse lookup and public prospect search are weaker than Attio/Dialpad
+owned-source identity. Treat them as operator evidence unless independently
+corroborated:
+
+- Reverse name may be shown as "possible reverse lookup" in Telegram/metadata.
+- Reverse name must not raise `identityConfidence` or produce `Hi {name}`.
+- Public business evidence must stay low-confidence operator context unless it is
+  directly phone-corroborated or backed by owned-source identity.
+- Invalid, inactive, disposable/temporary, abusive, or high-risk phone signals
+  block customer-facing drafts entirely and route the event human-only.
+- Automatic Dialpad contact sync must never use reverse-name-only, same-name
+  personal search, area code, weak public search, or budget-degraded evidence as
+  contact identity.

@@ -333,7 +333,12 @@ def test_not_eligible_inbound_stales_pending_draft(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
+    hook_calls = []
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_calls.append(normalized_sms) or (True, "http_200"),
+    )
 
     conn = webhook_server.sms_approval.init_db()
     try:
@@ -367,6 +372,12 @@ def test_not_eligible_inbound_stales_pending_draft(monkeypatch, tmp_path):
         conn.close()
     assert stale_draft["status"] == webhook_server.sms_approval.STATUS_STALE
     assert stale_draft["invalidated_reason"] == "new_inbound_not_eligible"
+    # The non-eligible inbound still forwards the operator card, but must create NO
+    # new approvable draft — staling the old one must not be paired with a fresh
+    # pending draft (regression guard).
+    assert hook_calls, "operator card should still be forwarded"
+    assert hook_calls[0]["auto_reply"]["draftId"] is None
+    assert hook_calls[0]["auto_reply"]["status"] == "not_eligible"
 
 
 def test_inbound_sales_sms_creates_approval_draft_on_first_contact(monkeypatch, tmp_path):
@@ -1745,11 +1756,22 @@ def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(monke
     try:
         stale_draft = webhook_server.sms_approval.get_draft(conn, pending["draft_id"])
         opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+        pending_count = conn.execute(
+            "SELECT COUNT(*) FROM sms_approval_drafts WHERE customer_number = ? "
+            "AND status IN (?, ?)",
+            (
+                "+14155550123",
+                webhook_server.sms_approval.STATUS_PENDING,
+                webhook_server.sms_approval.STATUS_RISK_PENDING,
+            ),
+        ).fetchone()[0]
     finally:
         conn.close()
     assert stale_draft["status"] == webhook_server.sms_approval.STATUS_STALE
     assert stale_draft["invalidated_reason"] == "customer_opt_out"
     assert opted_out is True
+    # Opt-out stales the prior draft AND must not leave/create a new approvable one.
+    assert pending_count == 0
 
 
 def test_opt_out_persistence_failure_records_emergency_block(monkeypatch, tmp_path):
@@ -1779,7 +1801,10 @@ def test_opt_out_persistence_failure_records_emergency_block(monkeypatch, tmp_pa
         },
     )
     monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
-    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text, **_kwargs: True)
+    # Capture the operator alert to distinguish a successful emergency-ledger block
+    # from a total persistence failure (the sibling test pins "persistence failed").
+    telegram_messages = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_messages.append(text) or True)
 
     conn = webhook_server.sms_approval.init_db()
     try:
@@ -1811,6 +1836,11 @@ def test_opt_out_persistence_failure_records_emergency_block(monkeypatch, tmp_pa
     # When the durable opt-out write fails, the emergency fail-closed ledger must
     # still record the block (the opt-out outcome no longer rides the ACK body).
     assert emergency_path.exists()
+    # And the operator alert must report the opt-out BLOCK, not "persistence failed"
+    # (the sibling total-failure case) — preserves the success/failure distinction.
+    assert telegram_messages
+    assert "persistence failed" not in telegram_messages[0]
+    assert "opt-out / human-only" in telegram_messages[0]
 
     conn = webhook_server.sms_approval.init_db()
     try:
@@ -1971,7 +2001,12 @@ def test_opt_out_with_security_code_persists_opt_out_before_sensitive_filter(mon
     telegram_messages = []
     monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", True)
     monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_messages.append(text) or True)
-    monkeypatch.setattr(webhook_server, "send_sms_to_openclaw_hooks", lambda *_args, **_kwargs: (True, "http_200"))
+    hook_calls = []
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_calls.append(normalized_sms) or (True, "http_200"),
+    )
 
     payload = {
         "direction": "inbound",
@@ -1991,6 +2026,8 @@ def test_opt_out_with_security_code_persists_opt_out_before_sensitive_filter(mon
     # The opt-out is persisted BEFORE the sensitive-content filter would suppress
     # the message, so the customer is durably opted out despite the security code.
     assert opted_out is True
+    # OTP-leak guard: the security-code SMS must never be forwarded to OpenClaw hooks.
+    assert hook_calls == []
 
 
 def test_stop_by_phrase_does_not_create_permanent_opt_out(monkeypatch, tmp_path):
@@ -2119,6 +2156,12 @@ def test_outbound_sms_invalidates_pending_approval_draft(monkeypatch, tmp_path):
         lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
     )
     monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    hook_calls = []
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_calls.append(normalized_sms) or (True, "http_200"),
+    )
 
     conn = webhook_server.sms_approval.init_db()
     try:
@@ -2161,6 +2204,8 @@ def test_outbound_sms_invalidates_pending_approval_draft(monkeypatch, tmp_path):
     assert stale["invalidated_reason"] == "manual_outbound"
     assert second_stale["status"] == webhook_server.sms_approval.STATUS_STALE
     assert second_stale["invalidated_reason"] == "manual_outbound"
+    # A manual outbound SMS is never forwarded to OpenClaw hooks.
+    assert hook_calls == []
 
 
 def test_risky_inbound_sales_sms_creates_two_step_approval_draft(monkeypatch, tmp_path):
@@ -2550,6 +2595,14 @@ def test_inbound_shortcode_sms_filtered_for_hook_and_telegram(monkeypatch, tmp_p
     # operator Telegram alert. The filtered reason no longer rides the ACK response.
     assert hook_calls == []
     assert telegram_messages == []
+    # Pin the centralized eligibility reason so a regression that reclassifies a
+    # short-code sender (e.g. as filtered_sensitive) is caught, not just the
+    # downstream hook/telegram suppression.
+    decision = webhook_server.assess_inbound_sms_alert_eligibility(
+        payload, from_number="12345", text="Code 009821 to verify."
+    )
+    assert decision["eligible"] is False
+    assert decision["reason_code"] == "filtered_shortcode"
 
 
 def test_inbound_hook_and_telegram_paths_share_eligible_result(monkeypatch, tmp_path):

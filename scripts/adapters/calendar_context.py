@@ -15,7 +15,8 @@ Emits the contract consumed by ``lookup_sales_calendar_context``:
     {"usable": true, "status": "ok", "basis": "attio",
      "summary": "...", "startsInMinutes": 42}
 
-Only future demos are surfaced; a stale/past date returns ``{"usable": false}``.
+Future demos and bounded recent demos are surfaced; stale/past dates outside the
+lookback window return ``{"usable": false}``.
 """
 import json
 import os
@@ -33,6 +34,20 @@ import attio_context as attio  # noqa: E402  (sibling adapter = shared Attio cli
 
 CALENDLY_BASE = os.environ.get("CALENDLY_API_BASE", "https://api.calendly.com").rstrip("/")
 CALENDLY_TIMEOUT = float(os.environ.get("CALENDLY_HTTP_TIMEOUT_SECONDS", "2.5"))
+DEFAULT_RECENT_DEMO_LOOKBACK_MINUTES = 7 * 24 * 60
+
+
+def parse_int_env(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+RECENT_DEMO_LOOKBACK_MINUTES = parse_int_env(
+    "DIALPAD_RECENT_DEMO_LOOKBACK_MINUTES",
+    DEFAULT_RECENT_DEMO_LOOKBACK_MINUTES,
+)
 
 # Trailing timestamp the webhook appends (ISO 8601 or unix epoch).
 _TIMESTAMP_RE = re.compile(r"\s*(?:\d{4}-\d{2}-\d{2}[T ]\S+|\b\d{10}\b)\s*$")
@@ -81,26 +96,31 @@ def _demo_timestamp(deal):
 
 
 def resolve_attio_demo(remainder, now=None):
-    """Return (startsInMinutes, summary) from a single confident Attio deal match, else (None, None).
+    """Return (startsInMinutes, summary, demoState) from one confident Attio deal match.
 
     Conservative by design: 0 or multiple name matches → not usable, so the draft
     falls back to generic rather than guessing a meeting time.
     """
     token = _search_token(remainder)
     if not token:
-        return None, None
+        return None, None, None
     try:
         deals = attio._query_records("deals", {"name": {"$contains": token}}, limit=3)
     except attio.AttioError:
-        return None, None
+        return None, None, None
     if len(deals) != 1:
-        return None, None
+        return None, None, None
     deal = deals[0]
     sim = starts_in_minutes(parse_iso(_demo_timestamp(deal)), now=now)
-    if sim is None or sim < 0:
-        return None, None
+    if sim is None:
+        return None, None, None
     name = attio._text_value((deal.get("values") or {}), "name") or "your demo"
-    return sim, f"Upcoming demo: {attio._clean(name)}"
+    clean_name = attio._clean(name)
+    if sim < 0:
+        if abs(sim) > RECENT_DEMO_LOOKBACK_MINUTES:
+            return None, None, None
+        return abs(sim), f"Recent demo: {clean_name}", "recent"
+    return sim, f"Upcoming demo: {clean_name}", "upcoming"
 
 
 def calendly_next_event(email, now=None):
@@ -148,16 +168,24 @@ def build_calendar_context(query, now=None):
         return {"usable": False, "status": "empty_query"}
     remainder = _TIMESTAMP_RE.sub("", raw).strip()
 
-    sim, summary, basis = (*resolve_attio_demo(remainder, now=now), "attio")
+    sim, summary, demo_state, basis = (*resolve_attio_demo(remainder, now=now), "attio")
     if sim is None and os.environ.get("CALENDLY_API_KEY"):
         email_match = _EMAIL_RE.search(remainder)
         if email_match:
             sim, summary = calendly_next_event(email_match.group(0), now=now)
+            demo_state = "upcoming" if sim is not None else None
             basis = "calendly"
 
     if sim is None or not summary:
         return {"usable": False, "status": "not_found"}
-    return {"usable": True, "status": "ok", "basis": basis, "summary": summary, "startsInMinutes": sim}
+    return {
+        "usable": True,
+        "status": "ok",
+        "basis": basis,
+        "summary": summary,
+        "startsInMinutes": sim,
+        "demoState": demo_state or "upcoming",
+    }
 
 
 def main(argv=None):

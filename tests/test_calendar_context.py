@@ -26,7 +26,7 @@ PAST_DEAL = {
     "id": {"record_id": "deal-2"},
     "values": {
         "name": [{"value": "Old Deal", "attribute_type": "text"}],
-        "demo_scheduled_at": [{"value": "2026-06-19T10:00:00.000000000Z", "attribute_type": "timestamp"}],
+        "demo_scheduled_at": [{"value": "2026-06-20T17:30:00.000000000Z", "attribute_type": "timestamp"}],
     },
 }
 
@@ -54,25 +54,40 @@ class TimeHelpersTests(unittest.TestCase):
 class ResolveAttioDemoTests(unittest.TestCase):
     def test_single_future_match(self):
         with patch.object(attio, "_query_records", return_value=[DEAL]):
-            sim, summary = cal.resolve_attio_demo("Synergy Wellness", now=NOW)
+            sim, summary, state = cal.resolve_attio_demo("Synergy Wellness", now=NOW)
         self.assertEqual(sim, 30)
         self.assertIn("Synergy Wellness", summary)
+        self.assertEqual(state, "upcoming")
 
     def test_ambiguous_match_not_usable(self):
         with patch.object(attio, "_query_records", return_value=[DEAL, PAST_DEAL]):
-            self.assertEqual(cal.resolve_attio_demo("Demo", now=NOW), (None, None))
+            self.assertEqual(cal.resolve_attio_demo("Demo", now=NOW), (None, None, None))
 
     def test_no_match(self):
         with patch.object(attio, "_query_records", return_value=[]):
-            self.assertEqual(cal.resolve_attio_demo("Synergy", now=NOW), (None, None))
+            self.assertEqual(cal.resolve_attio_demo("Synergy", now=NOW), (None, None, None))
 
-    def test_past_demo_not_surfaced(self):
+    def test_recent_past_demo_is_surfaced(self):
         with patch.object(attio, "_query_records", return_value=[PAST_DEAL]):
-            self.assertEqual(cal.resolve_attio_demo("Old", now=NOW), (None, None))
+            sim, summary, state = cal.resolve_attio_demo("Old Deal", now=NOW)
+        self.assertGreater(sim, 0)
+        self.assertIn("Recent demo", summary)
+        self.assertEqual(state, "recent")
+
+    def test_stale_past_demo_not_surfaced(self):
+        stale = {
+            "id": {"record_id": "deal-3"},
+            "values": {
+                "name": [{"value": "Stale Deal", "attribute_type": "text"}],
+                "demo_scheduled_at": [{"value": "2026-06-01T10:00:00.000000000Z", "attribute_type": "timestamp"}],
+            },
+        }
+        with patch.object(attio, "_query_records", return_value=[stale]):
+            self.assertEqual(cal.resolve_attio_demo("Stale", now=NOW), (None, None, None))
 
     def test_api_error_fails_closed(self):
         with patch.object(attio, "_query_records", side_effect=attio.AttioError("network")):
-            self.assertEqual(cal.resolve_attio_demo("Synergy", now=NOW), (None, None))
+            self.assertEqual(cal.resolve_attio_demo("Synergy", now=NOW), (None, None, None))
 
 
 class BuildCalendarContextTests(unittest.TestCase):
@@ -145,9 +160,14 @@ class CalendlyBestEffortTests(unittest.TestCase):
         self.assertTrue(ctx["usable"])
         self.assertEqual(ctx["basis"], "calendly")
         self.assertEqual(ctx["startsInMinutes"], 20)
+        self.assertEqual(ctx["demoState"], "upcoming")
 
 
 class HardeningTests(unittest.TestCase):
+    def test_parse_int_env_falls_back_on_invalid_value(self):
+        with patch.dict("os.environ", {"BAD_INT": "not-an-int"}):
+            self.assertEqual(cal.parse_int_env("BAD_INT", 42), 42)
+
     def test_main_exits_zero_on_internal_exception(self):
         import io
         from contextlib import redirect_stdout
@@ -166,7 +186,7 @@ class HardeningTests(unittest.TestCase):
             },
         }
         with patch.object(attio, "_query_records", return_value=[deal]):
-            sim, summary = cal.resolve_attio_demo("Evil", now=NOW)
+            sim, summary, _state = cal.resolve_attio_demo("Evil", now=NOW)
         self.assertEqual(summary, "Upcoming demo: Evil Demo")
 
     def test_calendly_rejects_unexpected_org(self):

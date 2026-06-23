@@ -167,6 +167,89 @@ class AckFirstIdempotencyTests(unittest.TestCase):
         self.assertEqual(self.assess.call_count, 1)
 
 
+class MissedCallAckFirstTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db = self.tmp.name
+        self.patchers = [
+            patch.object(ws, "verify_webhook_auth", lambda *a, **k: (True, "test")),
+            patch.object(ws, "_missed_call_dedupe_db_path", lambda: Path(self.db)),
+            patch.object(ws, "DIALPAD_AUTO_REPLY_ENABLED", False),
+            patch.object(ws, "_fetch_recent_calls_around", return_value=[]),
+            patch.object(ws, "send_to_openclaw_hooks", return_value=(False, "disabled_by_config")),
+            patch.object(ws, "send_to_telegram", return_value=True),
+        ]
+        for p in self.patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patchers:
+            p.stop()
+        Path(self.db).unlink(missing_ok=True)
+
+    def _missed_call(self, call_id):
+        return {
+            "direction": "inbound",
+            "call_direction": "inbound",
+            "call_missed": True,
+            "call_id": call_id,
+            "from_number": "+14155550123",
+            "to_number": "+14155201316",
+            "date_started": 1760000000000,
+        }
+
+    def test_missed_call_ack_written_before_enrichment_lookup(self):
+        handler, status = _build_handler(self._missed_call("call-ack-1"))
+        seen = {}
+
+        def _probe(_number):
+            seen["ack_len"] = len(handler.wfile.getvalue())
+            return {"contact_name": None, "status": "not_found", "degraded": False, "degraded_reason": None}
+
+        with patch.object(ws, "lookup_contact_enrichment", side_effect=_probe):
+            handler.handle_call_webhook()
+
+        self.assertEqual(status["code"], 200)
+        self.assertIn('"processing": "async"', handler.wfile.getvalue().decode())
+        self.assertGreater(seen.get("ack_len", 0), 0)
+
+    def test_missed_call_ack_written_before_history_backfill(self):
+        payload = self._missed_call("call-ack-history-1")
+        payload.pop("from_number")
+        payload["contact"] = {"phone": "+14155550123"}
+        handler, status = _build_handler(payload)
+        seen = {}
+
+        def _history(_event_ts_ms):
+            seen["ack_len"] = len(handler.wfile.getvalue())
+            return []
+
+        with patch.object(ws, "_fetch_recent_calls_around", side_effect=_history):
+            handler.handle_call_webhook()
+
+        self.assertEqual(status["code"], 200)
+        self.assertIn('"processing": "async"', handler.wfile.getvalue().decode())
+        self.assertGreater(seen.get("ack_len", 0), 0)
+
+    def test_duplicate_missed_call_acks_without_side_effects(self):
+        lookup = MagicMock(return_value={
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        })
+        with patch.object(ws, "lookup_contact_enrichment", lookup):
+            first, _ = _build_handler(self._missed_call("call-dup-1"))
+            first.handle_call_webhook()
+            second, status = _build_handler(self._missed_call("call-dup-1"))
+            second.handle_call_webhook()
+
+        self.assertEqual(status["code"], 200)
+        self.assertIn('"processing": "duplicate"', second.wfile.getvalue().decode())
+        self.assertEqual(lookup.call_count, 1)
+
+
 class ServerConfigTests(unittest.TestCase):
     def test_main_uses_threading_http_server(self):
         # ACK-first relies on per-request threads -> main() must instantiate

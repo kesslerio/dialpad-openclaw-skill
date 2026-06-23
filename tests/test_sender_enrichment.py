@@ -421,9 +421,30 @@ def test_public_prospect_requires_phone_corroborated_business_evidence():
         },
         webhook_server._public_prospect_search_inputs(caller_context),
     )
+    string_false_match = webhook_server._normalize_public_prospect_result(
+        {
+            "usable": True,
+            "summary": "Possible founder at Example Fitness.",
+            "evidence": [
+                {
+                    "sourceType": "business_directory",
+                    "domainOrTitle": "Example Fitness owner profile",
+                    "matchedTerms": ["Jordan Example", "Fort Worth", "business"],
+                    "phoneCorroboration": {
+                        "matched": "false",
+                        "normalizedPhone": "+12025550142",
+                        "basis": "public_page_lists_validated_phone",
+                    },
+                }
+            ],
+        },
+        webhook_server._public_prospect_search_inputs(caller_context),
+    )
     assert business_without_phone["usable"] is False
     assert wrong_country_phone["usable"] is False
     assert wrong_country_phone["evidence"][0]["phoneCorroboration"]["matched"] is False
+    assert string_false_match["usable"] is False
+    assert string_false_match["evidence"][0]["phoneCorroboration"]["matched"] is False
 
 
 def test_public_prospect_lookup_uses_sanitized_cache(monkeypatch, tmp_path):
@@ -667,6 +688,9 @@ def test_draft_model_redacts_low_confidence_public_prospect_summary():
 
     public = facts["sources"]["callerIntelligence"]["publicProspect"]
     assert public == {"status": "usable", "confidence": "low"}
+    assert facts["sources"]["callerIntelligence"]["phone"] == {}
+    assert facts["sources"]["callerIntelligence"]["line"] == {}
+    assert facts["sources"]["callerIntelligence"]["risk"] == {}
 
 
 def test_contact_sync_omits_public_summary_from_suggested_contact(monkeypatch):

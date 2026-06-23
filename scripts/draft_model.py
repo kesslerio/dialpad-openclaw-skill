@@ -137,11 +137,14 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
     caller_intelligence = inbound_context.get("callerIntelligence") or normalized_event.get("caller_intelligence")
     if isinstance(caller_intelligence, dict):
         public_keys = ("status", "summary", "confidence") if identity_confidence == "high" else ("status", "confidence")
+        phone_keys = ("country", "region", "city") if identity_confidence == "high" else ()
+        line_keys = ("carrier", "type", "activeStatus") if identity_confidence == "high" else ()
+        risk_keys = ("level",) if identity_confidence == "high" else ()
         facts["sources"]["callerIntelligence"] = {
             "status": _compact_scalar(caller_intelligence.get("status"), limit=40),
-            "phone": _compact_dict(caller_intelligence.get("phone"), ("country", "region", "city")),
-            "line": _compact_dict(caller_intelligence.get("line"), ("carrier", "type", "activeStatus")),
-            "risk": _compact_dict(caller_intelligence.get("risk"), ("level",)),
+            "phone": _compact_dict(caller_intelligence.get("phone"), phone_keys),
+            "line": _compact_dict(caller_intelligence.get("line"), line_keys),
+            "risk": _compact_dict(caller_intelligence.get("risk"), risk_keys),
             "possibleIdentity": _compact_dict(caller_intelligence.get("possibleIdentity"), ("basis", "confidence")),
             "publicProspect": _compact_dict(caller_intelligence.get("publicProspect"), public_keys),
         }

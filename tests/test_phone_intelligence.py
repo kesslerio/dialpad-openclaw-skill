@@ -35,7 +35,7 @@ def test_valid_active_wireless_number_normalizes_fields(monkeypatch, tmp_path):
 
     def fake_urlopen(req, timeout):
         assert req.headers["Ipqs-key"] == "secret-test-key"
-        assert "secret-test-key" in req.full_url
+        assert "secret-test-key" not in req.full_url
         return _FakeResponse({
             "success": True,
             "valid": True,
@@ -104,6 +104,15 @@ def test_ipqs_success_false_without_valid_is_unavailable_or_rate_limited():
 
     assert unavailable["status"] == "unavailable"
     assert limited["status"] == "rate_limited"
+
+
+def test_successful_ipqs_payload_without_valid_is_invalid():
+    out = phone_intelligence.normalize_ipqs_payload("+12025550144", {"success": True, "fraud_score": 0})
+
+    assert out["usable"] is False
+    assert out["status"] == "invalid"
+    assert out["risk"]["level"] == "high"
+    assert "invalid" in out["risk"]["reasons"]
 
 
 def test_disconnected_line_status_is_inactive():
@@ -216,6 +225,17 @@ def test_missing_budget_store_fails_closed(monkeypatch):
     monkeypatch.delenv("DIALPAD_PHONE_INTELLIGENCE_CACHE_DB", raising=False)
     monkeypatch.delenv("DIALPAD_STATE_DIR", raising=False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+    assert phone_intelligence.budget_available("ipqs", "+12025550150", 1, now=100) is False
+
+
+def test_unavailable_budget_store_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIALPAD_PHONE_INTELLIGENCE_CACHE_DB", str(tmp_path / "cache" / "phone.db"))
+
+    def _raise(_path):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(phone_intelligence, "_private_connect", _raise)
 
     assert phone_intelligence.budget_available("ipqs", "+12025550150", 1, now=100) is False
 

@@ -2808,7 +2808,7 @@ def _sanitize_public_evidence(entry, normalized_phone):
     if not isinstance(phone_corroboration, dict):
         phone_corroboration = {}
     matched_phone = _canonical_e164_phone(phone_corroboration.get("normalizedPhone"))
-    matched = bool(phone_corroboration.get("matched") and matched_phone == normalized_phone)
+    matched = bool(phone_corroboration.get("matched") is True and matched_phone == normalized_phone)
     source_type = _compact_context_scalar(entry.get("sourceType"), limit=50)
     domain_or_title = _compact_context_scalar(entry.get("domainOrTitle"), limit=120)
     matched_terms = [

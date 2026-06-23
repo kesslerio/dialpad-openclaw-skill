@@ -307,7 +307,7 @@ def budget_available(kind, token, limit, window_seconds=None, now=None):
             _harden_sidecars(path)
             return True
     except Exception:
-        return True
+        return False
 
 
 def _risk_from_payload(payload):
@@ -375,12 +375,16 @@ def normalize_ipqs_payload(phone, payload):
 
     normalized = normalize_phone(payload.get("formatted") or payload.get("phone") or phone) or normalize_phone(phone)
     risk_level, reasons, active_status, fraud_score, temporary = _risk_from_payload(payload)
+    reasons = list(reasons)
     valid = _bool(payload.get("valid"))
     status = "usable"
     usable = True
-    if valid is False:
+    if valid is not True:
         status = "invalid"
         usable = False
+        risk_level = "high"
+        if "invalid" not in reasons:
+            reasons.append("invalid")
     elif active_status == "inactive":
         status = "inactive"
         usable = False
@@ -443,7 +447,7 @@ def _ipqs_request(phone, api_key, timeout, country_hint, strictness, enhanced_li
     }
     if enhanced_line_check:
         params["enhanced_line_check"] = "true"
-    url = f"{IPQS_ENDPOINT}/{urllib.parse.quote(api_key)}/{urllib.parse.quote(phone)}?{urllib.parse.urlencode(params)}"
+    url = f"{IPQS_ENDPOINT}/{urllib.parse.quote(phone)}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(
         url,
         headers={

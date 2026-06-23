@@ -119,6 +119,35 @@ class BuildCalendarContextTests(unittest.TestCase):
         self.assertIn("(Work)", ctx["summary"])
         attio_query.assert_not_called()
 
+    def test_google_calendar_recent_demo_is_surfaced(self):
+        events = [
+            {
+                "summary": "ShapeScale Demo - Synergy Wellness",
+                "start": {"dateTime": "2026-06-20T17:45:00Z"},
+            }
+        ]
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary"), \
+                patch("subprocess.run", return_value=self.Completed(json.dumps(events))), \
+                patch.object(attio, "_query_records", return_value=[]) as attio_query:
+            ctx = cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T18:00:00Z", now=NOW)
+        self.assertTrue(ctx["usable"])
+        self.assertEqual(ctx["basis"], "google_calendar")
+        self.assertEqual(ctx["startsInMinutes"], 15)
+        self.assertEqual(ctx["demoState"], "recent")
+        self.assertIn("Recent demo", ctx["summary"])
+        attio_query.assert_not_called()
+
+    def test_google_calendar_queries_recent_lookback_window(self):
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary"), \
+                patch("subprocess.run", return_value=self.Completed(json.dumps([]))) as run, \
+                patch.object(attio, "_query_records", return_value=[]):
+            cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T18:00:00Z", now=NOW)
+        args = run.call_args.args[0]
+        self.assertEqual(args[4], "--from")
+        self.assertEqual(args[5], "2026-06-13T18:00:00Z")
+
     def test_google_calendar_checks_sales_team_calendars(self):
         responses = [
             self.Completed(json.dumps([])),
@@ -160,13 +189,37 @@ class BuildCalendarContextTests(unittest.TestCase):
         self.assertEqual(ctx["basis"], "attio")
         self.assertEqual(ctx["startsInMinutes"], 30)
 
+    def test_attio_fallback_strips_email_before_token_search(self):
+        seen = {}
+
+        def _query(_record_type, query, limit=3):
+            seen["token"] = query["name"]["$contains"]
+            return [DEAL]
+
+        with patch.object(attio, "_query_records", side_effect=_query):
+            ctx = cal.build_calendar_context("Jane jane.longlocal@example.test Synergy 2026-06-20T17:00:00Z", now=NOW)
+        self.assertTrue(ctx["usable"])
+        self.assertEqual(ctx["basis"], "attio")
+        self.assertEqual(seen["token"], "Synergy")
+
+    def test_missing_google_calendar_command_reports_not_configured(self):
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", ""), \
+                patch.object(attio, "_query_records", return_value=[]), \
+                patch.dict("os.environ", {}, clear=True):
+            ctx = cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)
+        self.assertFalse(ctx["usable"])
+        self.assertEqual(ctx["status"], "not_configured")
+
     def test_empty_query(self):
         ctx = cal.build_calendar_context("", now=NOW)
         self.assertFalse(ctx["usable"])
         self.assertEqual(ctx["status"], "empty_query")
 
     def test_not_found(self):
-        with patch.object(attio, "_query_records", return_value=[]):
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary"), \
+                patch("subprocess.run", return_value=self.Completed(json.dumps([]))), \
+                patch.object(attio, "_query_records", return_value=[]):
             ctx = cal.build_calendar_context("Nobody Unknown", now=NOW)
         self.assertFalse(ctx["usable"])
         self.assertEqual(ctx["status"], "not_found")

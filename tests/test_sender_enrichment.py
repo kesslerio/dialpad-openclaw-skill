@@ -1457,6 +1457,95 @@ def test_model_draft_fails_closed_on_unsafe_output(monkeypatch):
     assert "scheduled for tomorrow" not in rich_reply["message"]
 
 
+def test_model_draft_omits_low_confidence_crm_facts(monkeypatch):
+    captured = {}
+
+    def _draft_model(_args, **kwargs):
+        captured["facts"] = json.loads(kwargs["input"])
+        return _FakeCompletedProcess(stdout=json.dumps({"message": "Hi there, sorry we missed your call. We'll follow up shortly."}))
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(webhook_server.draft_model.subprocess, "run", _draft_model)
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {
+            "identityConfidence": "medium",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with White House Chiropractic",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(normalized_event)
+
+    assert captured["facts"]["event"]["identityConfidence"] == "medium"
+    assert captured["facts"]["sources"]["crm"] == {}
+    assert "White House Chiropractic" not in json.dumps(captured["facts"])
+    assert rich_reply["basis"] == "model_attio_crm"
+    assert rich_reply["message"].startswith("Hi there")
+
+
+def test_model_draft_rejects_internal_tool_names(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Dr. Chris, based on Attio and CRM, booking may not have gone through."})
+        ),
+    )
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(
+        normalized_event,
+        sender_enrichment={"first_name": "Dr. Chris"},
+    )
+
+    assert rich_reply["basis"] == "attio_crm"
+    assert rich_reply["modelDraft"]["status"] == "unsafe_output"
+    assert "Attio" not in rich_reply["message"]
+    assert "CRM" not in rich_reply["message"]
+
+
 def test_sales_context_lookups_store_only_compact_fields(monkeypatch):
     normalized_event = {
         "event_type": "sms",

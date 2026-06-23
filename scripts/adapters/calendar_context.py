@@ -183,13 +183,14 @@ def _gog_calendar_label(calendar_id):
 
 
 def _gog_events_for_calendar(command, calendar_id, now):
+    start = now - timedelta(minutes=max(0, RECENT_DEMO_LOOKBACK_MINUTES))
     try:
         args = shlex.split(command) + [
             "calendar",
             "events",
             calendar_id,
             "--from",
-            _iso_z(now),
+            _iso_z(start),
             "--to",
             _iso_z(now + timedelta(days=max(1, GOG_LOOKAHEAD_DAYS))),
             "--max",
@@ -224,13 +225,17 @@ def _gog_events_for_calendar(command, calendar_id, now):
 
 
 def gog_next_event(remainder, now=None):
-    """Best-effort: upcoming event from the ShapeScale work calendars, else (None, None)."""
+    """Best-effort: demo event from the ShapeScale work calendars.
+
+    Returns ``(startsInMinutes, summary, demoState, status)``. Recent demos use
+    positive minutes-since-start for parity with the Attio fallback.
+    """
     command = str(GOG_CALENDAR_COMMAND or "").strip()
     if not command:
-        return None, None
+        return None, None, None, "not_configured"
     emails, tokens = _gog_match_terms(remainder)
     if not emails and not tokens:
-        return None, None
+        return None, None, None, "not_found"
     now = now or _now()
 
     best = None
@@ -241,20 +246,26 @@ def gog_next_event(remainder, now=None):
                 continue
             start = _event_start(event)
             sim = starts_in_minutes(start, now=now)
-            if sim is None or sim < 0:
+            if sim is None:
+                continue
+            if sim < 0 and abs(sim) > RECENT_DEMO_LOOKBACK_MINUTES:
                 continue
             score = _gog_event_score(event, emails, tokens)
             if score < 2:
                 continue
-            key = (score, -sim)
+            is_upcoming = 1 if sim >= 0 else 0
+            closeness = -sim if sim >= 0 else sim
+            key = (score, is_upcoming, closeness)
             if best is None or key > best_key:
                 best = (sim, event.get("summary") or "scheduled meeting", _gog_calendar_label(calendar_id))
                 best_key = key
     if best is None:
-        return None, None
+        return None, None, None, "not_found"
     sim, summary, calendar_label = best
     clean_summary = attio._clean(summary) or "scheduled meeting"
-    return sim, f"Upcoming demo: {clean_summary} ({calendar_label})"
+    if sim < 0:
+        return abs(sim), f"Recent demo: {clean_summary} ({calendar_label})", "recent", "ok"
+    return sim, f"Upcoming demo: {clean_summary} ({calendar_label})", "upcoming", "ok"
 
 
 def resolve_attio_demo(remainder, now=None):
@@ -263,7 +274,7 @@ def resolve_attio_demo(remainder, now=None):
     Conservative by design: 0 or multiple name matches → not usable, so the draft
     falls back to generic rather than guessing a meeting time.
     """
-    token = _search_token(remainder)
+    token = _search_token(_EMAIL_RE.sub(" ", str(remainder or "")))
     if not token:
         return None, None, None
     try:
@@ -330,8 +341,7 @@ def build_calendar_context(query, now=None):
         return {"usable": False, "status": "empty_query"}
     remainder = _TIMESTAMP_RE.sub("", raw).strip()
 
-    sim, summary = gog_next_event(remainder, now=now)
-    demo_state = "upcoming" if sim is not None else None
+    sim, summary, demo_state, gog_status = gog_next_event(remainder, now=now)
     basis = "google_calendar"
     if sim is None:
         sim, summary, demo_state, basis = (*resolve_attio_demo(remainder, now=now), "attio")
@@ -343,7 +353,7 @@ def build_calendar_context(query, now=None):
             basis = "calendly"
 
     if sim is None or not summary:
-        return {"usable": False, "status": "not_found"}
+        return {"usable": False, "status": gog_status if gog_status == "not_configured" else "not_found"}
     return {
         "usable": True,
         "status": "ok",

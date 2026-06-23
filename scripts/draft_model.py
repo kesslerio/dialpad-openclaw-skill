@@ -34,6 +34,7 @@ RAW_COMMS_CLAIM_RE = re.compile(
     r"\b(?:i|we)\s+(?:read|saw|found)\s+(?:your\s+)?(?:email|gmail|sms|text)\b",
     re.IGNORECASE,
 )
+INTERNAL_SOURCE_NAME_RE = re.compile(r"\b(?:attio|crm|gmail|qmd|provenance)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def _compact_dict(data, keys):
 
 def _facts(normalized_event, fallback_message, category, payload, greeting, config):
     inbound_context = normalized_event.get("inbound_context") or {}
+    identity_confidence = inbound_context.get("identityConfidence")
     payload = payload if isinstance(payload, dict) else {}
     facts = {
         "task": "draft_operator_reviewed_sales_sms",
@@ -99,7 +101,7 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
             "isMissedCall": _is_missed_call_event(normalized_event),
             "lineDisplay": normalized_event.get("line_display"),
             "customerText": _compact_scalar(normalized_event.get("text"), limit=240),
-            "identityConfidence": inbound_context.get("identityConfidence"),
+            "identityConfidence": identity_confidence,
             "category": category,
         },
         "candidate": _compact_dict(payload, ("basis", "category", "message")),
@@ -108,7 +110,7 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
             "crm": _compact_dict(
                 normalized_event.get("crm_context"),
                 ("company", "deal", "stage", "summary"),
-            ),
+            ) if identity_confidence == "high" else {},
             "calendar": _compact_dict(
                 normalized_event.get("calendar_context"),
                 ("status", "basis", "summary", "demoState"),
@@ -182,6 +184,8 @@ def _safe_message(text, normalized_event, config):
     if not calendar_usable and UNSUPPORTED_SCHEDULE_CLAIM_RE.search(message):
         return None
     if RAW_COMMS_CLAIM_RE.search(message):
+        return None
+    if INTERNAL_SOURCE_NAME_RE.search(message):
         return None
     return message
 

@@ -412,6 +412,47 @@ def resolve_telegram_route(sender_number, recipient_line):
     return None, None
 
 
+def format_telegram_group_route(chat_id, message_thread_id=None):
+    """Format an OpenClaw Telegram group route from chat/topic components."""
+    if chat_id is None:
+        return None
+    resolved_chat_id = str(chat_id).strip()
+    if not resolved_chat_id:
+        return None
+    route = f"telegram:group:{resolved_chat_id}"
+    if message_thread_id is not None and str(message_thread_id).strip():
+        route += f":topic:{str(message_thread_id).strip()}"
+    return route
+
+
+def resolve_openclaw_hook_target(normalized_event):
+    """
+    Resolve the OpenClaw hook delivery target for a Dialpad event.
+
+    Precedence:
+      1. Explicit priority sender route, preserving the existing hook-only behavior.
+      2. Recipient-line Telegram topic route, matching the direct review card topic.
+      3. OPENCLAW_HOOKS_TO fallback.
+    """
+    sender_number_normalized = normalize_phone_number(normalized_event.get("sender_number"))
+    if (
+        DIALPAD_PRIORITY_ROUTE_TO
+        and sender_number_normalized
+        and sender_number_normalized in PRIORITY_ROUTE_PHONES
+    ):
+        return DIALPAD_PRIORITY_ROUTE_TO
+
+    route_chat_id, route_thread_id = resolve_telegram_route(
+        normalized_event.get("sender_number"),
+        normalized_event.get("recipient_number"),
+    )
+    line_target = format_telegram_group_route(route_chat_id, route_thread_id)
+    if line_target:
+        return line_target
+
+    return OPENCLAW_HOOKS_TO
+
+
 def get_line_name(to_number):
     """
     Resolve a Dialpad receiving line number to display text.
@@ -1100,6 +1141,7 @@ def update_telegram_review_after_callback(callback_query, result, draft_id):
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
     message_id = message.get("message_id")
+    message_thread_id = message.get("message_thread_id")
     status = (result or {}).get("status")
 
     if status == "risky_confirmation_required":
@@ -1112,7 +1154,11 @@ def update_telegram_review_after_callback(callback_query, result, draft_id):
     elif (result or {}).get("sent") or status in TELEGRAM_TERMINAL_APPROVAL_STATUSES:
         edit_telegram_message_reply_markup(chat_id, message_id, reply_markup=None)
 
-    return send_to_telegram(build_telegram_callback_status_message(result, draft_id))
+    return send_to_telegram(
+        build_telegram_callback_status_message(result, draft_id),
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+    )
 
 
 def dispatch_telegram_approval_callback(callback_query, parsed_callback):
@@ -3914,14 +3960,7 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
         "deliver": True,
     }
 
-    sender_number_normalized = normalize_phone_number(normalized_event.get("sender_number"))
-    target_to = OPENCLAW_HOOKS_TO
-    if (
-        DIALPAD_PRIORITY_ROUTE_TO
-        and sender_number_normalized
-        and sender_number_normalized in PRIORITY_ROUTE_PHONES
-    ):
-        target_to = DIALPAD_PRIORITY_ROUTE_TO
+    target_to = resolve_openclaw_hook_target(normalized_event)
 
     if OPENCLAW_HOOKS_CHANNEL:
         payload["channel"] = OPENCLAW_HOOKS_CHANNEL

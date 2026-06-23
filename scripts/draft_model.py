@@ -43,7 +43,7 @@ RAW_COMMS_CLAIM_RE = re.compile(
 INTERNAL_SOURCE_NAME_RE = re.compile(r"\b(?:attio|crm|gmail|qmd|provenance)\b", re.IGNORECASE)
 LOW_CONF_PERSONAL_GREETING_RE = re.compile(r"^\s*(?:hi|hello|hey)\s+(?!there\b)[^,!.]{2,40}[,!.]?", re.IGNORECASE)
 PUBLIC_LOOKUP_CLAIM_RE = re.compile(
-    r"\b(?:looked you up|found you online|saw your business|your company|your organization|your role)\b",
+    r"\b(?:looked you up|found you online|found your business|saw your business|your business|your company|your organization|your role)\b",
     re.IGNORECASE,
 )
 

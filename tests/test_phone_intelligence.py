@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import stat
 import sys
 from pathlib import Path
@@ -36,6 +37,8 @@ def test_valid_active_wireless_number_normalizes_fields(monkeypatch, tmp_path):
     def fake_urlopen(req, timeout):
         assert req.headers["Ipqs-key"] == "secret-test-key"
         assert "secret-test-key" not in req.full_url
+        assert "/secret-test-key/" not in req.full_url
+        assert "phone=%2B12025550142" in req.full_url
         return _FakeResponse({
             "success": True,
             "valid": True,
@@ -164,6 +167,28 @@ def test_cache_hit_avoids_provider_and_policy_version_invalidates(monkeypatch, t
     assert len(calls) == 2
 
 
+def test_cache_read_purges_expired_rows(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    db_path = Path(os.environ["DIALPAD_PHONE_INTELLIGENCE_CACHE_DB"])
+    with phone_intelligence._private_connect(db_path) as conn:
+        phone_intelligence._init_cache(conn)
+        conn.execute(
+            """
+            INSERT INTO phone_intelligence_cache
+            (phone, policy_version, created_at, expires_at, payload)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("+12025550149", "expired-policy", 1, 10, json.dumps({"status": "usable"})),
+        )
+        conn.commit()
+
+    assert phone_intelligence._cache_get("+12025550149", "expired-policy", now=100) is None
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM phone_intelligence_cache").fetchone()[0]
+    assert count == 0
+
+
 def test_cache_files_are_private(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
     monkeypatch.setattr(
@@ -238,6 +263,23 @@ def test_unavailable_budget_store_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(phone_intelligence, "_private_connect", _raise)
 
     assert phone_intelligence.budget_available("ipqs", "+12025550150", 1, now=100) is False
+
+
+def test_http_rate_limit_maps_to_rate_limited(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+
+    def _raise_429(_req, timeout):
+        raise phone_intelligence.urllib.error.HTTPError(
+            url="https://ipqs.example.test",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(phone_intelligence.urllib.request, "urlopen", _raise_429)
+
+    assert phone_intelligence.lookup_phone_intelligence("+12025550152", now=100)["status"] == "rate_limited"
 
 
 def test_missing_secret_and_invalid_input_fail_closed(monkeypatch):

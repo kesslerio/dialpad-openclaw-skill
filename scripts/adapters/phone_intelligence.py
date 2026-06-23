@@ -176,7 +176,7 @@ def lookup_policy_version(country_hint=None, strictness=None, enhanced_line_chec
     return "|".join((IPQS_ENDPOINT, f"strict={strict}", f"country={country}", f"enhanced={enhanced}", RISK_POLICY_VERSION))
 
 
-def _cache_payload_get(select_sql, params, policy_version, now=None):
+def _cache_payload_get(select_sql, delete_sql, params, policy_version, now=None):
     path = cache_db_path()
     if not path:
         return None
@@ -184,6 +184,7 @@ def _cache_payload_get(select_sql, params, policy_version, now=None):
     try:
         with _private_connect(path) as conn:
             _init_cache(conn)
+            conn.execute(delete_sql, (now,))
             row = conn.execute(select_sql, (*params, now)).fetchone()
             conn.commit()
             if not row:
@@ -224,6 +225,7 @@ def _cache_get(phone, policy_version, now=None):
         SELECT payload FROM phone_intelligence_cache
         WHERE phone = ? AND policy_version = ? AND expires_at > ?
         """,
+        "DELETE FROM phone_intelligence_cache WHERE expires_at <= ?",
         (phone, policy_version),
         policy_version,
         now=now,
@@ -252,6 +254,7 @@ def cache_json_get(namespace, cache_key, policy_version, now=None):
         SELECT payload FROM phone_intelligence_json_cache
         WHERE namespace = ? AND cache_key = ? AND policy_version = ? AND expires_at > ?
         """,
+        "DELETE FROM phone_intelligence_json_cache WHERE expires_at <= ?",
         (namespace, cache_key, policy_version),
         policy_version,
         now=now,
@@ -447,7 +450,8 @@ def _ipqs_request(phone, api_key, timeout, country_hint, strictness, enhanced_li
     }
     if enhanced_line_check:
         params["enhanced_line_check"] = "true"
-    url = f"{IPQS_ENDPOINT}/{urllib.parse.quote(phone)}?{urllib.parse.urlencode(params)}"
+    params["phone"] = phone
+    url = f"{IPQS_ENDPOINT}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(
         url,
         headers={
@@ -486,11 +490,15 @@ def lookup_phone_intelligence(phone, *, now=None):
         payload = _ipqs_request(normalized, api_key, timeout, country_hint, strictness, enhanced)
     except TimeoutError:
         return degraded("timeout", phone=normalized)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            return degraded("rate_limited", phone=normalized)
+        return degraded("unavailable", phone=normalized)
     except urllib.error.URLError as exc:
         if isinstance(getattr(exc, "reason", None), TimeoutError):
             return degraded("timeout", phone=normalized)
         return degraded("unavailable", phone=normalized)
-    except (ValueError, OSError, urllib.error.HTTPError):
+    except (ValueError, OSError):
         return degraded("unavailable", phone=normalized)
 
     result = normalize_ipqs_payload(normalized, payload)

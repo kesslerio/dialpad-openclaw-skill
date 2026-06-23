@@ -693,6 +693,23 @@ def test_draft_model_redacts_low_confidence_public_prospect_summary():
     assert facts["sources"]["callerIntelligence"]["risk"] == {}
 
 
+def test_draft_model_rejects_low_confidence_business_claims():
+    event = _unknown_sales_event()
+
+    assert draft_model._safe_message(
+        "Hi there, I found your business online and can help.",
+        event,
+        draft_model.DraftModelConfig(),
+        "there",
+    ) is None
+    assert draft_model._safe_message(
+        "Hi there, your business looks like a good fit.",
+        event,
+        draft_model.DraftModelConfig(),
+        "there",
+    ) is None
+
+
 def test_contact_sync_omits_public_summary_from_suggested_contact(monkeypatch):
     event = _unknown_sales_event()
     event["caller_intelligence"] = {

@@ -171,6 +171,57 @@ class BuildCalendarContextTests(unittest.TestCase):
         queried_calendars = [call.args[0][3] for call in run.call_args_list]
         self.assertEqual(queried_calendars, ["primary", "alex@shapescale.com", "lilla@shapescale.com"])
 
+    def test_google_calendar_availability_returns_compact_windows(self):
+        responses = [
+            self.Completed(json.dumps([
+                {
+                    "summary": "Busy internal block",
+                    "start": {"dateTime": "2026-06-20T18:00:00Z"},
+                    "end": {"dateTime": "2026-06-20T19:00:00Z"},
+                    "description": "private notes must not leak",
+                }
+            ])),
+            self.Completed(json.dumps([
+                {
+                    "summary": "Busy Alex block",
+                    "start": {"dateTime": "2026-06-20T19:00:00Z"},
+                    "end": {"dateTime": "2026-06-20T20:00:00Z"},
+                }
+            ])),
+            self.Completed(json.dumps([])),
+        ]
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary,alex@shapescale.com,lilla@shapescale.com"), \
+                patch.object(cal, "AVAILABILITY_WORKDAY_END_HOUR", 21), \
+                patch("subprocess.run", side_effect=responses):
+            ctx = cal.build_calendar_context("intent:availability Do you have anything today? Natalie Embody 2026-06-20T18:00:00Z", now=NOW)
+        self.assertTrue(ctx["usable"])
+        self.assertEqual(ctx["basis"], "google_calendar_availability")
+        self.assertEqual(ctx["intent"], "availability")
+        self.assertTrue(ctx["candidateWindows"])
+        self.assertIn("Candidate windows:", ctx["summary"])
+        self.assertNotIn("private notes", json.dumps(ctx).lower())
+
+    def test_google_calendar_availability_missing_command_reports_not_configured(self):
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", ""):
+            ctx = cal.build_calendar_context("intent:availability anything today", now=NOW)
+        self.assertFalse(ctx["usable"])
+        self.assertEqual(ctx["status"], "not_configured")
+        self.assertEqual(ctx["intent"], "availability")
+
+    def test_google_calendar_availability_uses_safe_label_for_unknown_calendar(self):
+        responses = [
+            self.Completed(json.dumps([])),
+        ]
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "private-sales-calendar@example.test"), \
+                patch.object(cal, "AVAILABILITY_WORKDAY_END_HOUR", 21), \
+                patch("subprocess.run", side_effect=responses):
+            ctx = cal.build_calendar_context("intent:availability anything today", now=NOW)
+        self.assertTrue(ctx["usable"])
+        self.assertIn("Team", ctx["summary"])
+        self.assertNotIn("private-sales-calendar", json.dumps(ctx))
+
     def test_google_calendar_weak_match_falls_through_to_attio(self):
         events = [{"summary": "Unrelated Demo", "start": {"dateTime": "2026-06-20T18:15:00Z"}}]
         with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \

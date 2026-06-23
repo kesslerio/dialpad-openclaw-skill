@@ -983,6 +983,56 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(telegram_requests[0]["chat_id"], "-1003882776023")
         self.assertEqual(telegram_requests[0]["message_thread_id"], "3537")
 
+    def test_missed_call_same_target_local_success_makes_hook_context_only(self):
+        hook_payloads = []
+
+        routes = webhook_server.parse_line_topic_routes(
+            json.dumps({"+14159065785": "telegram:group:-1003882776023:topic:3537"})
+        )
+
+        def fake_hook(normalized_event, line_display=None):
+            hook_payloads.append(webhook_server.build_openclaw_hook_payload(normalized_event, line_display=line_display))
+            return True, "http_200"
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", False), \
+                patch.object(webhook_server, "LINE_TOPIC_ROUTES", routes), \
+                patch.object(webhook_server, "PRIORITY_ROUTE_PHONES", set()), \
+                patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CHANNEL", ""), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TO", ""), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100default"), \
+                patch.object(webhook_server, "send_to_telegram", return_value=True), \
+                patch.object(webhook_server, "send_to_openclaw_hooks", side_effect=fake_hook), \
+                patch.object(webhook_server, "_fetch_recent_calls_around", return_value=[]), \
+                patch.object(
+                    webhook_server,
+                    "lookup_contact_enrichment",
+                    return_value={
+                        "contact_name": None,
+                        "status": "not_found",
+                        "degraded": False,
+                        "degraded_reason": None,
+                    },
+                ):
+            payload = {
+                "direction": "inbound",
+                "call_direction": "inbound",
+                "call_missed": True,
+                "call_id": "call-line-topic-context-only",
+                "from_number": "+14155550123",
+                "to_number": ["+14159065785"],
+                "date_started": 1760000000000,
+            }
+            handler, status = _build_handler(payload)
+            webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
+
+        self.assertEqual(status["code"], 200)
+        self.assertEqual(hook_payloads[0]["deliver"], False)
+        self.assertEqual(hook_payloads[0]["operatorNotification"]["hookDelivery"], "context_only")
+
     def test_missed_call_unknown_line_uses_default_chat_no_topic(self):
         """End-to-end: an unconfigured line falls back to the default chat, no topic."""
         telegram_requests = []

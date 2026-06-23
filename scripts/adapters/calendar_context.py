@@ -59,6 +59,9 @@ GOG_CALENDAR_ACCOUNT = os.environ.get("DIALPAD_GOG_CALENDAR_ACCOUNT", "martin@sh
 GOG_CALENDAR_ID = os.environ.get("DIALPAD_GOG_CALENDAR_ID", "primary")
 GOG_CALENDAR_IDS = os.environ.get("DIALPAD_GOG_CALENDAR_IDS", DEFAULT_GOG_CALENDAR_IDS)
 GOG_CALENDAR_MAX_RESULTS = parse_int_env("DIALPAD_GOG_CALENDAR_MAX_RESULTS", 250)
+AVAILABILITY_MIN_WINDOW_MINUTES = parse_int_env("DIALPAD_AVAILABILITY_MIN_WINDOW_MINUTES", 30)
+AVAILABILITY_WORKDAY_START_HOUR = parse_int_env("DIALPAD_AVAILABILITY_WORKDAY_START_HOUR", 9)
+AVAILABILITY_WORKDAY_END_HOUR = parse_int_env("DIALPAD_AVAILABILITY_WORKDAY_END_HOUR", 17)
 
 # Trailing timestamp the webhook appends (ISO 8601 or unix epoch).
 _TIMESTAMP_RE = re.compile(r"\s*(?:\d{4}-\d{2}-\d{2}[T ]\S+|\b\d{10}\b)\s*$")
@@ -130,6 +133,13 @@ def _event_start(event):
     return parse_iso(start)
 
 
+def _event_end(event):
+    end = (event or {}).get("end")
+    if isinstance(end, dict):
+        return parse_iso(end.get("dateTime") or end.get("date"))
+    return parse_iso(end)
+
+
 def _event_match_text(event):
     pieces = [
         event.get("summary"),
@@ -182,11 +192,12 @@ def _gog_calendar_label(calendar_id):
         return "Alex"
     if calendar_id == "lilla@shapescale.com":
         return "Lilla"
-    return calendar_id
+    return "Team"
 
 
-def _gog_events_for_calendar(command, calendar_id, now):
-    start = now - timedelta(minutes=max(0, RECENT_DEMO_LOOKBACK_MINUTES))
+def _gog_events_for_calendar(command, calendar_id, now, start=None, end=None):
+    start = start or (now - timedelta(minutes=max(0, RECENT_DEMO_LOOKBACK_MINUTES)))
+    end = end or (now + timedelta(days=max(1, GOG_LOOKAHEAD_DAYS)))
     try:
         args = shlex.split(command) + [
             "calendar",
@@ -195,7 +206,7 @@ def _gog_events_for_calendar(command, calendar_id, now):
             "--from",
             _iso_z(start),
             "--to",
-            _iso_z(now + timedelta(days=max(1, GOG_LOOKAHEAD_DAYS))),
+            _iso_z(end),
             "--max",
             str(max(1, GOG_CALENDAR_MAX_RESULTS)),
             "--account",
@@ -282,6 +293,111 @@ def gog_next_event(remainder, now=None):
     return sim, f"Upcoming demo: {clean_summary} ({calendar_label})", "upcoming", "ok"
 
 
+def _availability_requested(raw):
+    return "intent:availability" in str(raw or "").lower()
+
+
+def _availability_day(raw, now):
+    text = str(raw or "").lower()
+    if "tomorrow" in text:
+        return (now + timedelta(days=1)).date()
+    return now.date()
+
+
+def _availability_workday_bounds(day, now):
+    tz = now.tzinfo or timezone.utc
+    return (
+        datetime(day.year, day.month, day.day, AVAILABILITY_WORKDAY_START_HOUR, 0, tzinfo=tz),
+        datetime(day.year, day.month, day.day, AVAILABILITY_WORKDAY_END_HOUR, 0, tzinfo=tz),
+    )
+
+
+def _format_window_time(dt):
+    return dt.astimezone(timezone.utc).strftime("%-I:%M %p UTC")
+
+
+def _merge_busy_windows(windows):
+    merged = []
+    for start, end in sorted(windows):
+        if end <= start:
+            continue
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        elif end > merged[-1][1]:
+            merged[-1][1] = end
+    return [(start, end) for start, end in merged]
+
+
+def _free_windows_for_calendar(events, day, now):
+    tz = now.tzinfo or timezone.utc
+    work_start, work_end = _availability_workday_bounds(day, now)
+    if day == now.date() and now > work_start:
+        minute = 30 if now.minute < 30 else 60
+        work_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=minute)
+    if work_start >= work_end:
+        return []
+
+    busy = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        start = _event_start(event)
+        end = _event_end(event)
+        if start is None or end is None:
+            continue
+        start = max(start.astimezone(tz), work_start)
+        end = min(end.astimezone(tz), work_end)
+        if end > start:
+            busy.append((start, end))
+
+    free = []
+    cursor = work_start
+    for start, end in _merge_busy_windows(busy):
+        if (start - cursor).total_seconds() >= AVAILABILITY_MIN_WINDOW_MINUTES * 60:
+            free.append((cursor, start))
+        if end > cursor:
+            cursor = end
+    if (work_end - cursor).total_seconds() >= AVAILABILITY_MIN_WINDOW_MINUTES * 60:
+        free.append((cursor, work_end))
+    return free
+
+
+def gog_availability_windows(raw, now=None):
+    command = str(GOG_CALENDAR_COMMAND or "").strip()
+    if not command:
+        return {"usable": False, "status": "not_configured", "intent": "availability"}
+    now = now or _now()
+    day = _availability_day(raw, now)
+    query_start, query_end = _availability_workday_bounds(day, now)
+    candidates = []
+    failure_status = None
+    for calendar_id in _gog_calendar_ids():
+        status, events = _gog_events_for_calendar(command, calendar_id, now, start=query_start, end=query_end)
+        if status != "ok":
+            failure_status = failure_status or status
+            continue
+        label = _gog_calendar_label(calendar_id)
+        for start, end in _free_windows_for_calendar(events, day, now):
+            candidates.append({
+                "calendar": label,
+                "start": _iso_z(start),
+                "end": _iso_z(end),
+                "label": f"{label} {_format_window_time(start)}-{_format_window_time(end)}",
+            })
+    if not candidates:
+        return {"usable": False, "status": failure_status or "not_found", "intent": "availability"}
+    candidates = sorted(candidates, key=lambda item: (item["start"], item["calendar"]))[:3]
+    labels = [item["label"] for item in candidates]
+    return {
+        "usable": True,
+        "status": "ok",
+        "basis": "google_calendar_availability",
+        "intent": "availability",
+        "summary": "Candidate windows: " + "; ".join(labels),
+        "candidateWindows": candidates,
+    }
+
+
 def resolve_attio_demo(remainder, now=None):
     """Return (startsInMinutes, summary, demoState) from one confident Attio deal match.
 
@@ -354,6 +470,8 @@ def build_calendar_context(query, now=None):
     if not raw:
         return {"usable": False, "status": "empty_query"}
     remainder = _TIMESTAMP_RE.sub("", raw).strip()
+    if _availability_requested(raw):
+        return gog_availability_windows(raw, now=now)
 
     sim, summary, demo_state, gog_status = gog_next_event(remainder, now=now)
     basis = "google_calendar"

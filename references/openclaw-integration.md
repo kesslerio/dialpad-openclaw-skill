@@ -64,6 +64,7 @@ export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
 export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 export OPENCLAW_HOOKS_SMS_ENABLED="0"
 export OPENCLAW_HOOKS_CALL_ENABLED="0"
+export DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY="0"
 export DIALPAD_AUTO_REPLY_ENABLED="0"
 export DIALPAD_SMS_APPROVAL_DB="/home/art/clawd/logs/sms_approvals.db"
 export DIALPAD_SMS_APPROVAL_TOKEN="operator-only-random-token"
@@ -74,9 +75,12 @@ export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 Behavior:
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS forwarding still requires `OPENCLAW_HOOKS_SMS_ENABLED=1`
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding still requires `OPENCLAW_HOOKS_CALL_ENABLED=1`
+- when OpenClaw hook delivery and the local Dialpad Telegram card resolve to the same Telegram target, the local card owns the visible operator notification by default; the hook request carries structured context with `deliver=false` and `operatorNotification.hookDelivery=context_only`
+- set `DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY=1` only for intentional same-target fanout; a different hook target or Telegram topic remains independently deliverable
 - when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, eligible first-contact messages on the sales line `(415) 520-1316` create exact-text approval drafts instead of sending SMS directly, even when identity is low-confidence and the draft must stay generic
 - eligible Sales SMS may create ShapeScale knowledge-backed approval drafts for obvious product, booking, link, and pricing questions; recent Dialpad SMS history resolves active-thread references, qmd-backed ShapeScale knowledge supplies factual answers, customer-facing SMS text stays citation-free, and unavailable or ambiguous knowledge fails closed to existing generic, no-draft, or human-only behavior
-- high-confidence fresh Sales SMS may create CRM-aware approval drafts from compact Attio context; targeted calendar lookup is only for obvious meeting logistics such as lateness, joining, rescheduling, or meeting links, and ambiguous CRM/calendar context fails closed without unsupported claims
+- high-confidence fresh Sales SMS may create CRM-aware approval drafts from compact Attio context; targeted calendar lookup is only for obvious meeting logistics such as lateness, joining, rescheduling, meeting links, and demo-prospect availability requests, and ambiguous CRM/calendar context fails closed without unsupported claims
+- availability requests such as "Do you have anything today?" use calendar-aware approval drafts when bounded candidate windows are available; when availability cannot be verified, generic CRM follow-up copy is suppressed so the hook path does not create a competing scheduling suggestion
 - voicemail remains Telegram-only for OpenClaw fan-out, but first-contact sales-line voicemails can create SMS approval drafts when draft creation is enabled
 - explicit opt-out language creates no draft, invalidates pending drafts for that customer, and emits only a human-only Telegram notice
 - CLI approval is disabled unless `DIALPAD_SMS_APPROVAL_TOKEN` is configured and supplied by the operator approval surface
@@ -136,6 +140,8 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
 - `firstContact`
 - `inboundContext`
 - `autoReply`
+- `operatorNotification`
+- `recommendationOwner`
 
 ### First-Contact Assist Hint
 
@@ -173,6 +179,9 @@ Interpretation:
 - if the evidence is only first name, area code, industry, or job title, keep the lead ambiguous and draft-only until stronger proof appears
 - if `keepBrief` is `true`, skip the long background pass and stay short
 - if `autoReply` is present, treat it as approval-draft metadata. `sent: false` means the webhook created or attempted a draft and downstream automation must not send the same reply directly.
+- if `recommendationOwner.canonical` is true, the Dialpad approval draft or human-needed scheduling decision is the canonical suggested SMS outcome; downstream automation may summarize context but must not create another suggested SMS for the same inbound event.
+- if `recommendationOwner.allowDownstreamSuggestion` is false, do not draft another SMS suggestion for the same inbound event.
+- if `operatorNotification.hookDelivery` is `context_only`, the hook is not the operator-visible owner for this Telegram target; do not post a second same-target operator notification.
 - if `autoReply.replyPolicy.state` is `risky`, the approval path must require a second confirmation.
 - if opt-out language is detected, the event is not forwarded as a normal hook payload; automation must remain human-only.
 

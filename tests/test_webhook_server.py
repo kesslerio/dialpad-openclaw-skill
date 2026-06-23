@@ -20,6 +20,7 @@ from webhook_server import (
     detect_reliable_missed_call_hint,
     extract_message_text,
     is_sensitive_message,
+    normalize_call_hook_payload,
     resolve_missed_call_context,
 )
 
@@ -490,6 +491,21 @@ class LineTopicRoutingTests(unittest.TestCase):
 
 
 class MissedCallResolutionTests(unittest.TestCase):
+    def test_call_payload_text_falls_back_to_transcript_when_text_is_blank(self):
+        normalized = normalize_call_hook_payload(
+            {
+                "text": "   ",
+                "transcription": "STOP texting me.",
+                "call_id": "call-123",
+            },
+            {
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "event_ts_ms": 1760000000000,
+            },
+        )
+        self.assertEqual(normalized["text"], "STOP texting me.")
+
     def test_sparse_payload_nested_key_resolution(self):
         payload = {
             "event": {
@@ -1017,11 +1033,23 @@ class CallWebhookHandlerTests(unittest.TestCase):
         hook_calls = []
         telegram_messages = []
         sms_calls = []
+        crm_payload = {
+            "usable": True,
+            "basis": "attio",
+            "summary": "Acme Corp Demo Booked",
+            "company": "Acme Corp",
+            "stage": "Demo Booked",
+            "deal": "Acme",
+            "owner": None,
+        }
+        calendar_payload = {"usable": False, "status": "not_found"}
 
         with tempfile.TemporaryDirectory() as temp_dir, \
                 patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "DIALPAD_CRM_CONTEXT_COMMAND", "crm"), \
+                patch.object(webhook_server, "_run_context_command", side_effect=[crm_payload, calendar_payload]), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
                 patch.object(
@@ -1088,14 +1116,10 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertFalse(hook_calls[0]["normalized_event"]["auto_reply"]["sent"])
         self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
         self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftId"])
+        self.assertIsInstance(hook_calls[0]["normalized_event"]["auto_reply"].get("richReply"), dict)
+        self.assertEqual(hook_calls[0]["normalized_event"]["auto_reply"]["richReply"]["basis"], "attio_crm")
         self.assertEqual(len(telegram_messages), 1)
-        self.assertTrue(response["missed_call"])
-        self.assertTrue(response["hook_forwarded"])
-        self.assertEqual(response["hook_status"], "http_200")
-        self.assertTrue(response["telegram_sent"])
-        self.assertFalse(response["auto_reply_sent"])
-        self.assertEqual(response["auto_reply_status"], "draft_created")
-        self.assertTrue(response["auto_reply_draft_id"])
+        self.assertEqual(response["processing"], "async")
 
     def test_missed_call_child_duplicate_skips_side_effects(self):
         hook_calls = []
@@ -1158,12 +1182,10 @@ class CallWebhookHandlerTests(unittest.TestCase):
         second_response = json.loads(second_handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(first_status["code"], 200)
         self.assertEqual(second_status["code"], 200)
-        self.assertFalse(first_response["duplicate"])
-        self.assertTrue(second_response["duplicate"])
+        self.assertEqual(first_response["processing"], "async")
+        self.assertEqual(second_response["processing"], "duplicate")
         self.assertEqual(len(hook_calls), 1)
         self.assertEqual(len(telegram_messages), 1)
-        self.assertFalse(second_response["telegram_sent"])
-        self.assertIsNone(second_response["auto_reply_draft_id"])
 
     def test_missed_call_two_child_events_share_entry_point_dedupe(self):
         hook_calls = []
@@ -1219,8 +1241,8 @@ class CallWebhookHandlerTests(unittest.TestCase):
         second_response = json.loads(second_handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(first_status["code"], 200)
         self.assertEqual(second_status["code"], 200)
-        self.assertFalse(first_response["duplicate"])
-        self.assertTrue(second_response["duplicate"])
+        self.assertEqual(first_response["processing"], "async")
+        self.assertEqual(second_response["processing"], "duplicate")
         self.assertEqual(len(hook_calls), 1)
         self.assertEqual(len(telegram_messages), 1)
 
@@ -1262,8 +1284,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
 
         response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
-        self.assertFalse(response["duplicate"])
-        self.assertTrue(response["telegram_sent"])
+        self.assertEqual(response["processing"], "async")
         self.assertEqual(len(telegram_messages), 1)
 
     def test_inbound_missed_call_respects_disabled_hook_config(self):
@@ -1298,13 +1319,8 @@ class CallWebhookHandlerTests(unittest.TestCase):
             handler, status = _build_handler(payload)
             webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
 
-        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
         self.assertEqual(len(telegram_messages), 1)
-        self.assertTrue(response["missed_call"])
-        self.assertFalse(response["hook_forwarded"])
-        self.assertEqual(response["hook_status"], "disabled_by_config")
-        self.assertTrue(response["telegram_sent"])
 
     def test_inbound_missed_call_hook_failure_keeps_webhook_200(self):
         telegram_messages = []
@@ -1343,12 +1359,8 @@ class CallWebhookHandlerTests(unittest.TestCase):
             handler, status = _build_handler(payload)
             webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
 
-        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
-        self.assertTrue(response["missed_call"])
-        self.assertFalse(response["hook_forwarded"])
-        self.assertEqual(response["hook_status"], "request_failed")
-        self.assertTrue(response["telegram_sent"])
+        self.assertEqual(len(telegram_messages), 1)
 
     def test_inbound_missed_call_token_missing_keeps_webhook_200(self):
         telegram_messages = []
@@ -1382,12 +1394,8 @@ class CallWebhookHandlerTests(unittest.TestCase):
             handler, status = _build_handler(payload)
             webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
 
-        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
-        self.assertTrue(response["missed_call"])
-        self.assertFalse(response["hook_forwarded"])
-        self.assertEqual(response["hook_status"], "token_missing")
-        self.assertTrue(response["telegram_sent"])
+        self.assertEqual(len(telegram_messages), 1)
 
     def test_outbound_call_does_not_forward_hook_or_telegram(self):
         hook_calls = []
@@ -1473,6 +1481,16 @@ class CallWebhookHandlerTests(unittest.TestCase):
         telegram_messages = []
         sms_calls = []
         event_ts = 1760000000000
+        crm_payload = {
+            "usable": True,
+            "basis": "attio",
+            "summary": "Acme Corp Demo Booked",
+            "company": "Acme Corp",
+            "stage": "Demo Booked",
+            "deal": "Acme",
+            "owner": None,
+        }
+        calendar_payload = {"usable": False, "status": "not_found"}
         recent_call = {
             "external_number": "+14322083277",
             "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
@@ -1486,6 +1504,8 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "DIALPAD_CRM_CONTEXT_COMMAND", "crm"), \
+                patch.object(webhook_server, "_run_context_command", side_effect=[crm_payload, calendar_payload]), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
                 patch.object(
@@ -1533,7 +1553,6 @@ class CallWebhookHandlerTests(unittest.TestCase):
             handler, status = _build_handler(payload)
             webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
 
-        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         inbound_context = hook_calls[0]["normalized_event"]["inbound_context"]
         self.assertEqual(status["code"], 200)
         self.assertEqual(sms_calls, [])
@@ -1542,8 +1561,9 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(inbound_context["recency"]["state"], "fresh")
         self.assertTrue(inbound_context["contextDraftAllowed"])
         self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
-        self.assertEqual(response["auto_reply_status"], "draft_created")
-        self.assertTrue(response["auto_reply_draft_id"])
+        self.assertEqual(hook_calls[0]["normalized_event"]["auto_reply"]["status"], "draft_created")
+        self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftId"])
+        self.assertEqual(hook_calls[0]["normalized_event"]["auto_reply"]["richReply"]["basis"], "attio_crm")
         self.assertIn("Inbound context", telegram_messages[0])
         self.assertIn("Ann Harper", telegram_messages[0])
         self.assertIn("SMS approval draft", telegram_messages[0])
@@ -1607,14 +1627,13 @@ class CallWebhookHandlerTests(unittest.TestCase):
             handler, status = _build_handler(payload)
             webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
 
-        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         inbound_context = hook_calls[0]["normalized_event"]["inbound_context"]
         self.assertEqual(status["code"], 200)
         self.assertEqual(inbound_context["recency"]["state"], "stale")
         self.assertFalse(inbound_context["contextDraftAllowed"])
         self.assertFalse(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
-        self.assertEqual(response["auto_reply_status"], "not_eligible")
-        self.assertIsNone(response["auto_reply_draft_id"])
+        self.assertEqual(hook_calls[0]["normalized_event"]["auto_reply"]["status"], "not_eligible")
+        self.assertIsNone(hook_calls[0]["normalized_event"]["auto_reply"]["draftId"])
         self.assertIn("Inbound context", telegram_messages[0])
         self.assertNotIn("SMS approval draft", telegram_messages[0])
 
@@ -1678,7 +1697,6 @@ class CallWebhookHandlerTests(unittest.TestCase):
             handler, status = _build_handler(payload)
             webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
 
-        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         first_contact = hook_calls[0]["normalized_event"]["first_contact"]
         inbound_context = hook_calls[0]["normalized_event"]["inbound_context"]
         self.assertEqual(status["code"], 200)
@@ -1690,13 +1708,14 @@ class CallWebhookHandlerTests(unittest.TestCase):
         self.assertTrue(inbound_context["genericDraftAllowed"])
         self.assertEqual(inbound_context["draftMode"], "deterministic_fallback")
         self.assertNotIn("exact_phone_match", inbound_context["evidence"])
-        self.assertEqual(response["auto_reply_status"], "draft_created")
-        self.assertTrue(response["auto_reply_draft_id"])
+        self.assertEqual(hook_calls[0]["normalized_event"]["auto_reply"]["status"], "draft_created")
+        self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftId"])
         self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["draftCreated"])
         self.assertTrue(hook_calls[0]["normalized_event"]["auto_reply"]["message"].startswith("Hi there,"))
         self.assertNotIn("Payload Person", hook_calls[0]["normalized_event"]["auto_reply"]["message"])
         self.assertIn("Inbound context", telegram_messages[0])
         self.assertIn("approval draft created (generic fallback)", telegram_messages[0])
+        self.assertIn("CRM: not configured; Calendar: not applicable; QMD: not applicable", telegram_messages[0])
         self.assertIn("SMS approval draft", telegram_messages[0])
 
 

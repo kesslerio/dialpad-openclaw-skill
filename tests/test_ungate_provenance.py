@@ -25,8 +25,9 @@ class GateRelaxationTests(unittest.TestCase):
         self.assertTrue(ws._sales_context_draft_allowed({"event_type": "sms"}))
         self.assertTrue(ws._sales_context_draft_allowed({}))  # defaults to sms
 
-    def test_rejects_non_sms(self):
-        self.assertFalse(ws._sales_context_draft_allowed({"event_type": "missed_call"}))
+    def test_allows_missed_call(self):
+        self.assertTrue(ws._sales_context_draft_allowed({"event_type": "missed_call"}))
+        self.assertFalse(ws._sales_context_draft_allowed({"event_type": "voicemail"}))
 
 
 class UngatedLookupTests(unittest.TestCase):
@@ -43,6 +44,55 @@ class UngatedLookupTests(unittest.TestCase):
             ctx = ws.lookup_sales_crm_context(event, sender_enrichment={"contact_name": "Jane", "company": "Acme"})
         self.assertTrue(ctx["usable"])
         self.assertEqual(ctx["company"], "Acme Corp")
+
+    def test_missed_call_crm_context_builds_call_specific_rich_reply(self):
+        event = {
+            "event_type": "missed_call",
+            "sender_number": "+14155550123",
+            "text": "",
+            "inbound_context": {"identityConfidence": "high"},
+        }
+        crm_payload = {
+            "usable": True,
+            "basis": "attio",
+            "summary": "Acme Corp Manual Review",
+            "company": "Acme Corp",
+            "stage": "Manual Review",
+            "deal": "Acme",
+            "owner": None,
+        }
+        with patch.object(ws, "_run_context_command", side_effect=[crm_payload]):
+            rich = ws.build_rich_sms_reply(event, sender_enrichment={"first_name": "Jane"})
+        self.assertTrue(rich["usable"])
+        self.assertEqual(rich["basis"], "attio_crm")
+        self.assertIn("sorry we missed your call", rich["message"])
+        self.assertNotIn("texted", rich["message"])
+
+    def test_missed_call_calendar_miss_preserves_crm_draft(self):
+        event = {
+            "event_type": "missed_call",
+            "sender_number": "+14155550123",
+            "text": "",
+            "inbound_context": {
+                "identityConfidence": "high",
+                "contextDraftAllowed": True,
+            },
+        }
+        crm_payload = {
+            "usable": True,
+            "basis": "attio",
+            "summary": "Acme Corp Demo Booked",
+            "company": "Acme Corp",
+            "stage": "Demo Booked",
+            "deal": "Acme",
+            "owner": None,
+        }
+        calendar_payload = {"usable": False, "status": "not_found"}
+        with patch.object(ws, "_run_context_command", side_effect=[crm_payload, calendar_payload]):
+            rich = ws.build_rich_sms_reply(event, sender_enrichment={"first_name": "Jane"})
+        self.assertTrue(rich["usable"])
+        self.assertEqual(rich["basis"], "attio_crm")
+        self.assertEqual(event["calendar_context"]["status"], "not_found")
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -81,6 +131,41 @@ class ProvenanceTests(unittest.TestCase):
         # context; it must not also show as "QMD knowledge".
         ev = {"rich_reply": {"usable": True, "basis": "attio_crm"}}
         self.assertIsNone(ws._build_draft_provenance(ev))
+
+    def test_source_statuses_show_qmd_not_applicable_for_silent_call(self):
+        ev = {
+            "event_type": "missed_call",
+            "crm_context": {"usable": False, "status": "not_found"},
+            "calendar_context": {"usable": False, "status": "not_applicable"},
+            "rich_reply": {"usable": False, "status": "not_answerable"},
+            "text": "",
+        }
+        statuses = ws.collect_enrichment_source_statuses(ev)
+        self.assertEqual(statuses["crm"]["status"], "not_found")
+        self.assertEqual(statuses["calendar"]["status"], "not_applicable")
+        self.assertEqual(statuses["qmd"]["status"], "not_applicable")
+
+    def test_source_statuses_do_not_copy_crm_reply_status_into_qmd(self):
+        ev = {
+            "event_type": "missed_call",
+            "crm_context": {"usable": True, "status": "ok", "basis": "attio"},
+            "rich_reply": {"usable": True, "status": "ok", "basis": "attio_crm"},
+            "text": "pricing question from transcript",
+        }
+        statuses = ws.collect_enrichment_source_statuses(ev)
+        self.assertEqual(statuses["crm"]["status"], "usable")
+        self.assertEqual(statuses["qmd"]["status"], "not_applicable")
+
+    def test_source_statuses_show_crm_not_applicable_when_qmd_skipped_crm(self):
+        ev = {
+            "event_type": "sms",
+            "rich_reply": {"usable": True, "status": "ok", "basis": "shapescale_knowledge"},
+            "text": "how do I reset the app?",
+        }
+        with patch.object(ws, "DIALPAD_CRM_CONTEXT_COMMAND", "crm-lookup"):
+            statuses = ws.collect_enrichment_source_statuses(ev)
+        self.assertEqual(statuses["crm"]["status"], "not_applicable")
+        self.assertEqual(statuses["qmd"]["status"], "usable")
 
 
 class CustomerTextSafetyTests(unittest.TestCase):
@@ -124,6 +209,14 @@ class CustomerTextSafetyTests(unittest.TestCase):
         self.assertIn("Hi there,", msg)
         self.assertNotIn("Wrong", msg)
 
+    def test_low_confidence_missed_call_crm_copy_is_call_specific_and_pii_safe(self):
+        ev = {"event_type": "missed_call", "inbound_context": {"identityConfidence": "low"}}
+        msg = ws._crm_reply_message(ev, {"first_name": "Wrong"}, {"usable": True, "company": "Acme"})
+        self.assertIn("sorry we missed your call", msg)
+        self.assertIn("Hi there,", msg)
+        self.assertNotIn("Wrong", msg)
+        self.assertNotIn("Acme", msg)
+
 
 class CalendarUngateTests(unittest.TestCase):
     def test_calendar_lookup_runs_at_low_confidence(self):
@@ -134,6 +227,110 @@ class CalendarUngateTests(unittest.TestCase):
             ctx = ws.lookup_sales_calendar_context(
                 event, crm_context={"company": "Acme"}, sender_enrichment={"contact_name": "Jane"})
         self.assertTrue(ctx["usable"])
+
+    def test_missed_call_calendar_lookup_does_not_require_sms_text_intent(self):
+        event = {
+            "event_type": "missed_call",
+            "sender_number": "+14155550123",
+            "timestamp": 1760000000000,
+            "inbound_context": {"identityConfidence": "low", "contextDraftAllowed": True},
+        }
+        cal_payload = {
+            "usable": True,
+            "basis": "attio",
+            "summary": "Recent demo: Acme",
+            "startsInMinutes": 30,
+            "demoState": "recent",
+        }
+        with patch.object(ws, "_run_context_command", return_value=cal_payload):
+            ctx = ws.lookup_sales_calendar_context(
+                event,
+                crm_context={"usable": True, "company": "Acme", "deal": "Acme"},
+                sender_enrichment={"contact_name": "Jane"},
+            )
+        self.assertTrue(ctx["usable"])
+        self.assertIn("Recent demo", ctx["summary"])
+
+    def test_missed_call_calendar_lookup_uses_crm_demo_context(self):
+        event = {
+            "event_type": "missed_call",
+            "sender_number": "+14155550123",
+            "timestamp": 1760000000000,
+            "inbound_context": {"identityConfidence": "medium", "contextDraftAllowed": False},
+        }
+        cal_payload = {
+            "usable": True,
+            "basis": "attio",
+            "summary": "Upcoming demo: Acme",
+            "startsInMinutes": 30,
+            "demoState": "upcoming",
+        }
+        crm_context = {"usable": True, "company": "Acme", "deal": "Acme demo", "stage": "Demo Booked"}
+        with patch.object(ws, "_run_context_command", return_value=cal_payload) as run:
+            ctx = ws.lookup_sales_calendar_context(event, crm_context=crm_context)
+        self.assertTrue(ctx["usable"])
+        self.assertTrue(run.called)
+
+    def test_missed_call_knowledge_reply_is_call_specific(self):
+        event = {
+            "event_type": "missed_call",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "What does it cost?",
+        }
+        with patch.object(ws, "lookup_recent_sms_thread", return_value=[]), \
+                patch.object(ws, "lookup_shapescale_knowledge", return_value={
+                    "usable": True,
+                    "status": "ok",
+                    "text": "ShapeScale costs $1,799 upfront.",
+                }):
+            rich = ws.build_rich_sms_reply(event)
+        self.assertTrue(rich["usable"])
+        self.assertEqual(rich["basis"], "shapescale_knowledge")
+        self.assertIn("sorry we missed your call", rich["message"])
+
+    def test_missed_call_transcript_question_uses_qmd_before_crm_fallback(self):
+        event = {
+            "event_type": "missed_call",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "What does it cost?",
+        }
+        with patch.object(ws, "lookup_recent_sms_thread", return_value=[]), \
+                patch.object(ws, "lookup_sales_crm_context", return_value={
+                    "usable": True,
+                    "status": "ok",
+                    "basis": "attio",
+                    "company": "Acme",
+                    "stage": "Manual Review",
+                }), \
+                patch.object(ws, "lookup_shapescale_knowledge", return_value={
+                    "usable": True,
+                    "status": "ok",
+                    "text": "ShapeScale costs $1,799 upfront.",
+                }):
+            rich = ws.build_rich_sms_reply(event)
+        self.assertTrue(rich["usable"])
+        self.assertEqual(rich["basis"], "shapescale_knowledge")
+
+    def test_sms_meeting_logistics_rejects_recent_demo_context(self):
+        event = {
+            "event_type": "sms",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "I'm running late",
+        }
+        event["crm_context"] = {"usable": True, "status": "ok", "basis": "attio", "company": "Acme"}
+        event["calendar_context"] = {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "summary": "Recent demo: Acme",
+            "demoState": "recent",
+        }
+        rich = ws.build_contextual_sales_sms_reply(event)
+        self.assertFalse(rich["usable"])
+        self.assertEqual(rich["status"], "calendar_recent")
 
 
 class ProvenanceRobustnessTests(unittest.TestCase):

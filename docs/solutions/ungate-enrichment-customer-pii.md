@@ -7,8 +7,9 @@ related_pr: "#94"
 
 # Un-gating CRM enrichment into customer-facing drafts: the low-confidence PII trap
 
-Learnings from PR3/U7 (un-gate the CRM/QMD/calendar enrichment so it runs for every
-sales-line SMS draft, not just high-confidence known contacts).
+Learnings from PR3/U7 and the missed-call enrichment extension (un-gate the
+CRM/QMD/calendar enrichment so it runs for operator-approved sales-line drafts,
+not just high-confidence known SMS contacts).
 
 ## The trap: low-confidence Attio matches in customer-facing text
 
@@ -37,6 +38,9 @@ surfacing un-gated:
 - Greeting name in `draft_text`: suppressed at `identityConfidence == "low"` (matches
   the pre-existing generic fallback) via `_draft_greeting`.
 - Provenance line: any confidence, operator-only, never in `draft_text`.
+- Missed-call drafts follow the same rule. They may show low-confidence Attio,
+  calendar, or QMD context to the operator, but low-confidence customer text stays
+  generic and call-specific (`Hi there, sorry we missed your call...`).
 
 ## This was a CP4 (product) decision
 
@@ -59,3 +63,8 @@ Operators use the provenance line to validate sources, so a mislabel is worse th
 label. Whitelist exact bases (`shapescale_knowledge` → "QMD knowledge",
 `recent_thread_link` → "Prior-thread link") rather than blacklisting CRM/calendar —
 a blacklist mislabels everything else.
+
+For generic missed-call fallbacks, source status is part of the safety story:
+`not_applicable` QMD for silent calls is different from a failed knowledge lookup,
+and `unsafe` CRM/calendar output is different from no match. Keep those statuses
+operator-facing and out of customer SMS text.

@@ -258,6 +258,15 @@ def test_build_missed_call_dedupe_key_uses_stable_fingerprint_without_ids():
     assert build_missed_call_dedupe_key({}, resolved) != build_missed_call_dedupe_key({}, later)
 
 
+def test_build_missed_call_dedupe_key_separates_unresolved_payloads_without_ids():
+    first_payload = {"date_started": 1760000000999, "contact": {"phone": "+14155550123"}}
+    second_payload = {"date_started": 1760000000999, "contact": {"phone": "+14155550999"}}
+    unresolved = {"from_number": "Unknown", "to_number": None, "event_ts_ms": 1760000000999}
+
+    assert build_missed_call_dedupe_key(first_payload, unresolved) == build_missed_call_dedupe_key(first_payload, unresolved)
+    assert build_missed_call_dedupe_key(first_payload, unresolved) != build_missed_call_dedupe_key(second_payload, unresolved)
+
+
 def test_claim_missed_call_notification_marks_duplicate(tmp_path):
     db_path = tmp_path / "approvals.db"
 

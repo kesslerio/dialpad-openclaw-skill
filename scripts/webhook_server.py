@@ -652,6 +652,15 @@ def extract_message_text(data):
     return str(text or text_content or "")
 
 
+def extract_call_text(data):
+    """Extract transcript-like call text, skipping blank higher-priority fields."""
+    for key in ("text", "transcription", "transcript", "call_transcription"):
+        value = data.get(key)
+        if not is_blank_text(value):
+            return str(value)
+    return ""
+
+
 def is_blank_text(value):
     """True when text is empty or whitespace-only."""
     return not str(value or "").strip()
@@ -1381,7 +1390,12 @@ def build_missed_call_dedupe_key(data, resolved_context):
             )
         )
     bucket = event_ts_ms // MISSED_CALL_DEDUPE_FALLBACK_BUCKET_MS if event_ts_ms is not None else "unknown"
-    return f"missed-call:fingerprint:{sender_number or 'unknown'}:{recipient_number or 'unknown'}:{bucket}"
+    if sender_number and recipient_number:
+        return f"missed-call:fingerprint:{sender_number}:{recipient_number}:{bucket}"
+    payload_fingerprint = hashlib.sha256(
+        json.dumps(data, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"missed-call:fingerprint:{sender_number or 'unknown'}:{recipient_number or 'unknown'}:{bucket}:{payload_fingerprint}"
 
 
 def _apply_sqlite_concurrency_pragmas(conn):
@@ -2224,12 +2238,14 @@ def normalize_call_hook_payload(data, resolved_context, contact_info=None):
     call_id = data.get("call_id") or data.get("id")
     line_display = resolved_context.get("line_display") or get_line_name(recipient_number)
     sender = contact_info or sender_number or "Unknown"
+    text = extract_call_text(data)
 
     return {
         "event_type": "missed_call",
         "sender": sender,
         "sender_number": sender_number,
         "recipient_number": recipient_number,
+        "text": text,
         "timestamp": timestamp,
         "call_id": call_id,
         "line_display": line_display,
@@ -2308,15 +2324,15 @@ def build_proactive_reply_message(normalized_event, sender_enrichment=None):
     else:
         greeting_name = "there"
 
-    event_type = normalized_event.get("event_type") or "sms"
+    event_type = _event_type(normalized_event)
     if inbound_context.get("contextDraftAllowed"):
-        if event_type == "missed_call":
+        if _is_missed_call_event(normalized_event):
             body = "sorry we missed your call. I saw your recent ShapeScale conversation and can help from here. What would you like to cover?"
         elif event_type == "voicemail":
             body = "thanks for the voicemail. I saw your recent ShapeScale conversation and will follow up shortly."
         else:
             body = "thanks for reaching out. I saw your recent ShapeScale conversation and will follow up shortly."
-    elif event_type == "missed_call":
+    elif _is_missed_call_event(normalized_event):
         body = "you've reached ShapeScale for Business Sales. Sorry we missed your call. How can we help?"
     elif event_type == "voicemail":
         body = "thanks for the voicemail. We received it and will be in touch shortly."
@@ -2587,9 +2603,26 @@ def _context_greeting(sender_enrichment, normalized_event):
     return first_name or "there"
 
 
+SOURCE_STATUS_LABELS = {
+    "usable": "usable",
+    "not_applicable": "not applicable",
+    "not_configured": "not configured",
+    "disabled": "not configured",
+    "not_found": "not found",
+    "degraded": "degraded",
+    "unsafe": "unsafe",
+    "unsafe_output": "unsafe",
+    "unavailable": "unavailable",
+    "not_allowed": "not allowed",
+    "empty_query": "not found",
+    "empty": "not found",
+    "timeout": "unavailable",
+    "request_failed": "unavailable",
+}
+
+
 def _sales_context_draft_allowed(normalized_event):
-    """Allow CRM/calendar enrichment for the operator-approval DRAFT lane on any
-    sales-line SMS, regardless of identity confidence (plan U7 un-gate).
+    """Allow CRM/calendar enrichment for operator-approval DRAFT lanes on Sales events.
 
     Drafts are always operator-reviewed — there is no unattended auto-send (that is
     S4, not yet built) — so enriching at medium/unknown confidence is safe: a wrong
@@ -2597,7 +2630,15 @@ def _sales_context_draft_allowed(normalized_event):
     adapter does its own phone lookup, so a high-confidence Dialpad identity is not
     required. Sales-line/eligibility checks already ran upstream in
     should_send_proactive_reply before any draft is built."""
-    return (normalized_event.get("event_type") or "sms") == "sms"
+    return (normalized_event.get("event_type") or "sms") in {"sms", "missed_call"}
+
+
+def _event_type(normalized_event):
+    return normalized_event.get("event_type") or "sms"
+
+
+def _is_missed_call_event(normalized_event):
+    return _event_type(normalized_event) == "missed_call"
 
 
 def meeting_logistics_intent(text):
@@ -2815,12 +2856,33 @@ def write_attio_inbound_note(normalized_event, *, sender_enrichment=None, db_pat
         return {"written": False, "status": "error", "note_id": None}
 
 
+def _crm_has_demo_signal(crm_context):
+    if not isinstance(crm_context, dict) or not crm_context.get("usable"):
+        return False
+    if classify_deal_segment(crm_context.get("stage")) == "prospect_demo":
+        return True
+    text = " ".join(
+        str(crm_context.get(key) or "")
+        for key in ("summary", "deal", "stage")
+    ).lower()
+    return "demo" in text
+
+
+def _context_calendar_applicable(normalized_event, crm_context=None):
+    if meeting_logistics_intent(normalized_event.get("text")):
+        return True
+    if not _is_missed_call_event(normalized_event):
+        return False
+    inbound_context = normalized_event.get("inbound_context") or {}
+    return bool(inbound_context.get("contextDraftAllowed") or _crm_has_demo_signal(crm_context))
+
+
 def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enrichment=None):
     """Return compact calendar context for meeting-logistics Sales SMS drafts."""
     sender_enrichment = sender_enrichment or {}
     if not _sales_context_draft_allowed(normalized_event):
         return {"usable": False, "status": "not_allowed"}
-    if not meeting_logistics_intent(normalized_event.get("text")):
+    if not _context_calendar_applicable(normalized_event, crm_context=crm_context):
         return {"usable": False, "status": "not_applicable"}
 
     query_parts = [
@@ -2851,6 +2913,7 @@ def lookup_sales_calendar_context(normalized_event, crm_context=None, sender_enr
         "basis": result.get("basis") or "google_calendar",
         "summary": summary,
         "startsInMinutes": starts_in_minutes,
+        "demoState": result.get("demoState"),
     }
 
 
@@ -2909,17 +2972,25 @@ def classify_deal_segment(stage):
     return _DEAL_SEGMENT_BY_STAGE.get(normalized)
 
 
+def _crm_reply_opening(is_missed_call):
+    if is_missed_call:
+        return "sorry we missed your call"
+    return "thanks for the update"
+
+
 def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
     greeting = _draft_greeting(normalized_event, sender_enrichment)
     confidence = (normalized_event.get("inbound_context") or {}).get("identityConfidence")
     company = str(crm_context.get("company") or "").strip()
+    is_missed_call = _is_missed_call_event(normalized_event)
     # Segment framing is CUSTOMER-facing, so it rides the same high-confidence gate
     # as naming the company (PR3/U7 PII rule). A low/medium-confidence Attio
     # phone-match may be wrong (reused/ported/shared number); at lower confidence we
     # return the existing generic line and let the operator personalize from the
     # provenance line + segment shown on the approval card before approving.
+    opening = _crm_reply_opening(is_missed_call)
     if confidence != "high":
-        return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation here and will follow up shortly."
+        return f"Hi {greeting}, {opening}. I have your ShapeScale conversation here and will follow up shortly."
 
     segment = classify_deal_segment(crm_context.get("stage"))
     inbound_context = normalized_event.get("inbound_context")
@@ -2933,17 +3004,23 @@ def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
     # name is still only named when present (company-empty-at-high stays handled).
     with_company = f" with {company}" if company else ""
     if segment == "customer":
+        if is_missed_call:
+            return f"Hi {greeting}, {opening}. I have your ShapeScale account{with_company} here and will follow up shortly."
         return f"Hi {greeting}, great to hear from you again. I have your ShapeScale account{with_company} here and will follow up shortly."
     if segment == "prospect_demo":
-        return f"Hi {greeting}, thanks for the update. I have your ShapeScale demo conversation{with_company} here and will follow up shortly."
+        return f"Hi {greeting}, {opening}. I have your ShapeScale demo conversation{with_company} here and will follow up shortly."
     if segment == "prospect_cold":
+        if is_missed_call:
+            return f"Hi {greeting}, {opening}. I have your ShapeScale conversation{with_company} here and will follow up shortly with more details."
         return f"Hi {greeting}, thanks for reaching out about ShapeScale. I have your conversation{with_company} here and will follow up shortly with more details."
     # generic (None / Lost / Not a Fit / unmapped) — current copy, no special voice.
-    return f"Hi {greeting}, thanks for the update. I have your ShapeScale conversation{with_company} here and will follow up shortly."
+    return f"Hi {greeting}, {opening}. I have your ShapeScale conversation{with_company} here and will follow up shortly."
 
 
 def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _calendar_context):
     greeting = _draft_greeting(normalized_event, sender_enrichment)
+    if _is_missed_call_event(normalized_event):
+        return f"Hi {greeting}, sorry we missed your call. I saw your ShapeScale demo context and will follow up shortly."
     body = str(normalized_event.get("text") or "").lower()
     if re.search(r"\blate\b|\bon my way\b", body):
         return f"Hi {greeting}, no worries, thanks for letting me know. See you shortly."
@@ -2952,6 +3029,23 @@ def _meeting_reply_message(normalized_event, sender_enrichment, _crm_context, _c
     if re.search(r"\b(?:zoom|meet|meeting|demo)\s+(?:link|url)\b", body):
         return f"Hi {greeting}, thanks for the heads up. I'll check the meeting link and send the right one shortly."
     return f"Hi {greeting}, thanks for the heads up. See you shortly."
+
+
+def _crm_reply_payload(normalized_event, sender_enrichment, crm_context):
+    return {
+        "usable": True,
+        "status": "ok",
+        "basis": "attio_crm",
+        "category": "crm_context",
+        "message": _crm_reply_message(normalized_event, sender_enrichment, crm_context),
+        "crmContext": {
+            "basis": crm_context.get("basis"),
+            "status": crm_context.get("status"),
+            "company": crm_context.get("company"),
+            "stage": crm_context.get("stage"),
+            "owner": crm_context.get("owner"),
+        },
+    }
 
 
 def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
@@ -2967,7 +3061,7 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
     if not crm_context.get("usable"):
         return {"usable": False, "status": f"crm_{crm_context.get('status') or 'unavailable'}"}
 
-    if meeting_logistics_intent(normalized_event.get("text")):
+    if _context_calendar_applicable(normalized_event, crm_context=crm_context):
         calendar_context = normalized_event.get("calendar_context")
         if calendar_context is None:
             calendar_context = lookup_sales_calendar_context(
@@ -2977,7 +3071,11 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
             )
             normalized_event["calendar_context"] = calendar_context
         if not calendar_context.get("usable"):
+            if _is_missed_call_event(normalized_event):
+                return _crm_reply_payload(normalized_event, sender_enrichment, crm_context)
             return {"usable": False, "status": f"calendar_{calendar_context.get('status') or 'unavailable'}"}
+        if not _is_missed_call_event(normalized_event) and calendar_context.get("demoState") == "recent":
+            return {"usable": False, "status": "calendar_recent"}
         return {
             "usable": True,
             "status": "ok",
@@ -2997,20 +3095,7 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
             },
         }
 
-    return {
-        "usable": True,
-        "status": "ok",
-        "basis": "attio_crm",
-        "category": "crm_context",
-        "message": _crm_reply_message(normalized_event, sender_enrichment, crm_context),
-        "crmContext": {
-            "basis": crm_context.get("basis"),
-            "status": crm_context.get("status"),
-            "company": crm_context.get("company"),
-            "stage": crm_context.get("stage"),
-            "owner": crm_context.get("owner"),
-        },
-    }
+    return _crm_reply_payload(normalized_event, sender_enrichment, crm_context)
 
 
 def _first_recent_link(recent_thread):
@@ -3024,6 +3109,18 @@ def _first_recent_link(recent_thread):
                 return link
             return f"https://{link}"
     return None
+
+
+def _missed_call_followup_message(message):
+    body = str(message or "").strip()
+    if not body:
+        return body
+    if "missed your call" in body.lower():
+        return body
+    prefix = "Hi there, "
+    if body.startswith(prefix):
+        body = body[len(prefix):]
+    return f"Hi there, sorry we missed your call. {body[0].lower()}{body[1:]}"
 
 
 # Question words / articles / fillers that carry no retrieval signal, plus the
@@ -3085,8 +3182,20 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
     """Build a short knowledge-backed approval draft when confidence is high enough."""
     if not DIALPAD_RICH_SMS_DRAFTS_ENABLED:
         return {"usable": False, "status": "disabled"}
-    if (normalized_event.get("event_type") or "sms") != "sms":
+    event_type = _event_type(normalized_event)
+    if event_type not in {"sms", "missed_call"}:
         return {"usable": False, "status": "unsupported_event"}
+
+    if _is_missed_call_event(normalized_event):
+        text = str(normalized_event.get("text") or "").strip()
+        if not text:
+            contextual_reply = build_contextual_sales_sms_reply(
+                normalized_event,
+                sender_enrichment=sender_enrichment,
+            )
+            if contextual_reply.get("usable"):
+                return contextual_reply
+            return {"usable": False, "status": contextual_reply.get("status") or "not_answerable"}
 
     if meeting_logistics_intent(normalized_event.get("text")):
         contextual_reply = build_contextual_sales_sms_reply(
@@ -3122,12 +3231,15 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
 
     if category == "link_issue":
         link = _first_recent_link(recent_thread) or DIALPAD_BOOK_DEMO_URL
+        message = f"Hi there, sorry about that. Try this link instead: {link}. If it still doesn't work, reply with a few times that work and we'll help schedule it."
+        if _is_missed_call_event(normalized_event):
+            message = _missed_call_followup_message(message)
         return {
             "usable": True,
             "status": "ok",
             "basis": "recent_thread_link",
             "category": category,
-            "message": f"Hi there, sorry about that. Try this link instead: {link}. If it still doesn't work, reply with a few times that work and we'll help schedule it.",
+            "message": message,
         }
 
     knowledge = lookup_shapescale_knowledge(_knowledge_query_for_category(category, normalized_event.get("text")))
@@ -3141,6 +3253,8 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
     message = _compose_knowledge_sms(category, knowledge.get("text"))
     if not message:
         return {"usable": False, "status": "empty_draft", "category": category}
+    if _is_missed_call_event(normalized_event):
+        message = _missed_call_followup_message(message)
 
     return {
         "usable": True,
@@ -3354,6 +3468,19 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
             "prospect_cold": "Prospect (cold)",
         }.get(segment, segment)
         lines.append(f"*Segment:* {escape_telegram_markdown(segment_label)}")
+    source_statuses = inbound_context.get("sourceStatuses") or {}
+    if isinstance(source_statuses, dict) and source_statuses:
+        rendered = []
+        source_labels = {"crm": "CRM", "calendar": "Calendar", "qmd": "QMD"}
+        for source in ("crm", "calendar", "qmd"):
+            status = source_statuses.get(source)
+            if not isinstance(status, dict):
+                continue
+            raw_status = str(status.get("status") or "")
+            label = SOURCE_STATUS_LABELS.get(raw_status, raw_status or "unknown")
+            rendered.append(f"{source_labels[source]}: {label}")
+        if rendered:
+            lines.append(f"*Sources:* {escape_telegram_markdown('; '.join(rendered))}")
     return "\n".join(lines)
 
 
@@ -3451,6 +3578,54 @@ def _build_draft_provenance(normalized_event):
         elif rich_basis == "recent_thread_link":
             parts.append("Prior-thread link")
     return " | ".join(parts) if parts else None
+
+
+def _source_status(status):
+    text = str(status or "unavailable")
+    if text.startswith(("crm_", "calendar_", "knowledge_")):
+        text = text.split("_", 1)[1] or text
+    return text
+
+
+def collect_enrichment_source_statuses(normalized_event):
+    statuses = {}
+    crm = normalized_event.get("crm_context")
+    rich = normalized_event.get("rich_reply")
+    qmd_answered = (
+        isinstance(rich, dict) and
+        rich.get("basis") == "shapescale_knowledge" and
+        rich.get("usable")
+    )
+    if isinstance(crm, dict):
+        statuses["crm"] = {
+            "status": "usable" if crm.get("usable") else _source_status(crm.get("status")),
+            "basis": crm.get("basis"),
+        }
+    elif qmd_answered:
+        statuses["crm"] = {"status": "not_applicable"}
+    else:
+        statuses["crm"] = {"status": "not_configured" if not DIALPAD_CRM_CONTEXT_COMMAND else "not_found"}
+
+    cal = normalized_event.get("calendar_context")
+    if isinstance(cal, dict):
+        statuses["calendar"] = {
+            "status": "usable" if cal.get("usable") else _source_status(cal.get("status")),
+            "basis": cal.get("basis"),
+        }
+    else:
+        statuses["calendar"] = {"status": "not_applicable"}
+
+    if qmd_answered:
+        statuses["qmd"] = {"status": "usable", "basis": "shapescale_knowledge"}
+    elif not str(normalized_event.get("text") or "").strip():
+        statuses["qmd"] = {"status": "not_applicable"}
+    elif isinstance(rich, dict) and str(rich.get("status") or "").startswith("knowledge_"):
+        statuses["qmd"] = {"status": _source_status(rich.get("status")), "basis": rich.get("basis")}
+    elif isinstance(rich, dict):
+        statuses["qmd"] = {"status": "not_applicable"}
+    else:
+        statuses["qmd"] = {"status": "not_found"}
+    return statuses
 
 
 def evaluate_auto_send_shadow(normalized_event, reply_policy=None):
@@ -3580,6 +3755,10 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                 inbound_context["draftMode"] = "knowledge_backed"
 
     message = build_proactive_reply_message(normalized_event, sender_enrichment=sender_enrichment)
+    inbound_context = normalized_event.get("inbound_context")
+    source_statuses = collect_enrichment_source_statuses(normalized_event)
+    if isinstance(inbound_context, dict):
+        inbound_context["sourceStatuses"] = source_statuses
     if sms_approval is None:
         return False, "approval_unavailable", message, None, reply_policy
     if not sender_number or not recipient_number:
@@ -3602,6 +3781,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             "rich_reply": normalized_event.get("rich_reply"),
             "crm_context": normalized_event.get("crm_context"),
             "calendar_context": normalized_event.get("calendar_context"),
+            "source_statuses": source_statuses,
         }
     )
     try:
@@ -3637,6 +3817,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
                     "rich_reply": normalized_event.get("rich_reply"),
                     "crm_context": normalized_event.get("crm_context"),
                     "calendar_context": normalized_event.get("calendar_context"),
+                    "source_statuses": source_statuses,
                     "provenance": _build_draft_provenance(normalized_event),
                     # S4 SHADOW MODE decision (booleans/enums only, no PII) for S6.
                     "autoSendShadow": auto_send_shadow,
@@ -3656,8 +3837,7 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
 
 def build_hook_session_key(normalized_event):
     """Build stable OpenClaw hook session key with fallbacks."""
-    event_type = normalized_event.get("event_type") or "sms"
-    if event_type == "missed_call":
+    if _is_missed_call_event(normalized_event):
         call_id = normalized_event.get("call_id")
         if call_id:
             return f"hook:dialpad:call:{call_id}"
@@ -3688,10 +3868,9 @@ def format_hook_message(normalized_event, line_display=None):
     sender_number = normalized_event.get("sender_number") or "Unknown"
     recipient_number = normalized_event.get("recipient_number")
     timestamp = normalized_event.get("timestamp")
-    event_type = normalized_event.get("event_type") or "sms"
     resolved_line = line_display or normalized_event.get("line_display")
 
-    if event_type == "missed_call":
+    if _is_missed_call_event(normalized_event):
         lines = ["📞 Dialpad Missed Call", f"From: {sender} ({sender_number})"]
         if resolved_line:
             lines.append(f"Line: {resolved_line}")
@@ -3724,9 +3903,8 @@ def get_openclaw_hooks_url():
 
 def build_openclaw_hook_payload(normalized_event, line_display=None):
     """Build /hooks/agent payload for a normalized hook event."""
-    event_type = normalized_event.get("event_type") or "sms"
     hook_name = OPENCLAW_HOOKS_NAME
-    if event_type == "missed_call":
+    if _is_missed_call_event(normalized_event):
         hook_name = OPENCLAW_HOOKS_CALL_NAME
 
     payload = {
@@ -3778,10 +3956,9 @@ def send_to_openclaw_hooks(normalized_event, line_display=None):
     Forward a normalized event payload to OpenClaw hooks.
     Returns (success: bool, status: str).
     """
-    event_type = normalized_event.get("event_type") or "sms"
     hooks_enabled = OPENCLAW_HOOKS_SMS_ENABLED
     event_label = "SMS"
-    if event_type == "missed_call":
+    if _is_missed_call_event(normalized_event):
         hooks_enabled = OPENCLAW_HOOKS_CALL_ENABLED
         event_label = "missed call"
 
@@ -4405,7 +4582,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         missed_call_dedupe_key = None
         missed_call_dedupe_status = None
         if should_notify:
-            resolved = resolve_missed_call_context(data)
+            resolved = resolve_missed_call_context(data, history_fetcher=lambda _ts: [])
             from_num = resolved["from_number"]
             to_num = resolved["to_number"]
             call_ts = resolved["event_ts_ms"] or (
@@ -4435,19 +4612,39 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 response = {
                     "status": "ok",
-                    "missed_call": True,
-                    "duplicate": True,
-                    "dedupe_key": missed_call_dedupe_key,
-                    "dedupe_status": missed_call_dedupe_status,
-                    "hook_forwarded": False,
-                    "hook_status": "duplicate_suppressed",
-                    "auto_reply_sent": False,
-                    "auto_reply_status": "duplicate_suppressed",
-                    "auto_reply_draft_id": None,
-                    "telegram_sent": False,
+                    "stored": True,
+                    "processing": "duplicate",
                 }
                 self.wfile.write(json.dumps(response).encode())
                 return
+
+            try:
+                self._ack_webhook_200(stored=True, duplicate=False)
+            except Exception:  # noqa: BLE001 - process once even if the client disconnected mid-ACK.
+                print("⚠️  Missed-call ACK write failed (client disconnect); processing anyway")
+
+            resolved = resolve_missed_call_context(data)
+            from_num = resolved["from_number"]
+            to_num = resolved["to_number"]
+            call_ts = resolved["event_ts_ms"] or call_ts
+            canonical_dedupe_key = build_missed_call_dedupe_key(data, resolved)
+            if canonical_dedupe_key != missed_call_dedupe_key:
+                canonical_claim = claim_missed_call_notification(canonical_dedupe_key)
+                duplicate = bool(canonical_claim.get("duplicate"))
+                missed_call_dedupe_key = canonical_dedupe_key
+                missed_call_dedupe_status = canonical_claim.get("status")
+                if duplicate:
+                    print(f"[{datetime.now().isoformat()}]")
+                    print(f"   📞 MISSED CALL duplicate suppressed after backfill: {from_num} -> {resolved['line_display'] or get_line_name(to_num) or 'Unknown'}")
+                    print(f"   🧷 Dedupe: {missed_call_dedupe_key} ({missed_call_dedupe_status})")
+                    call_id = data.get("call_id") or data.get("id")
+                    entry_point_call_id = data.get("entry_point_call_id")
+                    if call_id:
+                        print(f"   📞 Call ID: {call_id}")
+                    if entry_point_call_id:
+                        print(f"   📞 Entry point call ID: {entry_point_call_id}")
+                    print()
+                    return
 
             sender_enrichment = (
                 lookup_contact_enrichment(from_num) if from_num != "Unknown" else {
@@ -4521,6 +4718,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 "draftId": auto_reply_draft_id,
                 "status": auto_reply_status,
                 "message": auto_reply_message,
+                "richReply": normalized_event.get("rich_reply"),
                 "replyPolicy": reply_policy,
                 # S4 shadow decision is metadata/log-only — NOT in auto_reply, which
                 # build_openclaw_hook_payload forwards to the hook. (Lives in the log line.)
@@ -4535,6 +4733,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 auto_reply_status=auto_reply_status,
                 auto_reply_draft_created=auto_reply_draft_created,
             )
+            provenance = _build_draft_provenance(normalized_event)
+            if provenance:
+                tg_text += f"\n↳ {escape_telegram_markdown(provenance)}"
             tg_text += build_approval_review_suffix(
                 auto_reply_draft_id,
                 auto_reply_message,
@@ -4573,6 +4774,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             print(f"   🪝 OpenClaw Hook: {'✓' if hook_sent else '✗'} ({hook_status})")
             print(f"   📨 Telegram: {'✓' if telegram_sent else '✗'}")
             print()
+            return
         else:
             print(f"[{datetime.now().isoformat()}]")
             print(f"   📞 CALL EVENT ignored (not inbound missed call)")

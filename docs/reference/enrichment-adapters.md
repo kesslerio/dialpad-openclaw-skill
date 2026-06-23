@@ -1,10 +1,11 @@
 # Enrichment context adapters (S1)
 
 Standalone context-command adapters that feed the CRM-aware, calendar-aware, and
-QMD-knowledge draft modes in `scripts/webhook_server.py`. Each is invoked as a
-subprocess: the webhook appends the query as a single final CLI arg and reads a
-JSON object from stdout (contract: `lookup_sales_crm_context` /
-`lookup_sales_calendar_context` / `lookup_shapescale_knowledge`).
+QMD-knowledge draft modes in `scripts/webhook_server.py` for Sales SMS and
+Sales missed-call approval drafts. Each is invoked as a subprocess: the webhook
+appends the query as a single final CLI arg and reads a JSON object from stdout
+(contract: `lookup_sales_crm_context` / `lookup_sales_calendar_context` /
+`lookup_shapescale_knowledge`).
 
 | Adapter | File | Query in | JSON out |
 |---|---|---|---|
@@ -15,6 +16,17 @@ JSON object from stdout (contract: `lookup_sales_crm_context` /
 All adapters fail closed (`{"usable": false, ...}`) and exit 0 on any miss, auth
 error, or timeout — the webhook treats a non-zero exit as failure.
 
+Silent missed calls can use Attio and calendar context from the caller/CRM
+query, but QMD is not applicable unless the normalized call event includes usable
+text or transcript-like content. Generic missed-call approval cards render source
+statuses so the operator can distinguish not configured, not found, unsafe,
+unavailable, and not applicable outcomes.
+
+The calendar adapter surfaces both upcoming demos and bounded recent demos. A
+recent missed call after a demo/no-show can therefore become meeting-aware instead
+of falling through to generic copy solely because the meeting is already in the
+past.
+
 ## Secrets (already present in `~/.config/systemd/user/secrets.conf`)
 
 - `ATTIO_API_KEY` — Attio REST bearer token (the adapter calls Attio directly, not the MCP).
@@ -22,12 +34,10 @@ error, or timeout — the webhook treats a non-zero exit as failure.
 
 ## Env wiring — apply at deploy time (U8), NOT yet
 
-> **Sequencing (plan KTD6):** do **not** enable `DIALPAD_CRM_CONTEXT_COMMAND` or
-> `DIALPAD_CALENDAR_CONTEXT_COMMAND` in the live `.env` until the async draft
-> refactor (U5) and SMS idempotency (U6) ship. The webhook runs draft generation
-> inline before the ACK on a single-threaded server; enabling these adds up to
-> 8s/call of inline work and would block the webhook. `.env` is gitignored, so
-> these lines are a deploy action, not a committed change.
+> **Sequencing:** `DIALPAD_CRM_CONTEXT_COMMAND` and
+> `DIALPAD_CALENDAR_CONTEXT_COMMAND` must only be enabled on builds where SMS and
+> missed-call draft generation run after the webhook ACK. `.env` is gitignored,
+> so these lines are a deploy action, not a committed change.
 
 ```sh
 # scripts/adapters invoked by absolute path (systemd PATH is nix-store only)

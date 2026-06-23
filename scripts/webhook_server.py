@@ -3524,7 +3524,7 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
             "category": category,
             "message": message,
         }
-        return _apply_model_draft(normalized_event, sender_enrichment, payload)
+        return payload
 
     knowledge = lookup_shapescale_knowledge(_knowledge_query_for_category(category, normalized_event.get("text")))
     if not knowledge.get("usable"):

@@ -12,7 +12,11 @@ import subprocess
 from dataclasses import dataclass
 
 
-URL_RE = re.compile(r"https?://\S+|(?:bysha\.pe|shape\.scale|shapescale\.com)/\S*", re.IGNORECASE)
+URL_RE = re.compile(
+    r"(?:https?://|www\.)\S+|(?:[a-z0-9-]+\.)+"
+    r"(?:com|net|org|io|co|ai|app|ly|me|edu|gov|health|clinic)(?:/\S*)?",
+    re.IGNORECASE,
+)
 UNSAFE_OUTPUT_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -27,7 +31,9 @@ UNSAFE_OUTPUT_PATTERNS = tuple(
     )
 )
 UNSUPPORTED_SCHEDULE_CLAIM_RE = re.compile(
-    r"\b(?:is|was|'s)\s+scheduled\b|\bscheduled\s+(?:for|at|on)\b",
+    r"\b(?:is|was|'s)\s+scheduled\b|\bscheduled\s+(?:for|at|on)\b|"
+    r"\b(?:demo|meeting|call|appointment)\s+(?:is|'s|was)?\s*(?:today|tomorrow|on|at|for)\b|"
+    r"\b(?:you(?:'re| are)?|we(?:'re| are)?)\s+booked\b|\bbooked\s+(?:for|on|at|today|tomorrow)\b",
     re.IGNORECASE,
 )
 RAW_COMMS_CLAIM_RE = re.compile(
@@ -35,6 +41,7 @@ RAW_COMMS_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 INTERNAL_SOURCE_NAME_RE = re.compile(r"\b(?:attio|crm|gmail|qmd|provenance)\b", re.IGNORECASE)
+LOW_CONF_PERSONAL_GREETING_RE = re.compile(r"^\s*(?:hi|hello|hey)\s+(?!there\b)[^,!.]{2,40}[,!.]?", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -118,7 +125,7 @@ def _facts(normalized_event, fallback_message, category, payload, greeting, conf
             "comms": _compact_dict(
                 normalized_event.get("comms_context"),
                 ("status", "basis", "summary", "smsStatus", "gmailStatus"),
-            ),
+            ) if identity_confidence == "high" else {},
         },
     }
     rich = normalized_event.get("rich_reply")
@@ -161,6 +168,8 @@ def _approved_url_only(text, config):
     approved = str(config.approved_booking_url or "").rstrip("/")
     for url in URL_RE.findall(text or ""):
         clean = url.rstrip(".,;)")
+        if not re.match(r"https?://", clean, re.IGNORECASE):
+            clean = f"https://{clean}"
         clean_lower = clean.lower()
         approved_lower = approved.lower()
         if clean_lower == approved_lower or clean_lower.startswith(f"{approved_lower}/"):
@@ -171,10 +180,15 @@ def _approved_url_only(text, config):
     return True
 
 
-def _safe_message(text, normalized_event, config):
+def _safe_message(text, normalized_event, config, greeting):
     message = " ".join(str(text or "").split())
     if not message or len(message) > config.max_chars:
         return None
+    identity_confidence = (normalized_event.get("inbound_context") or {}).get("identityConfidence")
+    if identity_confidence != "high":
+        expected = str(greeting or "there").strip().lower()
+        if expected != "there" or LOW_CONF_PERSONAL_GREETING_RE.search(message):
+            return None
     if not _customer_safe_text(message):
         return None
     if not _approved_url_only(message, config):
@@ -236,7 +250,7 @@ def apply_model_draft(normalized_event, payload, config, greeting):
         config,
     )
     candidate, status = _run_model(facts, config)
-    message = _safe_message(candidate, normalized_event, config)
+    message = _safe_message(candidate, normalized_event, config, greeting)
     if status == "ok" and not message:
         status = "unsafe_output"
 

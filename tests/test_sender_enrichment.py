@@ -1565,6 +1565,12 @@ def test_model_draft_omits_low_confidence_calendar_facts(monkeypatch):
             "summary": "Upcoming demo: Other Prospect",
             "demoState": "upcoming",
         },
+        "comms_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "prior_comms",
+            "summary": "SMS: 2 outbound for Other Prospect",
+        },
     }
     payload = {
         "usable": True,
@@ -1582,6 +1588,7 @@ def test_model_draft_omits_low_confidence_calendar_facts(monkeypatch):
     )
 
     assert captured["facts"]["sources"]["calendar"] == {}
+    assert captured["facts"]["sources"]["comms"] == {}
     assert "Other Prospect" not in json.dumps(captured["facts"])
     assert result["basis"] == "model_calendar_meeting"
 
@@ -1624,6 +1631,124 @@ def test_model_draft_rejects_future_schedule_claim_for_recent_demo(monkeypatch):
     assert result["basis"] == "calendar_meeting"
     assert result["modelDraft"]["status"] == "unsafe_output"
     assert "scheduled for tomorrow" not in result["message"]
+
+
+def test_model_draft_rejects_bare_unapproved_links(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi there, try calendly.com/not-approved."})
+        ),
+    )
+    result = webhook_server.draft_model.apply_model_draft(
+        {
+            "event_type": "sms",
+            "text": "",
+            "inbound_context": {"identityConfidence": "high"},
+        },
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio_crm",
+            "category": "crm_context",
+            "message": "Hi there, thanks for reaching out. We'll follow up shortly.",
+        },
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert result["basis"] == "attio_crm"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "calendly.com" not in result["message"]
+
+
+def test_model_draft_rejects_unsupported_booking_time_claim(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi there, your demo is tomorrow."})
+        ),
+    )
+    result = webhook_server.draft_model.apply_model_draft(
+        {
+            "event_type": "missed_call",
+            "text": "",
+            "inbound_context": {"identityConfidence": "high"},
+        },
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio_crm",
+            "category": "crm_context",
+            "message": "Hi there, sorry we missed your call. We'll follow up shortly.",
+        },
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert result["basis"] == "attio_crm"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "demo is tomorrow" not in result["message"]
+
+
+def test_model_draft_rejects_low_confidence_personal_greeting(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Jane, sorry we missed your call."})
+        ),
+    )
+    result = webhook_server.draft_model.apply_model_draft(
+        {
+            "event_type": "missed_call",
+            "text": "",
+            "inbound_context": {"identityConfidence": "medium"},
+        },
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio_crm",
+            "category": "crm_context",
+            "message": "Hi there, sorry we missed your call. We'll follow up shortly.",
+        },
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert result["basis"] == "attio_crm"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert result["message"].startswith("Hi there")
+
+
+def test_recent_thread_link_skips_model_rewrite(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("link_issue should stay deterministic")),
+    )
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155201316",
+        "text": "The link does not work",
+        "recent_sms_thread": [
+            {
+                "direction": "outbound",
+                "text": "Book here: https://bysha.pe/book-demo",
+            }
+        ],
+    }
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is True
+    assert rich_reply["basis"] == "recent_thread_link"
+    assert "modelDraft" not in rich_reply
+    assert "https://bysha.pe/book-demo" in rich_reply["message"]
 
 
 def test_sales_context_lookups_store_only_compact_fields(monkeypatch):

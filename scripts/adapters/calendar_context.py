@@ -76,6 +76,7 @@ _GOG_TOKEN_STOPWORDS = {
     "shapescale",
     "shape",
 }
+_GOG_DEMO_SIGNAL_RE = re.compile(r"\b(?:demo|shapescale|shape\s*scale)\b", re.IGNORECASE)
 
 
 def _now():
@@ -154,6 +155,8 @@ def _gog_match_terms(remainder):
 
 def _gog_event_score(event, emails, tokens):
     text = _event_match_text(event)
+    if not _GOG_DEMO_SIGNAL_RE.search(text):
+        return 0
     score = 0
     if emails and any(email in text for email in emails):
         score += 5

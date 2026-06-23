@@ -35,7 +35,9 @@ event metadata, recipient greeting, CRM/calendar/comms source summaries, the
 safe deterministic fallback draft, and constraints. The command should return
 `{"message":"..."}` or plain text. Output is accepted only if it passes safety
 checks; otherwise the deterministic fallback draft is used. The model is a
-wording layer, not a source of truth.
+wording layer, not a source of truth. Deterministic prior-thread link resends
+stay deterministic so the auto-send shadow metric continues to measure the
+bounded link-resend path without free-text generation.
 
 The calendar adapter surfaces both upcoming demos and bounded recent demos. A
 recent missed call after a demo/no-show can therefore become meeting-aware instead

@@ -182,6 +182,22 @@ class BuildCalendarContextTests(unittest.TestCase):
         self.assertEqual(ctx["basis"], "attio")
         self.assertEqual(ctx["startsInMinutes"], 30)
 
+    def test_google_calendar_requires_demo_signal(self):
+        events = [
+            {
+                "summary": "Lunch with Synergy Wellness",
+                "start": {"dateTime": "2026-06-20T18:15:00Z"},
+                "attendees": [{"email": "jane@example.test"}],
+            }
+        ]
+        with patch.object(cal, "GOG_CALENDAR_COMMAND", "/bin/gog-shapescale"), \
+                patch.object(cal, "GOG_CALENDAR_IDS", "primary"), \
+                patch("subprocess.run", return_value=self.Completed(json.dumps(events))), \
+                patch.object(attio, "_query_records", return_value=[]):
+            ctx = cal.build_calendar_context("Jane jane@example.test Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)
+        self.assertFalse(ctx["usable"])
+        self.assertEqual(ctx["status"], "not_found")
+
     def test_attio_path_strips_timestamp(self):
         with patch.object(attio, "_query_records", return_value=[DEAL]):
             ctx = cal.build_calendar_context("Jane Synergy Wellness 2026-06-20T17:00:00Z", now=NOW)

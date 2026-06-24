@@ -1,6 +1,9 @@
 # AGENTS.md - Dialpad OpenClaw Skill
 
-Inherits all rules from the parent workspace `../AGENTS.md`.
+## Scope
+
+This is the `dialpad-openclaw-skill` repo. It contains the Dialpad webhook server,
+SMS/call enrichment, and OpenClaw hook integration.
 
 ## PR Review Policy
 

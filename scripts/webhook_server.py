@@ -4011,10 +4011,13 @@ _QMD_STOPWORDS = frozenset(
     """a an the is are am be was were do does did how what when where why who whom
     which can could would should will to for of on in at by with from my your our we
     us i you me it this that these those and or but if so about get got have has had
-    need want much many cost costs price priced work works working please thanks
+    need want much many work works working please thanks
     thank hi hello there here just like into out up down over more most any some
     your shapescale shape scale""".split()
 )
+# cost/costs/price/priced are NOT stopwords: they discriminate pricing docs from
+# availability docs that merely mention "pricing" in their heading. Keeping them
+# in the AND-query prevents a cost question from collapsing to the bare anchor.
 
 
 def _knowledge_query_for_category(category, text):
@@ -4045,12 +4048,27 @@ def _knowledge_query_for_category(category, text):
     return " ".join(tokens)
 
 
+# Reject knowledge drafts whose lead is an availability disclaimer, not an
+# answer (the May 2024 Home pricing doc opens with "not available for new
+# orders" before the real pricing details). Checked against the first 120
+# chars only, so a doc that mentions availability later (after pricing facts)
+# still composes.
+_AVAILABILITY_DISCLAIMER_RE = re.compile(
+    r"\bnot\s+available\s+for\s+(?:new\s+)?orders?(?:\s+or\s+preorders?)?\b"
+    r"|\b(?:waitlist|pre[-\s]?order\s+only|out\s+of\s+stock|discontinued)\b",
+    re.IGNORECASE,
+)
+_LEAD_DISCLAIMER_CHECK_CHARS = 120
+
+
 def _compose_knowledge_sms(category, knowledge_text):
     compact = " ".join(str(knowledge_text or "").split())
     if not compact:
         return None
     compact = re.sub(r"\[[^\]]+\]\([^)]+\)", "", compact).strip()
     compact = re.sub(r"\s+", " ", compact)
+    if _AVAILABILITY_DISCLAIMER_RE.search(compact[:_LEAD_DISCLAIMER_CHECK_CHARS]):
+        return None
     if len(compact) > 240:
         compact = compact[:237].rstrip() + "..."
 

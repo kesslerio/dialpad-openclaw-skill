@@ -1579,16 +1579,63 @@ def test_knowledge_query_is_deterministic_and_dedupes_anchor():
 def test_knowledge_query_extracts_salient_keywords_for_and_search():
     # qmd search is AND-based, so the query must be a few high-signal content words,
     # not the full sentence (which matches nothing). Stopwords + brand are dropped.
+    # `cost`/`price` are kept (not stopwords) because they discriminate pricing docs
+    # from availability docs that merely mention "pricing" in their heading.
     assert webhook_server._knowledge_query_for_category(
         "pricing", "how much does ShapeScale for home cost"
-    ) == "pricing home"
+    ) == "pricing cost home"
     q = webhook_server._knowledge_query_for_category("product", "how does the business scanner work")
     assert set(q.split()) == {"business", "scanner"}
     # No anchor + no salient keywords -> empty query so the lookup fails closed
     # (rather than searching the brand alone and matching an arbitrary doc).
     assert webhook_server._knowledge_query_for_category("product", "how does it work") == ""
-    # An anchored category still yields a query even with all-stopword text.
-    assert webhook_server._knowledge_query_for_category("pricing", "how much does it cost") == "pricing"
+    # An anchored category keeps the discriminating keyword ("cost") so the query
+    # doesn't collapse to the bare anchor and surface the wrong doc.
+    assert webhook_server._knowledge_query_for_category("pricing", "how much does it cost") == "pricing cost"
+
+
+def test_knowledge_query_keeps_cost_keyword_for_pricing_question():
+    # Regression: "I want to know cost please" used to collapse to just "pricing"
+    # because cost/want/know/please were all stopwords. The bare "pricing" query
+    # surfaced the Home availability doc (whose body starts with a May 2024
+    # "not available for new orders" disclaimer) instead of pricing details.
+    # `cost` must survive stopword stripping so the AND query discriminates.
+    assert webhook_server._knowledge_query_for_category("pricing", "I want to know cost please") == "pricing cost know"
+
+
+def test_compose_knowledge_sms_skips_availability_disclaimer_at_lead():
+    # Regression: the Home pricing doc's first paragraph is a May 2024 availability
+    # disclaimer ("not available for new orders or preorders"), not pricing. The
+    # 240-char truncation captured only the disclaimer. A doc whose prose LEADS
+    # with an availability disclaimer must fail closed rather than ship the wrong
+    # answer to a pricing question.
+    disclaimer = (
+        "As of May 2024, ShapeScale for Home is not available for new orders or preorders. "
+        "Our focus is currently set on fulfilling existing preorders. "
+        "We recommend joining our waitlist on our website to stay updated on availability."
+    )
+    assert webhook_server._compose_knowledge_sms("pricing", disclaimer) is None
+    assert webhook_server._compose_knowledge_sms("product", disclaimer) is None
+
+
+def test_compose_knowledge_sms_keeps_pricing_details_without_disclaimer():
+    # A clean pricing answer with no availability disclaimer must still compose.
+    pricing_answer = "ShapeScale for Business is $9,990 to purchase or $299/month on a 12-month lease."
+    composed = webhook_server._compose_knowledge_sms("pricing", pricing_answer)
+    assert composed is not None
+    assert "9,990" in composed
+
+
+def test_compose_knowledge_sms_keeps_pricing_when_disclaimer_is_not_lead():
+    # A doc that has pricing facts FIRST and mentions availability LATER must
+    # still compose — the regex is anchored to the lead, not the full body.
+    pricing_then_disclaimer = (
+        "ShapeScale for Business is $9,990 to purchase or $299/month on a 12-month lease. "
+        "ShapeScale for Home is currently on waitlist."
+    )
+    composed = webhook_server._compose_knowledge_sms("pricing", pricing_then_disclaimer)
+    assert composed is not None
+    assert "9,990" in composed
 
 
 def test_failed_rich_lookup_is_cached_for_generic_fallback(monkeypatch):

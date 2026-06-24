@@ -1600,22 +1600,32 @@ def test_knowledge_query_keeps_cost_keyword_for_pricing_question():
     # surfaced the Home availability doc (whose body starts with a May 2024
     # "not available for new orders" disclaimer) instead of pricing details.
     # `cost` must survive stopword stripping so the AND query discriminates.
-    assert webhook_server._knowledge_query_for_category("pricing", "I want to know cost please") == "pricing cost know"
+    assert webhook_server._knowledge_query_for_category("pricing", "I want to know cost please") == "pricing cost"
 
 
-def test_compose_knowledge_sms_skips_availability_disclaimer_at_lead():
+def test_compose_knowledge_sms_skips_availability_disclaimer_at_lead_for_pricing():
     # Regression: the Home pricing doc's first paragraph is a May 2024 availability
     # disclaimer ("not available for new orders or preorders"), not pricing. The
     # 240-char truncation captured only the disclaimer. A doc whose prose LEADS
-    # with an availability disclaimer must fail closed rather than ship the wrong
-    # answer to a pricing question.
+    # with an availability disclaimer must fail closed for pricing questions
+    # rather than ship the wrong answer. Scoped to pricing — availability IS
+    # the correct answer for product questions like "do you still sell Home?".
     disclaimer = (
         "As of May 2024, ShapeScale for Home is not available for new orders or preorders. "
         "Our focus is currently set on fulfilling existing preorders. "
         "We recommend joining our waitlist on our website to stay updated on availability."
     )
     assert webhook_server._compose_knowledge_sms("pricing", disclaimer) is None
-    assert webhook_server._compose_knowledge_sms("product", disclaimer) is None
+
+
+def test_compose_knowledge_sms_keeps_availability_answer_for_product_category():
+    # Availability IS the correct answer for product questions like "do you still
+    # sell the consumer version?" — the disclaimer guard is scoped to pricing only.
+    disclaimer = (
+        "As of May 2024, ShapeScale for Home is not available for new orders or preorders. "
+        "We recommend joining our waitlist to stay updated on availability."
+    )
+    assert webhook_server._compose_knowledge_sms("product", disclaimer) is not None
 
 
 def test_compose_knowledge_sms_keeps_pricing_details_without_disclaimer():

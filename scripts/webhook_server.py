@@ -1587,7 +1587,7 @@ def _claim_dedupe_row(conn, table, retention_ms, key, timestamp_ms):
 def _missed_call_dedupe_db_path():
     if sms_approval is not None and getattr(sms_approval, "DB_PATH", None):
         return Path(sms_approval.DB_PATH)
-    return Path(os.environ.get("DIALPAD_MISSED_CALL_DEDUPE_DB", "/home/art/clawd/logs/sms_approvals.db"))
+    return Path(os.environ.get("DIALPAD_MISSED_CALL_DEDUPE_DB", "/home/art/niemand/logs/sms_approvals.db"))
 
 
 def _init_missed_call_dedupe_db(db_path=None):
@@ -1635,7 +1635,7 @@ def claim_missed_call_notification(dedupe_key, *, db_path=None, now_ms=None):
 def _sms_dedupe_db_path():
     if sms_approval is not None and getattr(sms_approval, "DB_PATH", None):
         return Path(sms_approval.DB_PATH)
-    return Path(os.environ.get("DIALPAD_SMS_DEDUPE_DB", "/home/art/clawd/logs/sms_approvals.db"))
+    return Path(os.environ.get("DIALPAD_SMS_DEDUPE_DB", "/home/art/niemand/logs/sms_approvals.db"))
 
 
 def _init_sms_dedupe_db(db_path=None):

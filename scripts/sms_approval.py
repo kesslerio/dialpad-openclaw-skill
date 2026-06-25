@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-DB_PATH = Path(os.environ.get("DIALPAD_SMS_APPROVAL_DB", "/home/art/clawd/logs/sms_approvals.db"))
+DB_PATH = Path(os.environ.get("DIALPAD_SMS_APPROVAL_DB", "/home/art/niemand/logs/sms_approvals.db"))
 DEFAULT_EMERGENCY_OPT_OUT_PATH = Path("/tmp/dialpad_sms_approval_emergency_opt_outs.jsonl")
 _EMERGENCY_OPT_OUT_MEMORY: set[str] = set()
 

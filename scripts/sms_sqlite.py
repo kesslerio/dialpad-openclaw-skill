@@ -36,12 +36,12 @@ def redact_preview(text, **kwargs):
 
 # Database path
 def resolve_db_path() -> Path:
-    return Path(os.environ.get("DIALPAD_SMS_DB", "/home/art/clawd/logs/sms.db")).expanduser()
+    return Path(os.environ.get("DIALPAD_SMS_DB", "/home/art/niemand/logs/sms.db")).expanduser()
 
 
 DB_PATH = resolve_db_path()
-LEGACY_THREADS_DIR = Path("/home/art/clawd/logs/sms_threads")
-LEGACY_LOG = Path("/home/art/clawd/logs/dialpad_sms.jsonl")
+LEGACY_THREADS_DIR = Path("/home/art/niemand/logs/sms_threads")
+LEGACY_LOG = Path("/home/art/niemand/logs/dialpad_sms.jsonl")
 
 
 def init_db() -> sqlite3.Connection:

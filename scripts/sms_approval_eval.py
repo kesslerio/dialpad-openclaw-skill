@@ -86,8 +86,8 @@ STALE_REASON_VERDICTS: dict[str, str] = {
 # silently counted as accept or reject.
 DEFAULT_STALE_VERDICT = VERDICT_EXCLUDED
 
-DEFAULT_APPROVAL_DB = "/home/art/clawd/logs/sms_approvals.db"
-DEFAULT_SMS_DB = "/home/art/clawd/logs/sms.db"
+DEFAULT_APPROVAL_DB = "/home/art/niemand/logs/sms_approvals.db"
+DEFAULT_SMS_DB = "/home/art/niemand/logs/sms.db"
 DEFAULT_WINDOW_DAYS = 7
 
 

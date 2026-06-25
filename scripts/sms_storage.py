@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 # Base paths
-THREADS_DIR = Path("/home/art/clawd/logs/sms_threads")
-LEGACY_LOG = Path("/home/art/clawd/logs/dialpad_sms.jsonl")
+THREADS_DIR = Path("/home/art/niemand/logs/sms_threads")
+LEGACY_LOG = Path("/home/art/niemand/logs/dialpad_sms.jsonl")
 
 
 def sanitize_number(number: str) -> str:

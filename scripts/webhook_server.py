@@ -136,7 +136,7 @@ DIALPAD_MERGED_DRAFT_FLOW = parse_bool_env(
     os.environ.get("DIALPAD_MERGED_DRAFT_FLOW"),
     False,
 )
-DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS = int(os.environ.get("DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS", "30"))
+DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS = int(os.environ.get("DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS", "180"))
 DIALPAD_DRAFT_CALLBACK_MAX_CHARS = 1000
 DIALPAD_SMS_TELEGRAM_NOTIFY = os.environ.get("DIALPAD_SMS_TELEGRAM_NOTIFY", "1").lower() in {"1", "true", "yes", "on"}
 DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED = parse_bool_env(
@@ -3896,45 +3896,77 @@ def _crm_reply_message(normalized_event, sender_enrichment, crm_context):
     confidence = (normalized_event.get("inbound_context") or {}).get("identityConfidence")
     company = str(crm_context.get("company") or "").strip()
     is_missed_call = _is_missed_call_event(normalized_event)
-    # Segment framing is CUSTOMER-facing, so it rides the same high-confidence gate
-    # as naming the company (PR3/U7 PII rule). A low/medium-confidence Attio
-    # phone-match may be wrong (reused/ported/shared number); at lower confidence we
-    # return the existing generic line and let the operator personalize from the
-    # provenance line + segment shown on the approval card before approving.
     opening = _crm_reply_opening(is_missed_call)
-    if confidence != "high":
-        return f"Hi {greeting}, {opening}. I have your ShapeScale conversation here and will follow up shortly."
 
+    # PII safety: company names are only safe at high confidence (reused/ported
+    # phone may match the wrong person). Segment framing without company names
+    # is safe at any confidence — "I saw your demo request" doesn't leak PII.
+    safe_company = company if confidence == "high" else ""
+    with_company = f" with {safe_company}" if safe_company else ""
+
+    # Classify segment from CRM context regardless of confidence. At low
+    # confidence we skip company names but still produce segment-aware copy.
     segment = classify_deal_segment(crm_context.get("stage"))
     inbound_context = normalized_event.get("inbound_context")
     if isinstance(inbound_context, dict) and segment:
-        # Surface the segment to the operator (brief + dedup fingerprint). Setting
-        # this alone is invisible — build_inbound_context_brief renders it.
         inbound_context["dealSegment"] = segment
 
-    # Per-segment copy reads fine even if the phone-match is wrong: no "as a
-    # churned customer" framing, just a warm/relevant-but-safe opener. The company
-    # name is still only named when present (company-empty-at-high stays handled).
-    with_company = f" with {company}" if company else ""
+    # Stamp urgency when demo is within 2 hours (operator-facing, safe at any confidence)
+    if isinstance(inbound_context, dict) and segment == "prospect_demo":
+        calendar_context = normalized_event.get("calendar_context")
+        if isinstance(calendar_context, dict):
+            demo_state = calendar_context.get("demoState")
+            starts_in = calendar_context.get("startsInMinutes")
+            if demo_state == "upcoming" and isinstance(starts_in, (int, float)) and starts_in <= 120:
+                inbound_context["urgency"] = f"demo in {int(starts_in)} min — consider calling back"
+
+    # No segment match but CRM context is usable → generic copy with company (high confidence only)
+    if not segment:
+        return f"Hi {greeting}, {opening}. I have your ShapeScale conversation{with_company} here and will follow up shortly."
+
     if segment == "customer":
         if is_missed_call:
             return f"Hi {greeting}, {opening}. I have your ShapeScale account{with_company} here and will follow up shortly."
         return f"Hi {greeting}, great to hear from you again. I have your ShapeScale account{with_company} here and will follow up shortly."
+
     if segment == "prospect_demo":
         calendar_context = normalized_event.get("calendar_context")
-        calendar_status = (calendar_context or {}).get("status") if isinstance(calendar_context, dict) else None
-        if is_missed_call and _normalize_stage_title(crm_context.get("stage")) == "demo request" and calendar_status == "not_found":
-            return (
-                f"Hi {greeting}, {opening}. I saw your ShapeScale demo request{with_company} "
-                f"and that booking may not have gone through. You can grab a time here: "
-                f"{DIALPAD_BOOK_DEMO_URL}, or text me a couple times that work and I'll help coordinate."
-            )
+        demo_state = (calendar_context or {}).get("demoState") if isinstance(calendar_context, dict) else None
+        starts_in = (calendar_context or {}).get("startsInMinutes") if isinstance(calendar_context, dict) else None
+        stage_normalized = _normalize_stage_title(crm_context.get("stage"))
+
+        if is_missed_call:
+            if demo_state == "upcoming" and isinstance(starts_in, (int, float)):
+                if starts_in <= 60:
+                    timing = f"in {int(starts_in)} minutes"
+                elif starts_in <= 1440:
+                    timing = f"later today"
+                else:
+                    timing = f"on {datetime.now().strftime('%A')}"
+                return (
+                    f"Hi {greeting}, {opening}. You're scheduled for a ShapeScale demo {timing}. "
+                    f"Is there something you wanted to ask ahead of time? Happy to call back if that's easier."
+                )
+            if stage_normalized == "demo request" and (demo_state == "not_found" or
+                (isinstance(calendar_context, dict) and calendar_context.get("status") == "not_found")):
+                return (
+                    f"Hi {greeting}, {opening}. I saw your ShapeScale demo request{with_company} "
+                    f"and that booking may not have gone through. You can grab a time here: "
+                    f"{DIALPAD_BOOK_DEMO_URL}, or text me a couple times that work and I'll help coordinate."
+                )
+            if demo_state == "recent":
+                return (
+                    f"Hi {greeting}, {opening}. I saw your recent ShapeScale demo — "
+                    f"happy to follow up on any questions that came up."
+                )
         return f"Hi {greeting}, {opening}. I have your ShapeScale demo conversation{with_company} here and will follow up shortly."
+
     if segment == "prospect_cold":
         if is_missed_call:
             return f"Hi {greeting}, {opening}. I have your ShapeScale conversation{with_company} here and will follow up shortly with more details."
         return f"Hi {greeting}, thanks for reaching out about ShapeScale. I have your conversation{with_company} here and will follow up shortly with more details."
-    # generic (None / Lost / Not a Fit / unmapped) — current copy, no special voice.
+
+    # generic (None / Lost / Not a Fit / unmapped)
     return f"Hi {greeting}, {opening}. I have your ShapeScale conversation{with_company} here and will follow up shortly."
 
 
@@ -4526,6 +4558,9 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
             "prospect_cold": "Prospect (cold)",
         }.get(segment, segment)
         lines.append(f"*Segment:* {escape_telegram_markdown(segment_label)}")
+    urgency = inbound_context.get("urgency")
+    if urgency:
+        lines.append(f"⚠️ *Urgency:* {escape_telegram_markdown(urgency)}")
     source_statuses = inbound_context.get("sourceStatuses") or {}
     if isinstance(source_statuses, dict) and source_statuses:
         rendered = []
@@ -5046,10 +5081,10 @@ def format_hook_message(normalized_event, line_display=None, callback_url=None,
 
     if callback_url and callback_job_id:
         lines.append("")
-        lines.append("Reply-Draft Callback: POST your final answer (plain text only) to:")
-        lines.append(callback_url)
-        lines.append(f"Header: X-Callback-Token: {callback_token}")
-        lines.append(f'JSON body: {{"jobId": "{callback_job_id}", "draft": "<your answer>"}}')
+        lines.append("Reply-Draft Callback: When you have a draft reply ready, call the submit_draft tool with:")
+        lines.append(f'- jobId: "{callback_job_id}"')
+        lines.append(f'- draft: "<your draft reply text>"')
+        lines.append(f"(Fallback: if the tool is unavailable, HTTP POST to {callback_url} with header X-Callback-Token: {callback_token} and JSON body {{\"jobId\": \"{callback_job_id}\", \"draft\": \"<your answer>\"}})")
 
     return "\n".join(lines)
 

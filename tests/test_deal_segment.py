@@ -129,29 +129,36 @@ class SegmentFramingHighConfidenceTests(unittest.TestCase):
 
 
 class SegmentFramingGateTests(unittest.TestCase):
-    """Segment framing is customer-facing → only at high confidence."""
-
-    GENERIC_HIGH_NO_COMPANY = "Hi there, thanks for the update. I have your ShapeScale conversation here and will follow up shortly."
+    """Segment framing is now produced at any confidence (relaxed gate).
+    Company names remain gated at high confidence only (PII safety)."""
 
     def _msg(self, confidence, stage="Won 🎉", company="Acme Corp"):
         crm = {"usable": True, "company": company, "stage": stage}
         ev = {"inbound_context": {"identityConfidence": confidence}}
         return ws._crm_reply_message(ev, {}, crm)
 
-    def test_medium_low_none_return_generic_line_unchanged(self):
+    def test_sub_high_confidence_gets_segment_copy_without_company(self):
+        """At medium/low/None confidence, segment-aware copy is produced but company name is suppressed."""
         for confidence in ("medium", "low", None):
-            msg = self._msg(confidence)
-            self.assertEqual(msg, self.GENERIC_HIGH_NO_COMPANY, confidence)
-            # No segment voice and no company name leak at sub-high confidence.
-            self.assertNotIn("great to hear", msg)
-            self.assertNotIn("Acme Corp", msg)
+            msg = self._msg(confidence, stage="Won 🎉", company="Acme Corp")
+            # Segment-aware copy: "great to hear from you again" for customer segment
+            self.assertIn("great to hear", msg, confidence)
+            # PII safety: no company name at sub-high confidence
+            self.assertNotIn("Acme Corp", msg, confidence)
 
-    def test_segment_not_set_on_inbound_context_below_high(self):
+    def test_sub_high_confidence_prospect_demo_without_company(self):
+        """At low confidence, prospect_demo segment copy is produced without company name."""
+        msg = self._msg("low", stage="Demo Request", company="Acme Spa")
+        self.assertIn("demo conversation", msg.lower())
+        self.assertNotIn("Acme Spa", msg)
+
+    def test_segment_set_on_inbound_context_below_high(self):
+        """dealSegment is now stamped at any confidence (operator-facing, safe)."""
         for confidence in ("medium", "low", None):
             crm = {"usable": True, "company": "Acme Corp", "stage": "Won 🎉"}
             ev = {"inbound_context": {"identityConfidence": confidence}}
             ws._crm_reply_message(ev, {}, crm)
-            self.assertNotIn("dealSegment", ev["inbound_context"], confidence)
+            self.assertEqual(ev["inbound_context"]["dealSegment"], "customer", confidence)
 
     def test_segment_set_on_inbound_context_at_high(self):
         crm = {"usable": True, "company": "Acme Corp", "stage": "Demo Booked"}

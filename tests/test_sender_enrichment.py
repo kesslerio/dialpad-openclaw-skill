@@ -4328,7 +4328,7 @@ def test_hook_payload_deliver_respects_operator_notification_when_no_merge():
 def test_merged_flow_disabled_by_default(monkeypatch):
     """U5: DIALPAD_MERGED_DRAFT_FLOW defaults to False."""
     assert webhook_server.DIALPAD_MERGED_DRAFT_FLOW is False
-    assert webhook_server.DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS == 30
+    assert webhook_server.DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS == 180
 
 
 def test_generate_draft_job_id_unique():
@@ -4372,3 +4372,166 @@ def test_render_merged_card_sends_telegram(monkeypatch, tmp_path):
     assert "agent draft text" in tg_text
     assert sent_messages[0][1]["chat_id"] == "-100"
     assert sent_messages[0][1]["message_thread_id"] == "3530"
+
+
+# ===== Context-Aware Missed-Call Draft tests (U2-U3) =====
+
+def test_missed_call_low_confidence_with_crm_gets_segment_copy_without_company():
+    """U2: low confidence + CRM match with demo-request segment → segment-aware copy, no company name."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "low"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Request",
+        },
+        "calendar_context": {"usable": False, "status": "not_found"},
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "demo request" in msg.lower()
+    assert "Acme Spa" not in msg  # PII safety: no company at low confidence
+
+
+def test_missed_call_low_confidence_no_crm_gets_generic():
+    """U2: low confidence + no CRM → generic copy (existing behavior)."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "low"},
+        "crm_context": {"usable": False, "status": "not_configured"},
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "sorry we missed your call" in msg
+    assert "will follow up shortly" in msg
+
+
+def test_missed_call_demo_booked_includes_timing():
+    """U2: high confidence + demo booked + upcoming → draft includes demo timing."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Booked",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "upcoming",
+            "startsInMinutes": 45,
+        },
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "scheduled for a ShapeScale demo" in msg
+    assert "in 45 minutes" in msg
+    assert "Is there something you wanted to ask" in msg
+
+
+def test_missed_call_demo_recent_mentions_followup():
+    """U2: high confidence + demo recent → draft mentions recent demo."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Completed",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "recent",
+        },
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "recent ShapeScale demo" in msg
+    assert "follow up" in msg.lower()
+
+
+def test_missed_call_urgency_stamped_when_demo_within_2h():
+    """U2: demo in 90 min → inbound_context urgency is set."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Booked",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "upcoming",
+            "startsInMinutes": 90,
+        },
+    }
+    webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert event["inbound_context"]["urgency"] == "demo in 90 min — consider calling back"
+
+
+def test_missed_call_no_urgency_when_demo_beyond_2h():
+    """U2: demo in 3h → no urgency stamped."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Booked",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "upcoming",
+            "startsInMinutes": 180,
+        },
+    }
+    webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "urgency" not in event["inbound_context"]
+
+
+def test_inbound_context_brief_includes_urgency_when_set():
+    """U3: urgency set → brief includes urgency line."""
+    brief = webhook_server.build_inbound_context_brief({"urgency": "demo in 45 min — consider calling back"})
+    assert "Urgency" in brief
+    assert "demo in 45 min" in brief
+
+
+def test_inbound_context_brief_no_urgency_when_not_set():
+    """U3: no urgency → brief does not include urgency line."""
+    brief = webhook_server.build_inbound_context_brief({})
+    assert "Urgency" not in brief
+
+
+def test_hook_message_uses_submit_draft_tool_when_merged_flow_active():
+    """U4: hook message references submit_draft tool, not raw HTTP POST."""
+    event = {
+        "event_type": "sms",
+        "sender": "John",
+        "sender_number": "+15551234567",
+        "recipient_number": "+14155201316",
+        "text": "hello",
+        "timestamp": 123,
+    }
+    msg = webhook_server.format_hook_message(
+        event,
+        callback_url="http://127.0.0.1:8081/internal/draft-callback",
+        callback_job_id="job-789",
+        callback_token="tok-xyz",
+    )
+    assert "submit_draft" in msg
+    assert "jobId" in msg
+    assert "draft" in msg
+    # Fallback URL still present for backward compat
+    assert "draft-callback" in msg

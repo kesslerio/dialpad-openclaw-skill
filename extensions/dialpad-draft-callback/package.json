@@ -1,0 +1,20 @@
+{
+  "name": "dialpad-draft-callback",
+  "version": "1.0.0",
+  "description": "Submit a draft reply to the Dialpad webhook server.",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  },
+  "scripts": {
+    "build": "tsc",
+    "plugin:build": "openclaw plugins build",
+    "plugin:validate": "openclaw plugins validate"
+  },
+  "dependencies": {
+    "typebox": "^0.34.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

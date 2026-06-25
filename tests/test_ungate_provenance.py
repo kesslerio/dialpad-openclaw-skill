@@ -198,9 +198,12 @@ class CustomerTextSafetyTests(unittest.TestCase):
             for tok in ("Attio:", "stage:", "QMD", "Calendar:", "↳"):
                 self.assertNotIn(tok, msg, f"{tok} leaked at {conf}")
 
-    def test_low_confidence_draft_is_safe_generic_crm_line(self):
+    def test_low_confidence_draft_is_safe_segment_copy_without_company(self):
+        """At low confidence, segment-aware copy is produced but company name is suppressed (PII safety)."""
         msg = self._msg("low")
-        self.assertIn("ShapeScale conversation here", msg)  # company-free
+        # prospect_demo segment → "demo conversation" (not generic "conversation")
+        self.assertIn("ShapeScale", msg)
+        self.assertNotIn("Acme Corp", msg)  # no company at low confidence
 
     def test_greeting_suppresses_name_at_low_confidence(self):
         crm = {"usable": True, "company": "Acme"}

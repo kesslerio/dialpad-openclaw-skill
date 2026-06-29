@@ -109,6 +109,31 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(parsed["data"]["delivery_status_raw"], "pending")
         self.assertNotIn("message_status", parsed["data"])
 
+    def test_send_sms_json_dry_run_omits_audit_when_unused(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")):
+            code, out, err = self._run(
+                send_sms,
+                [
+                    "bin/send_sms.py",
+                    "--to",
+                    "+14155550111",
+                    "--message",
+                    "hello",
+                    "--from",
+                    "+14155201316",
+                    "--dry-run",
+                    "--json",
+                ],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "send_sms.send")
+        self.assertEqual(parsed["data"]["mode"], "dry_run")
+        self.assertNotIn("approval_audit", parsed["data"])
+
     def test_send_sms_json_error_envelope(self):
         with patch(
             "send_sms.require_generated_cli",

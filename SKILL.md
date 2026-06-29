@@ -31,6 +31,11 @@ Use this skill to:
 bin/send_sms.py --to "+14155551234" --from "+14155201316" --message 'Hello from OpenClaw!'
 ```
 
+**Send an operator-approved SMS and close a shown approval draft (agent direct path):**
+```bash
+bin/send_sms.py --to "+14155551234" --from "+14155201316" --message 'Exact approved text' --resolve-draft-id smsdraft_abc123 --approval-actor-id "telegram-user-123" --approval-actor-username "operator" --json
+```
+
 **Create/approve an SMS draft (human approval path):**
 ```bash
 bin/create_sms_draft.py --thread-key "manual:thread" --to "+14155551234" --from "+14155201316" --message 'Exact draft text' --json
@@ -104,9 +109,10 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 14. **Current-turn verification:** "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory. If the current turn has not verified the action yet, say that plainly and run the tool now.
 15. **Identity guardrail:** For first-contact work, soft signals like first name, area code, industry, or job title are not enough to merge or update a contact. Keep uncertain identity `draft-only` and let the CRM layer prove the match before mutating anything.
 16. **Inbound context guardrail:** Webhook `inboundContext` briefs explain identity evidence, recent SMS/call continuity, source status, and draft basis. Low-confidence Sales SMS and missed calls may get generic approval drafts, but not personalized claims. Known contacts only get context-aware, CRM-aware, meeting-aware, or availability-aware approval drafts when identity confidence is high and relevant continuity is no older than 14 days; stale or degraded context stays brief-only. Calendar lookup is only for obvious meeting logistics and demo-prospect availability requests, not every inbound SMS. If availability cannot be verified, do not turn the CRM generic fallback into a scheduling reply. Demo-context missed calls may include operator-only prior-comms provenance from SMS/Gmail counts; raw comms bodies must not be copied into customer-facing draft text. If a model is used for final wording, it must receive compact tool-call facts plus the deterministic fallback and fail closed to that fallback on unsafe or unsupported output.
-17. **Inbound automation guardrail:** Dialpad inbound hooks may create SMS approval drafts, but they must not send customer SMS directly. Use `bin/approve_sms_draft.py` only with a real human actor id and an operator-only `DIALPAD_SMS_APPROVAL_TOKEN`; agent/bot actors are rejected by the approval ledger.
-18. **Opt-out guardrail:** Explicit opt-out language is a hard stop. Do not create override drafts or send follow-ups on those threads unless a human operator handles the conversation outside automation.
-19. **Operator notification ownership:** One inbound SMS or missed call should create one operator-visible Telegram message per target by default. When the local Dialpad Telegram approval card and OpenClaw hook route point at the same Telegram destination, the local card owns visibility and the hook is context-only with `deliver=false`. Use `DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY=1` only for intentional same-target fanout.
+17. **Inbound automation guardrail:** Dialpad inbound hooks may create SMS approval drafts, but they must not send customer SMS directly. Use `bin/approve_sms_draft.py` only with a real human actor id and an operator-only `DIALPAD_SMS_APPROVAL_TOKEN`; agent/bot actors are rejected by the trusted approval ledger.
+18. **Operator-approved agent sends:** Agents may send SMS with `bin/send_sms.py` after explicit current-turn operator approval. When resolving a shown approval draft, pass `--resolve-draft-id` plus `--approval-actor-id`/`--approval-actor-username` so the draft closes as an audited `agent_direct_send`; that actor context is agent-asserted unless it came through a trusted Telegram/shell approval surface. Risky drafts still require the existing two-step approval state before `--confirm-risk` can send.
+19. **Opt-out guardrail:** Explicit opt-out language is a hard stop. Do not create override drafts or send follow-ups on those threads unless a human operator handles the conversation outside automation.
+20. **Operator notification ownership:** One inbound SMS or missed call should create one operator-visible Telegram message per target by default. When the local Dialpad Telegram approval card and OpenClaw hook route point at the same Telegram destination, the local card owns visibility and the hook is context-only with `deliver=false`. Use `DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY=1` only for intentional same-target fanout.
 
 ## Reference Documentation
 

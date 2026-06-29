@@ -22,6 +22,11 @@ from _dialpad_compat import (
     WrapperError,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import sms_approval
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = WrapperArgumentParser(description="Send SMS via Dialpad API")
@@ -50,6 +55,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-suspicious-currency",
         action="store_true",
         help="Bypass malformed-currency preflight for intentionally unusual numeric text",
+    )
+    parser.add_argument(
+        "--resolve-draft-id",
+        help="Resolve an existing SMS approval draft after explicit operator approval",
+    )
+    parser.add_argument(
+        "--approval-actor-id",
+        help="Operator id/name that explicitly approved this direct agent send",
+    )
+    parser.add_argument("--approval-actor-username", help="Operator username/display name for audit context")
+    parser.add_argument("--approval-actor-is-bot", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--confirm-risk",
+        action="store_true",
+        help="Confirm the operator explicitly approved sending a risky draft",
     )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     return parser
@@ -171,6 +191,155 @@ def annotate_message_status(result: object) -> object:
     return annotated
 
 
+def _audit_args_present(args: argparse.Namespace) -> bool:
+    return any(
+        (
+            args.resolve_draft_id,
+            args.approval_actor_id,
+            args.approval_actor_username,
+            args.approval_actor_is_bot,
+            args.confirm_risk,
+        )
+    )
+
+
+def preflight_approval_audit(
+    args: argparse.Namespace,
+    *,
+    sender_number: str,
+    message_text: str,
+    claim: bool = False,
+) -> dict[str, object] | None:
+    if not _audit_args_present(args):
+        return None
+    if not args.resolve_draft_id:
+        raise WrapperError(
+            "Approval audit flags require --resolve-draft-id.",
+            code="invalid_argument",
+            retryable=False,
+        )
+    if not args.approval_actor_id:
+        raise WrapperError(
+            "--approval-actor-id is required with --resolve-draft-id.",
+            code="invalid_argument",
+            retryable=False,
+        )
+    if len(args.to) != 1:
+        raise WrapperError(
+            "--resolve-draft-id supports exactly one --to recipient.",
+            code="invalid_argument",
+            retryable=False,
+        )
+
+    conn = sms_approval.init_db()
+    try:
+        result = sms_approval.preflight_agent_direct_send(
+            conn,
+            draft_id=args.resolve_draft_id,
+            actor_id=args.approval_actor_id,
+            actor_username=args.approval_actor_username,
+            customer_number=args.to[0],
+            sender_number=sender_number,
+            draft_text=message_text,
+            actor_is_bot=args.approval_actor_is_bot,
+            confirm_risk=args.confirm_risk,
+            claim=claim,
+        )
+    finally:
+        conn.close()
+
+    expected_status = "claimed" if claim else "ready"
+    if not result.get("ok") or result.get("status") != expected_status:
+        sanitized_result = {
+            "ok": bool(result.get("ok")),
+            "status": result.get("status"),
+            "reason": result.get("reason"),
+            "draft_id": args.resolve_draft_id,
+            "approval_source": sms_approval.APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+            "approval_actor_trust": sms_approval.APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+        }
+        raise WrapperError(
+            str(result.get("reason") or result.get("status") or "approval_audit_preflight_failed"),
+            code="validation_failed",
+            retryable=False,
+            meta={"approval_audit": sanitized_result},
+        )
+    return {
+        "draft_id": args.resolve_draft_id,
+        "status": expected_status,
+        "approval_source": sms_approval.APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+        "approval_actor_trust": sms_approval.APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+    }
+
+
+def record_approval_audit(args: argparse.Namespace, send_result: object) -> dict[str, object] | None:
+    if not args.resolve_draft_id:
+        return None
+
+    try:
+        conn = sms_approval.init_db()
+        try:
+            result = sms_approval.record_agent_direct_send(
+                conn,
+                draft_id=args.resolve_draft_id,
+                actor_id=args.approval_actor_id,
+                actor_username=args.approval_actor_username,
+                send_result=send_result,
+            )
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - SMS API already returned; report audit failure without encouraging retry.
+        return {
+            "ok": False,
+            "status": "audit_record_failed",
+            "draft_id": args.resolve_draft_id,
+            "error": str(exc),
+            "approval_source": sms_approval.APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+            "approval_actor_trust": sms_approval.APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+        }
+
+    return {
+        "ok": bool(result.get("ok")),
+        "status": result.get("status"),
+        "sent": bool(result.get("sent")),
+        "draft_id": args.resolve_draft_id,
+        "dialpad_sms_id": result.get("dialpad_sms_id"),
+        "delivery_status": result.get("delivery_status"),
+        "error": result.get("error"),
+        "reason": result.get("reason"),
+        "approval_source": result.get("approval_source") or sms_approval.APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+        "approval_actor_trust": result.get("approval_actor_trust") or sms_approval.APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+    }
+
+
+def fail_claimed_approval_audit(args: argparse.Namespace, error: Exception) -> None:
+    if not args.resolve_draft_id:
+        return
+
+    try:
+        conn = sms_approval.init_db()
+        try:
+            sms_approval.fail_agent_direct_send(
+                conn,
+                draft_id=args.resolve_draft_id,
+                error=str(error),
+            )
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def attach_approval_audit(result: object, approval_audit: dict[str, object] | None) -> object:
+    if approval_audit is None:
+        return result
+    if not isinstance(result, dict):
+        return {"result": result, "approval_audit": approval_audit}
+    annotated = dict(result)
+    annotated["approval_audit"] = approval_audit
+    return annotated
+
+
 def main() -> int:
     json_mode = "--json" in sys.argv
     command = COMMAND_IDS["send_sms.send"]
@@ -185,20 +354,24 @@ def main() -> int:
         )
         message_text, message_source = resolve_message_text(args)
         validate_message_text(message_text, args.allow_suspicious_currency)
+        approval_preflight = preflight_approval_audit(args, sender_number=sender_number, message_text=message_text)
         payload = _build_payload(args.to, message_text, args.infer_country_code, sender_number)
 
         if args.dry_run:
             if json_mode:
+                data = {
+                    "mode": "dry_run",
+                    "sender_number": sender_number,
+                    "sender_source": sender_source,
+                    "message_source": message_source,
+                    "payload": payload,
+                }
+                if approval_preflight is not None:
+                    data["approval_audit"] = approval_preflight
                 emit_success(
                     command,
                     wrapper,
-                    {
-                        "mode": "dry_run",
-                        "sender_number": sender_number,
-                        "sender_source": sender_source,
-                        "message_source": message_source,
-                        "payload": payload,
-                    },
+                    data,
                 )
             else:
                 print("Dry run: SMS not sent")
@@ -206,15 +379,28 @@ def main() -> int:
                 print(f"Message source: {message_source}")
                 print(f"To: {', '.join(args.to)}")
                 print(f"Message length: {len(message_text)}")
+                if approval_preflight:
+                    print(f"Approval audit: ready ({approval_preflight['draft_id']})")
                 print("Message preview:")
                 print(message_text)
             return 0
 
         require_api_key()
-        result = run_generated_json(["sms", "send", "--data", json.dumps(payload)])
+        approval_preflight = preflight_approval_audit(args, sender_number=sender_number, message_text=message_text, claim=True)
+        try:
+            result = run_generated_json(["sms", "send", "--data", json.dumps(payload)])
+        except WrapperError as err:
+            fail_claimed_approval_audit(args, err)
+            raise
+        approval_audit = record_approval_audit(args, result)
+        annotated_result = attach_approval_audit(result, approval_audit)
 
         if json_mode:
-            emit_success(command, wrapper, annotate_message_status(result) if isinstance(result, dict) else {"result": result})
+            emit_success(
+                command,
+                wrapper,
+                annotate_message_status(annotated_result) if isinstance(annotated_result, dict) else {"result": annotated_result},
+            )
         else:
             print(f"Selected sender: {sender_number} ({sender_source})")
             print("SMS sent successfully!")
@@ -227,6 +413,10 @@ def main() -> int:
             print(f"   From: {sender_number}")
             to_numbers = result.get("to_numbers") or args.to
             print(f"   To: {', '.join(to_numbers)}")
+            if approval_audit:
+                audit_status = approval_audit.get("status")
+                audit_label = "recorded" if approval_audit.get("ok") else "failed"
+                print(f"   Approval audit: {audit_label} ({audit_status})")
 
         return 0
     except WrapperError as err:

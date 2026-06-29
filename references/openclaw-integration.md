@@ -548,7 +548,9 @@ OpenClaw should:
 - require current-turn verification before any success claim about sending or updating
 - treat stale context as non-evidence for "Already sent" or "Already updated"
 
-Outbound send must always go through `scripts/approve_sms_draft.py` or an equivalent deterministic approval handler with a real human actor id plus a trusted approval token/callback. The agent or bot must not approve its own draft.
+Inbound automation must not send customer SMS directly. Trusted approval sends go through `bin/approve_sms_draft.py` or an equivalent deterministic approval handler with a real human actor id plus a trusted approval token/callback. Agents must not approve their own inbound-generated drafts through that trusted ledger path.
+
+Agents may send Dialpad SMS directly with `bin/send_sms.py` after explicit current-turn operator approval. If the operator approved a shown `smsdraft_*` card and wants the agent to send that exact text, include `--resolve-draft-id`, `--approval-actor-id`, and `--approval-actor-username`; the wrapper validates the stored draft text, recipient, sender, stale state, opt-out state, and risk state before calling Dialpad, then records `approval_source=agent_direct_send` and `approval_actor_trust=agent_asserted`. Risky drafts still require the existing two-step approval state before `--confirm-risk` can send. This closes the draft for audit without exposing `DIALPAD_SMS_APPROVAL_TOKEN` to the agent runtime and without claiming the actor identity is trusted Telegram/shell identity.
 
 For Telegram inline approval, the trusted callback path is:
 

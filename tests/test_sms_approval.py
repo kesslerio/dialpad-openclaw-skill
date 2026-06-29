@@ -261,6 +261,241 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertEqual(stored["status"], sms_approval.STATUS_FAILED)
         self.assertEqual(stored["send_error"], "missing_dialpad_sms_id")
 
+    def test_agent_direct_send_records_asserted_approval_context(self):
+        draft = self._draft(metadata={"message_source": "--message"})
+
+        preflight = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            actor_username="operator",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+            claim=True,
+            approved_at_ms=2000,
+        )
+        self.assertTrue(preflight["ok"])
+
+        result = sms_approval.record_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_result={"id": "sms-direct", "message_status": "pending"},
+        )
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(result["approval_source"], sms_approval.APPROVAL_SOURCE_AGENT_DIRECT_SEND)
+        self.assertEqual(result["approval_actor_trust"], sms_approval.APPROVAL_ACTOR_TRUST_AGENT_ASSERTED)
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_SENT)
+        self.assertEqual(stored["approved_by"], "12345")
+        self.assertEqual(stored["approved_username"], "operator")
+        self.assertEqual(stored["approved_at_ms"], 2000)
+        self.assertEqual(stored["dialpad_sms_id"], "sms-direct")
+        self.assertEqual(stored["metadata"]["message_source"], "--message")
+        self.assertEqual(stored["metadata"]["approval_source"], sms_approval.APPROVAL_SOURCE_AGENT_DIRECT_SEND)
+        self.assertEqual(stored["metadata"]["approval_actor_trust"], sms_approval.APPROVAL_ACTOR_TRUST_AGENT_ASSERTED)
+
+    def test_agent_direct_send_preflight_rejects_mismatched_text(self):
+        draft = self._draft()
+
+        result = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="Different text.",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "draft_text_mismatch")
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+
+    def test_agent_direct_send_preflight_rejects_mismatched_recipient_or_sender(self):
+        draft = self._draft()
+
+        recipient = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550199",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+        )
+        sender = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14153602954",
+            draft_text="See you at 2:30 PM Central.",
+        )
+
+        self.assertEqual(recipient["reason"], "recipient_mismatch")
+        self.assertEqual(sender["reason"], "sender_mismatch")
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+
+    def test_agent_direct_send_preflight_rejects_matching_last_ten_with_different_country_code(self):
+        draft = self._draft(customer_number="+441234567890")
+
+        result = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+991234567890",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "recipient_mismatch")
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+
+    def test_agent_direct_send_preflight_rejects_stale_non_manual_outbound(self):
+        draft = self._draft()
+        sms_approval.invalidate_pending(self.conn, thread_key="thread-1", reason="newer_inbound")
+
+        result = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(result["reason"], "newer_inbound")
+
+    def test_agent_direct_send_preflight_requires_existing_risky_confirmation(self):
+        draft = self._draft(
+            risk_state=sms_approval.RISK_RISKY,
+            risk_reason="customer asked for a real person",
+        )
+
+        blocked = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+        )
+        still_blocked = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+            confirm_risk=True,
+        )
+        sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            actor_username="operator",
+            send_func=lambda *_args, **_kwargs: self.fail("first step should not send"),
+        )
+        allowed_after_first_step = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+            confirm_risk=True,
+        )
+
+        self.assertEqual(blocked["status"], "risky_confirmation_required")
+        self.assertEqual(still_blocked["status"], "risky_confirmation_required")
+        self.assertTrue(allowed_after_first_step["ok"])
+
+    def test_agent_direct_send_preflight_rejects_manual_outbound_stale(self):
+        draft = self._draft()
+        sms_approval.invalidate_pending(self.conn, thread_key="thread-1", reason="manual_outbound")
+
+        result = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+            claim=True,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(result["reason"], "manual_outbound")
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_STALE)
+        self.assertEqual(stored["invalidated_reason"], "manual_outbound")
+
+    def test_agent_direct_send_claim_allows_only_one_sender(self):
+        draft = self._draft()
+
+        first = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            actor_username="first",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+            claim=True,
+            approved_at_ms=2000,
+        )
+        second = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="67890",
+            actor_username="second",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+            claim=True,
+            approved_at_ms=3000,
+        )
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["status"], "claimed")
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["reason"], sms_approval.STATUS_SENDING)
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_SENDING)
+        self.assertEqual(stored["approved_by"], "12345")
+
+    def test_agent_direct_send_claim_failure_marks_draft_failed(self):
+        draft = self._draft()
+
+        sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="See you at 2:30 PM Central.",
+            claim=True,
+        )
+        result = sms_approval.fail_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            error="Dialpad unavailable",
+        )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], sms_approval.STATUS_FAILED)
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_FAILED)
+        self.assertEqual(stored["send_error"], "Dialpad unavailable")
+
     def test_concurrent_approvals_only_send_once(self):
         draft = self._draft()
         send_calls = []

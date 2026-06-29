@@ -66,7 +66,19 @@ def test_openclaw_docs_require_sms_approval_drafts_not_autonomous_send():
     assert "meeting logistics" in integration
     assert "inbound hooks may create sms approval drafts" in skill
     assert "must not send customer sms directly" in skill
+    assert "operator-approved agent sends" in skill
+    assert "bin/send_sms.py" in skill
+    assert "agent_direct_send" in api_reference
+    assert "agent_asserted" in api_reference
+    assert "agent_direct_send" in skill
+    assert "agent-asserted" in skill
+    assert "keep that token out of agent runtime environments" in readme
+    assert "agent_direct_send" in readme
+    assert "agent_asserted" in readme
     assert "intentionally unsupported" in integration
+    assert "agents may send dialpad sms directly with `bin/send_sms.py` after explicit current-turn operator approval" in integration
+    assert "without exposing `dialpad_sms_approval_token` to the agent runtime" in integration
+    assert "approval_actor_trust=agent_asserted" in integration
     assert "explicit opt-out language creates no draft" in readme
     assert "explicit opt-out language creates no draft" in api_reference
     assert "autonomous sms send is not supported" in integration

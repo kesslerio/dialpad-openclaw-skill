@@ -30,6 +30,8 @@ RISK_RISKY = "risky"
 
 ACTION_APPROVE = "approve"
 ACTION_CONFIRM_RISK = "confirm-risk"
+APPROVAL_SOURCE_AGENT_DIRECT_SEND = "agent_direct_send"
+APPROVAL_ACTOR_TRUST_AGENT_ASSERTED = "agent_asserted"
 
 BOT_ACTOR_IDS = {"", "agent", "bot", "openclaw", "niemand", "niemand-work"}
 FAILED_DELIVERY_STATUSES = {
@@ -55,6 +57,19 @@ def normalize_phone_number(phone_number: str | None) -> str | None:
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
     return digits[-10:] if len(digits) >= 10 else digits or None
+
+
+def phone_numbers_match_for_audit(candidate: str | None, approved: str | None) -> bool:
+    """Match audited sends without collapsing distinct country codes."""
+    candidate_digits = "".join(ch for ch in str(candidate or "") if ch.isdigit())
+    approved_digits = "".join(ch for ch in str(approved or "") if ch.isdigit())
+    if not candidate_digits or not approved_digits:
+        return False
+    if candidate_digits == approved_digits:
+        return True
+    if candidate_digits.startswith("1") and candidate_digits[1:] == approved_digits and len(approved_digits) == 10:
+        return True
+    return approved_digits.startswith("1") and approved_digits[1:] == candidate_digits and len(candidate_digits) == 10
 
 
 def emergency_opt_out_paths() -> list[Path]:
@@ -220,6 +235,14 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
             result["metadata"] = None
     result.pop("metadata_json", None)
     return result
+
+
+def _metadata_for_update(draft: dict[str, Any] | None, **updates: Any) -> str:
+    metadata = dict((draft or {}).get("metadata") or {})
+    for key, value in updates.items():
+        if value is not None:
+            metadata[key] = value
+    return json.dumps(metadata, sort_keys=True)
 
 
 def create_draft(
@@ -494,6 +517,257 @@ def _send_result_failure_reason(sms_id: str | None, delivery_status: str | None)
     if normalized_status in FAILED_DELIVERY_STATUSES:
         return f"delivery_status_{normalized_status}"
     return None
+
+
+def preflight_agent_direct_send(
+    conn: sqlite3.Connection,
+    *,
+    draft_id: str,
+    actor_id: str,
+    customer_number: str,
+    sender_number: str,
+    draft_text: str,
+    actor_username: str | None = None,
+    actor_is_bot: bool = False,
+    confirm_risk: bool = False,
+    claim: bool = False,
+    approved_at_ms: int | None = None,
+) -> dict[str, Any]:
+    """Validate, and optionally claim, a draft for an approved direct agent send."""
+    if _is_bot_actor(actor_id, actor_is_bot=actor_is_bot):
+        return {"ok": False, "status": "blocked_actor", "sent": False, "reason": "agent_or_bot_cannot_resolve"}
+    if not _actor_is_allowed(actor_id):
+        return {"ok": False, "status": "actor_not_allowed", "sent": False, "reason": "actor_not_in_allowlist"}
+
+    draft = get_draft(conn, draft_id)
+    if not draft:
+        return {"ok": False, "status": "not_found", "sent": False}
+
+    status = draft.get("status")
+    invalidated_reason = draft.get("invalidated_reason")
+    if status == STATUS_SENT:
+        return {"ok": True, "status": "already_resolved", "sent": False, "draft": draft}
+    if status not in {STATUS_PENDING, STATUS_RISK_PENDING}:
+        return {
+            "ok": False,
+            "status": "stale" if status == STATUS_STALE else status or STATUS_STALE,
+            "sent": False,
+            "reason": invalidated_reason or status,
+            "draft": draft,
+        }
+    if draft.get("invalidated_at_ms"):
+        return {
+            "ok": False,
+            "status": "stale",
+            "sent": False,
+            "reason": invalidated_reason or "invalidated",
+            "draft": draft,
+        }
+    if is_opted_out(conn, draft.get("customer_number")):
+        return {
+            "ok": False,
+            "status": "blocked_opt_out",
+            "sent": False,
+            "reason": "customer_opt_out",
+            "draft": draft,
+        }
+
+    if not phone_numbers_match_for_audit(customer_number, draft.get("customer_number")):
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "sent": False,
+            "reason": "recipient_mismatch",
+            "draft": draft,
+        }
+    if str(sender_number).strip() != str(draft.get("sender_number") or "").strip():
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "sent": False,
+            "reason": "sender_mismatch",
+            "draft": draft,
+        }
+    if str(draft_text) != str(draft.get("draft_text") or ""):
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "sent": False,
+            "reason": "draft_text_mismatch",
+            "draft": draft,
+        }
+    if draft.get("risk_state") == RISK_RISKY and (
+        not confirm_risk or status != STATUS_RISK_PENDING or not draft.get("first_confirmed_at_ms")
+    ):
+        return {
+            "ok": False,
+            "status": "risky_confirmation_required",
+            "sent": False,
+            "risk_reason": draft.get("risk_reason"),
+            "draft": draft,
+        }
+
+    if not claim:
+        return {"ok": True, "status": "ready", "sent": False, "draft": draft}
+
+    resolved_actor_username = actor_username if actor_username is not None else draft.get("approved_username")
+    ts = approved_at_ms or draft.get("approved_at_ms") or now_ms()
+    metadata_json = _metadata_for_update(
+        draft,
+        approval_source=APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+        approval_actor_trust=APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+    )
+    cursor = conn.execute(
+        """
+        UPDATE sms_approval_drafts
+        SET status = ?, approved_by = ?, approved_username = ?, approved_at_ms = ?,
+            send_error = NULL, invalidated_at_ms = NULL, invalidated_reason = NULL,
+            metadata_json = ?
+        WHERE draft_id = ?
+          AND invalidated_at_ms IS NULL
+          AND status IN (?, ?)
+        """,
+        (
+            STATUS_SENDING,
+            actor_id,
+            resolved_actor_username,
+            ts,
+            metadata_json,
+            draft_id,
+            STATUS_PENDING,
+            STATUS_RISK_PENDING,
+        ),
+    )
+    conn.commit()
+    current = get_draft(conn, draft_id)
+    if cursor.rowcount != 1:
+        return {
+            "ok": False,
+            "status": "stale",
+            "sent": False,
+            "reason": (current or {}).get("invalidated_reason") or (current or {}).get("status") or "not_claimed",
+            "draft": current,
+        }
+    return {"ok": True, "status": "claimed", "sent": False, "draft": current}
+
+
+def record_agent_direct_send(
+    conn: sqlite3.Connection,
+    *,
+    draft_id: str,
+    actor_id: str,
+    actor_username: str | None = None,
+    send_result: Any,
+    approved_at_ms: int | None = None,
+) -> dict[str, Any]:
+    """Record a direct agent send result against a claimed draft."""
+    draft = get_draft(conn, draft_id)
+    if not draft:
+        return {"ok": False, "status": "not_found", "sent": False}
+
+    status = draft.get("status")
+    invalidated_reason = draft.get("invalidated_reason")
+    if status == STATUS_SENT:
+        return {"ok": True, "status": "already_resolved", "sent": False, "draft": draft}
+    if status != STATUS_SENDING:
+        return {
+            "ok": False,
+            "status": "stale" if status == STATUS_STALE else status or STATUS_STALE,
+            "sent": False,
+            "reason": invalidated_reason or status,
+            "draft": draft,
+        }
+
+    sms_id, delivery_status = _extract_send_result(send_result)
+    failure_reason = _send_result_failure_reason(sms_id, delivery_status)
+    resolved_actor_username = actor_username if actor_username is not None else draft.get("approved_username")
+    ts = approved_at_ms or draft.get("approved_at_ms") or now_ms()
+    metadata_json = _metadata_for_update(
+        draft,
+        approval_source=APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+        approval_actor_trust=APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+    )
+    next_status = STATUS_FAILED if failure_reason else STATUS_SENT
+    cursor = conn.execute(
+        """
+        UPDATE sms_approval_drafts
+        SET status = ?, approved_by = ?, approved_username = ?, approved_at_ms = ?,
+            dialpad_sms_id = ?, delivery_status = ?, send_error = ?,
+            invalidated_at_ms = NULL, invalidated_reason = NULL,
+            metadata_json = ?
+        WHERE draft_id = ?
+          AND status = ?
+        """,
+        (
+            next_status,
+            actor_id,
+            resolved_actor_username,
+            ts,
+            sms_id,
+            delivery_status,
+            failure_reason,
+            metadata_json,
+            draft_id,
+            STATUS_SENDING,
+        ),
+    )
+    conn.commit()
+    current = get_draft(conn, draft_id)
+    if cursor.rowcount != 1:
+        return {
+            "ok": False,
+            "status": "stale",
+            "sent": False,
+            "reason": (current or {}).get("invalidated_reason") or (current or {}).get("status") or "not_claimed",
+            "draft": current,
+        }
+    if failure_reason:
+        return {
+            "ok": False,
+            "status": STATUS_FAILED,
+            "sent": False,
+            "error": failure_reason,
+            "dialpad_sms_id": sms_id,
+            "delivery_status": delivery_status,
+            "draft": current,
+            "approval_source": APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+            "approval_actor_trust": APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+        }
+    return {
+        "ok": True,
+        "status": STATUS_SENT,
+        "sent": True,
+        "dialpad_sms_id": sms_id,
+        "delivery_status": delivery_status,
+        "draft": current,
+        "approval_source": APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+        "approval_actor_trust": APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+    }
+
+
+def fail_agent_direct_send(
+    conn: sqlite3.Connection,
+    *,
+    draft_id: str,
+    error: str,
+) -> dict[str, Any]:
+    cursor = conn.execute(
+        """
+        UPDATE sms_approval_drafts
+        SET status = ?, send_error = ?
+        WHERE draft_id = ? AND status = ?
+        """,
+        (STATUS_FAILED, error, draft_id, STATUS_SENDING),
+    )
+    conn.commit()
+    current = get_draft(conn, draft_id)
+    return {
+        "ok": cursor.rowcount == 1,
+        "status": STATUS_FAILED if cursor.rowcount == 1 else (current or {}).get("status") or STATUS_STALE,
+        "sent": False,
+        "error": error,
+        "draft": current,
+    }
 
 
 def approve_draft(

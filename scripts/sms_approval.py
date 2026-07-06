@@ -880,7 +880,7 @@ def approve_draft(
         # The receipt records the completed provider send; it is deliberately
         # independent of the approval-DB bookkeeping below. Deferring it past
         # commit() would drop the receipt for a real send on a DB failure.
-        sms_receipts.append_receipt(
+        receipt_status = sms_receipts.append_receipt(
             request_payload={
                 "to_numbers": [draft["customer_number"]],
                 "text": draft["draft_text"],
@@ -902,6 +902,7 @@ def approve_draft(
             "ok": True,
             "status": STATUS_SENT,
             "sent": True,
+            **({"receipt_ledger": "append_failed"} if receipt_status == "append_failed" else {}),
             "dialpad_sms_id": sms_id,
             "delivery_status": delivery_status,
             "draft": get_draft(conn, draft_id),

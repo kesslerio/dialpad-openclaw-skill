@@ -24,6 +24,17 @@ FAILED_DELIVERY_STATUSES = {
     "canceled",
 }
 
+FAILED_DELIVERY_RESULTS = {
+    "invalid_destination",
+    "no_route",
+    "rejected_spam",
+    "not_delivered",
+    "undelivered",
+    "failed",
+    "blocked",
+    "expired",
+}
+
 AppendReceiptStatus = Literal["appended", "not_applicable", "append_failed"]
 
 
@@ -35,7 +46,11 @@ def extract_send_result(result: Any) -> tuple[str | None, str | None]:
     if not isinstance(result, dict):
         return None, "unknown"
     sms_id = result.get("id") or result.get("message_id")
-    status = result.get("delivery_status") or result.get("message_status") or result.get("status")
+    delivery_result = result.get("message_delivery_result") or result.get("delivery_result")
+    if delivery_result is not None and str(delivery_result).strip().lower() in FAILED_DELIVERY_RESULTS:
+        status = delivery_result
+    else:
+        status = result.get("delivery_status") or result.get("message_status") or result.get("status")
     return (str(sms_id) if sms_id is not None else None, str(status) if status is not None else None)
 
 
@@ -43,7 +58,7 @@ def send_result_failure_reason(sms_id: str | None, delivery_status: str | None) 
     if not sms_id:
         return "missing_dialpad_sms_id"
     normalized_status = str(delivery_status or "").strip().lower()
-    if normalized_status in FAILED_DELIVERY_STATUSES:
+    if normalized_status in FAILED_DELIVERY_STATUSES or normalized_status in FAILED_DELIVERY_RESULTS:
         return f"delivery_status_{normalized_status}"
     return None
 
@@ -67,9 +82,10 @@ def _rotate_if_needed(path: Path) -> None:
     if path.stat().st_size <= MAX_LEDGER_BYTES:
         return
     rotated = path.with_name(f"{path.name}.1")
-    if rotated.exists():
-        rotated.unlink()
-    path.rename(rotated)
+    try:
+        os.replace(path, rotated)
+    except FileNotFoundError:
+        pass  # a concurrent append already rotated it
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:

@@ -218,6 +218,51 @@ class SmsReceiptTests(unittest.TestCase):
         self.assertEqual(receipts[0]["from"], "+14155201316")
         self.assertEqual(receipts[0]["source"], "approval_lane")
 
+    def test_approval_lane_append_failure_is_surfaced_in_payload(self):
+        self.ledger_path.parent.mkdir(parents=True)
+        self.ledger_path.mkdir()
+
+        db_path = Path(self.temp_dir.name) / "approvals-unwritable.db"
+        original_db_path = sms_approval.DB_PATH
+        sms_approval.DB_PATH = db_path
+        self.addCleanup(lambda: setattr(sms_approval, "DB_PATH", original_db_path))
+        conn = sms_approval.init_db()
+        self.addCleanup(conn.close)
+        draft = sms_approval.create_draft(
+            conn,
+            thread_key="thread-2",
+            customer_number="+15125550100",
+            sender_number="+14155201316",
+            draft_text="Approved text",
+        )
+
+        result = sms_approval.approve_draft(
+            conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            actor_username="operator",
+            send_func=lambda *_args, **_kwargs: {"id": "approval-msg-2", "message_status": "pending"},
+        )
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(result["receipt_ledger"], "append_failed")
+
+    def test_failed_delivery_result_does_not_write_receipt(self):
+        code, _out, _err = self._run_send_sms(
+            [
+                _completed(
+                    {
+                        "id": "msg-bad-route",
+                        "message_status": "pending",
+                        "message_delivery_result": "invalid_destination",
+                    }
+                )
+            ],
+        )
+
+        self.assertEqual(code, 0)
+        self.assertFalse(self.ledger_path.exists())
+
     def test_result_to_numbers_are_not_required_for_recipient_receipt(self):
         code, _out, err = self._run_send_sms([_completed({"id": "msg-no-to", "message_status": "pending"})])
 

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -901,6 +902,20 @@ def approve_draft(
                 "delivery_status": delivery_status,
                 "draft": get_draft(conn, draft_id),
             }
+        try:
+            import sms_receipts
+
+            sms_receipts.append_receipt(
+                request_payload={
+                    "to_numbers": [draft["customer_number"]],
+                    "text": draft["draft_text"],
+                    "from_number": draft["sender_number"],
+                },
+                send_result=result,
+                source="approval_lane",
+            )
+        except Exception as exc:  # noqa: BLE001 - approved send already succeeded.
+            print(f"Warning: failed to append Dialpad SMS receipt ledger: {exc}", file=sys.stderr)
         conn.execute(
             """
             UPDATE sms_approval_drafts

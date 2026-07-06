@@ -21,6 +21,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED_DIALPAD = ROOT / "generated" / "dialpad"
+SCRIPTS_DIR = ROOT / "scripts"
 SCHEMA_VERSION = "1"
 PROFILE_ENV_KEYS = {
     "work": "DIALPAD_PROFILE_WORK_FROM",
@@ -60,6 +61,7 @@ ERROR_CODES = {
     "internal_error",
 }
 E164_RE = re.compile(r"^\+\d{7,15}$")
+_PENDING_SUCCESS_META_EXTRA: dict[str, object] = {}
 
 
 class WrapperError(Exception):
@@ -227,6 +229,65 @@ def run_generated(args: list[str], capture_output: bool = False) -> subprocess.C
 
 
 
+def _is_sms_send_command(args: list[str]) -> bool:
+    return len(args) >= 4 and args[0:2] == ["sms", "send"] and "--data" in args
+
+
+def _sms_send_payload(args: list[str]) -> dict[str, object] | None:
+    try:
+        data_index = args.index("--data")
+        raw_payload = args[data_index + 1]
+    except (ValueError, IndexError):
+        return None
+
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _receipt_source() -> str:
+    stem = Path(sys.argv[0]).stem
+    if stem in {"send_sms", "send_group_intro"}:
+        return stem
+    return "generated_sms_send"
+
+
+def _consume_pending_success_meta_extra() -> dict[str, object]:
+    pending = dict(_PENDING_SUCCESS_META_EXTRA)
+    _PENDING_SUCCESS_META_EXTRA.clear()
+    return pending
+
+
+def _append_sms_receipt(args: list[str], result: Any) -> None:
+    if not _is_sms_send_command(args):
+        return
+
+    payload = _sms_send_payload(args)
+    if payload is None:
+        return
+
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+
+    try:
+        import sms_receipts
+
+        status = sms_receipts.append_receipt(
+            request_payload=payload,
+            send_result=result,
+            source=_receipt_source(),
+        )
+    except Exception as exc:  # noqa: BLE001 - receipt persistence must never break sends.
+        print(f"Warning: failed to append Dialpad SMS receipt ledger: {exc}", file=sys.stderr)
+        status = "append_failed"
+
+    if status == "append_failed":
+        _PENDING_SUCCESS_META_EXTRA["receipt_ledger"] = "append_failed"
+
+
 def run_generated_json(args: list[str]) -> Any:
     cmd = ["--output", "json", *args]
     proc = run_generated(cmd, capture_output=True)
@@ -235,9 +296,12 @@ def run_generated_json(args: list[str]) -> Any:
         raise WrapperError(message, code="upstream_error", retryable=True)
 
     try:
-        return json.loads(proc.stdout)
+        result = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise WrapperError(f"Failed to parse JSON output: {exc}") from exc
+
+    _append_sms_receipt(args, result)
+    return result
 
 
 
@@ -262,13 +326,16 @@ def emit_success(
     data: dict[str, object],
     meta_extra: dict[str, object] | None = None,
 ) -> None:
+    resolved_meta_extra = _consume_pending_success_meta_extra()
+    if meta_extra:
+        resolved_meta_extra.update(meta_extra)
     print(
         json.dumps(
             {
                 "ok": True,
                 "command": command,
                 "data": data,
-                "meta": build_meta(wrapper, meta_extra),
+                "meta": build_meta(wrapper, resolved_meta_extra or None),
             },
             indent=2,
         )
@@ -283,6 +350,7 @@ def emit_error(
     retryable: bool,
     meta_extra: dict[str, object] | None = None,
 ) -> None:
+    _consume_pending_success_meta_extra()
     resolved_code = code if code in ERROR_CODES else "internal_error"
     print(
         json.dumps(
@@ -343,5 +411,6 @@ def handle_wrapper_exception(command: str, wrapper: str, err: Exception, json_mo
         emit_error(command, wrapper, code, str(err), retryable, meta_extra=meta_extra)
         return 2
 
+    _consume_pending_success_meta_extra()
     print_wrapper_error(err)
     return 2

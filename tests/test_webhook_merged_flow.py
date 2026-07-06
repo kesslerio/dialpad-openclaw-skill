@@ -410,6 +410,71 @@ def test_merged_missed_call_waiting_hook_stays_visible(monkeypatch):
     assert hook_payloads[0]["operator_notification"]["hookDelivery"] == "visible"
 
 
+def test_merged_missed_call_without_approval_draft_sends_immediate_card(monkeypatch):
+    hook_payloads = []
+    telegram_sends = []
+    pending_calls = []
+    monkeypatch.setattr(webhook_server, "verify_webhook_auth", lambda *_args: (True, "test"))
+    monkeypatch.setattr(webhook_server, "DIALPAD_MERGED_DRAFT_FLOW", True)
+    monkeypatch.setattr(
+        webhook_server,
+        "resolve_missed_call_context",
+        lambda *_args, **_kwargs: {
+            "from_number": "+14155550123",
+            "to_number": "+14155201316",
+            "event_ts_ms": 1770000000000,
+            "line_display": "Sales",
+            "caller_resolution_path": "payload_direct",
+            "line_resolution_path": "payload_direct",
+            "caller_confidence": "high",
+            "line_confidence": "high",
+            "history_matched": False,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "build_missed_call_dedupe_key", lambda *_args, **_kwargs: "call-1")
+    monkeypatch.setattr(webhook_server, "claim_missed_call_notification", lambda *_args, **_kwargs: {"duplicate": False, "status": "claimed"})
+    monkeypatch.setattr(webhook_server, "lookup_contact_enrichment", lambda _number: {"contact_name": "Jane"})
+    monkeypatch.setattr(webhook_server, "apply_payload_contact_fallback", lambda enrichment, _data: enrichment)
+    monkeypatch.setattr(webhook_server, "get_line_name", lambda _number: "Sales")
+    monkeypatch.setattr(webhook_server, "lookup_recent_call_context", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(webhook_server, "prepare_inbound_reply_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(webhook_server, "should_send_proactive_reply", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        webhook_server,
+        "create_proactive_reply_draft",
+        lambda *_args, **_kwargs: (False, "approval_unavailable", None, None, None),
+    )
+    monkeypatch.setattr(webhook_server, "log_auto_send_shadow", lambda _event: None)
+    monkeypatch.setattr(webhook_server, "resolve_telegram_route", lambda *_args: ("chat-1", 42))
+    monkeypatch.setattr(webhook_server, "insert_pending_draft", lambda *args, **_kwargs: pending_calls.append(args) or True)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_to_openclaw_hooks",
+        lambda normalized, **_kwargs: hook_payloads.append(dict(normalized)) or (True, "http_200"),
+    )
+
+    handler, status = _build_handler(
+        {
+            "direction": "inbound",
+            "call_missed": True,
+            "duration": 0,
+            "from_number": "+14155550123",
+            "to_number": "+14155201316",
+            "call_id": "call-1",
+        }
+    )
+    handler.handle_call_webhook()
+
+    assert status["code"] == 200
+    assert pending_calls == []
+    assert len(telegram_sends) == 1
+    assert "Missed Call" in telegram_sends[0]
+    assert hook_payloads
+    assert "callback_job_id" not in hook_payloads[0]
+    assert hook_payloads[0]["operator_notification"]["deliver"] is False
+
+
 def test_non_merged_sms_flow_sends_one_immediate_telegram(monkeypatch):
     telegram_sends = []
     _stub_common_inbound_dependencies(monkeypatch, telegram_sends)
@@ -705,6 +770,71 @@ def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path)
     assert "Risk:" in telegram_sends[0]
     assert "Second confirmation required" in telegram_sends[0]
     assert "Please have a real person call me." in telegram_sends[0]
+
+
+def test_draft_callback_opt_out_blocks_existing_approval(monkeypatch, tmp_path):
+    approval_db = tmp_path / "approval.db"
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        webhook_server.sms_approval.create_draft(
+            conn,
+            draft_id="smsdraft_1",
+            thread_key="thread-1",
+            customer_number="+14155550123",
+            sender_number="+14155201316",
+            draft_text="Fallback text",
+        )
+    finally:
+        conn.close()
+
+    db_path = tmp_path / "pending.db"
+    webhook_server.insert_pending_draft(
+        "job-1",
+        {
+            "event_type": "sms",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "Hello",
+            "auto_reply_draft_id": "smsdraft_1",
+            "reply_policy": {"state": "eligible"},
+        },
+        "Fallback text",
+        "expected",
+        db_path=db_path,
+    )
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
+    telegram_sends = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
+
+    handler, status = _build_handler(
+        {"jobId": "job-1", "draft": "Please stop texting me."},
+        headers={"X-Callback-Token": "expected"},
+    )
+    handler.handle_draft_callback()
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        stored = webhook_server.sms_approval.get_draft(conn, "smsdraft_1")
+        preflight = webhook_server.sms_approval.preflight_agent_direct_send(
+            conn,
+            draft_id="smsdraft_1",
+            actor_id="human",
+            customer_number="+14155550123",
+            sender_number="+14155201316",
+            draft_text="Fallback text",
+        )
+        opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+    finally:
+        conn.close()
+
+    assert status["code"] == 200
+    assert opted_out is True
+    assert stored["status"] == webhook_server.sms_approval.STATUS_STALE
+    assert preflight["status"] in {"blocked_opt_out", "stale"}
+    assert "Automation blocked" in telegram_sends[0]
+    assert "Approve send" not in telegram_sends[0]
+    assert "approve_sms_draft.py" not in telegram_sends[0]
 
 
 def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, tmp_path):

@@ -1065,13 +1065,16 @@ def build_sms_approval_reply_markup(draft_id, reply_policy=None, *, risk_confirm
     if not telegram_buttons_available() or not draft_id:
         return None
 
+    reply_policy = reply_policy or {}
+    if reply_policy.get("state") in {"blocked_opt_out", "human_only"}:
+        return None
+
     approve_action = TELEGRAM_CALLBACK_CONFIRM_RISK if risk_confirmation else TELEGRAM_CALLBACK_APPROVE
     approve_data = build_telegram_callback_data(approve_action, draft_id)
     reject_data = build_telegram_callback_data(TELEGRAM_CALLBACK_REJECT, draft_id)
     if not approve_data or not reject_data:
         return None
 
-    reply_policy = reply_policy or {}
     risk_state = reply_policy.get("state")
     if risk_confirmation:
         approve_label = "Confirm send"
@@ -4531,6 +4534,9 @@ def build_approval_review_suffix(draft_id, draft_message, reply_policy=None):
 
     reply_policy = reply_policy or {}
     risk_state = reply_policy.get("state")
+    if risk_state in {"blocked_opt_out", "human_only"}:
+        return ""
+
     buttons_enabled = build_sms_approval_reply_markup(draft_id, reply_policy) is not None
     lines = [
         "",
@@ -5441,6 +5447,27 @@ def _persist_callback_draft_text(draft_id, draft_text, reply_policy=None):
     if not draft_id or sms_approval is None:
         return True
     reply_policy = reply_policy or classify_sms_reply_policy(draft_text)
+    if reply_policy.get("state") == "blocked_opt_out":
+        try:
+            conn = sms_approval.init_db()
+            try:
+                draft = sms_approval.get_draft(conn, draft_id)
+                customer_number = draft.get("customer_number") if draft else None
+                if not customer_number:
+                    return False
+                sms_approval.mark_opt_out(
+                    conn,
+                    customer_number=customer_number,
+                    reason="agent_callback_opt_out",
+                    source="agent_callback",
+                )
+                return True
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 - explicit opt-outs must fail closed.
+            print(f"⚠️  callback opt-out persistence failed ({type(exc).__name__}); blocking approval")
+            return False
+
     risk_state = (
         sms_approval.RISK_RISKY
         if reply_policy.get("state") == "risky"
@@ -6271,7 +6298,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             log_auto_send_shadow(normalized_event)
             route_chat_id, route_thread_id = resolve_telegram_route(from_num, to_num)
             _call_merged_timer = None
-            if DIALPAD_MERGED_DRAFT_FLOW:
+            if DIALPAD_MERGED_DRAFT_FLOW and auto_reply_draft_id and auto_reply_message:
                 _call_job_id = _generate_draft_job_id()
                 _call_token = _generate_callback_token()
                 _call_callback_url = DIALPAD_DRAFT_CALLBACK_URL

@@ -238,6 +238,7 @@ _MERGED_FLOW_COUNTERS = {
     "fallback": 0,
     "consecutive_fallback": 0,
 }
+_MERGED_FLOW_COUNTER_LOCK = threading.Lock()
 
 TELEGRAM_STATUS_SENT = "sent"
 TELEGRAM_STATUS_FILTERED = "filtered"
@@ -1922,21 +1923,6 @@ def list_waiting_pending_drafts(db_path=None):
     except Exception as exc:  # noqa: BLE001 - startup recovery is best-effort.
         print(f"⚠️  pending_drafts startup sweep failed ({type(exc).__name__})")
         return []
-
-
-def claim_expired_pending_drafts(timeout_seconds=None, db_path=None):
-    """Claim stale waiting drafts after restart so they render exactly once."""
-    timeout_seconds = DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    cutoff_ms = _now_ms() - int(timeout_seconds * 1000)
-    claimed = []
-    for pending in list_waiting_pending_drafts(db_path=db_path):
-        if int(pending.get("created_at_ms") or 0) > cutoff_ms:
-            continue
-        job_id = pending.get("job_id")
-        row = claim_pending_draft(job_id, db_path=db_path)
-        if row is not None:
-            claimed.append(row)
-    return claimed
 
 
 def resume_pending_drafts_after_restart(timeout_seconds=None, db_path=None):
@@ -5338,29 +5324,31 @@ def send_sms_to_openclaw_hooks(normalized_sms, line_display=None):
 
 def _record_merged_flow_path(path):
     """Update process-local merged-flow health counters."""
-    if path in {"callback", "callback_persist_failed"}:
-        _MERGED_FLOW_COUNTERS["callback"] += 1
-        _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
-    elif path == "fallback":
-        _MERGED_FLOW_COUNTERS["fallback"] += 1
-        _MERGED_FLOW_COUNTERS["consecutive_fallback"] += 1
-        streak = _MERGED_FLOW_COUNTERS["consecutive_fallback"]
-        if streak == MERGED_FLOW_FALLBACK_WARNING_THRESHOLD:
-            print(
-                "⚠️  [merged-flow] consecutive fallback threshold reached "
-                f"({streak}); callback pipe may be dead. Check submit_draft tool exposure, "
-                "plugin callbackUrl, and webhook callback URL reachability."
-            )
-    elif path == "callback_lost":
-        _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
+    with _MERGED_FLOW_COUNTER_LOCK:
+        if path in {"callback", "callback_persist_failed"}:
+            _MERGED_FLOW_COUNTERS["callback"] += 1
+            _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
+        elif path == "fallback":
+            _MERGED_FLOW_COUNTERS["fallback"] += 1
+            _MERGED_FLOW_COUNTERS["consecutive_fallback"] += 1
+            streak = _MERGED_FLOW_COUNTERS["consecutive_fallback"]
+            if streak >= MERGED_FLOW_FALLBACK_WARNING_THRESHOLD:
+                print(
+                    "⚠️  [merged-flow] consecutive fallback threshold reached "
+                    f"({streak}); callback pipe may be dead. Check submit_draft tool exposure, "
+                    "plugin callbackUrl, and webhook callback URL reachability."
+                )
+        elif path == "callback_lost":
+            _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
 
 
 def _merged_flow_counter_suffix():
-    return (
-        f"callback={_MERGED_FLOW_COUNTERS['callback']} "
-        f"fallback={_MERGED_FLOW_COUNTERS['fallback']} "
-        f"consecutive_fallback={_MERGED_FLOW_COUNTERS['consecutive_fallback']}"
-    )
+    with _MERGED_FLOW_COUNTER_LOCK:
+        return (
+            f"callback={_MERGED_FLOW_COUNTERS['callback']} "
+            f"fallback={_MERGED_FLOW_COUNTERS['fallback']} "
+            f"consecutive_fallback={_MERGED_FLOW_COUNTERS['consecutive_fallback']}"
+        )
 
 
 def _render_merged_card(job_id, draft_text, claimed_row, path, elapsed_ms=0):
@@ -6025,10 +6013,11 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
 
             if inbound_alert_decision["eligible"]:
                 if not _merged_timer:
-                    normalized_sms["operator_notification"] = resolve_operator_notification_delivery(
-                        normalized_sms,
-                        local_telegram_enabled=telegram_sms_sent is True,
-                    )
+                    if "operator_notification" not in normalized_sms:
+                        normalized_sms["operator_notification"] = resolve_operator_notification_delivery(
+                            normalized_sms,
+                            local_telegram_enabled=telegram_sms_sent is True,
+                        )
                     hook_sent, hook_status = send_sms_to_openclaw_hooks(
                         normalized_sms, line_display=line_display
                     )

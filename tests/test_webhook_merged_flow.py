@@ -44,9 +44,10 @@ class RecordingTimer:
 
 @pytest.fixture(autouse=True)
 def reset_merged_flow_counters():
-    webhook_server._MERGED_FLOW_COUNTERS.update(
-        {"callback": 0, "fallback": 0, "consecutive_fallback": 0}
-    )
+    with webhook_server._MERGED_FLOW_COUNTER_LOCK:
+        webhook_server._MERGED_FLOW_COUNTERS.update(
+            {"callback": 0, "fallback": 0, "consecutive_fallback": 0}
+        )
     RecordingTimer.instances.clear()
 
 
@@ -329,8 +330,11 @@ def test_fallback_warning_threshold_and_callback_reset(capsys):
     assert webhook_server._MERGED_FLOW_COUNTERS["consecutive_fallback"] == 0
 
 
-def test_claim_expired_pending_drafts_leaves_fresh_rows(tmp_path):
+def test_resume_pending_drafts_after_restart_renders_expired_and_leaves_fresh(monkeypatch, tmp_path):
     db_path = tmp_path / "pending.db"
+    telegram_sends = []
+    monkeypatch.setattr(webhook_server.threading, "Timer", RecordingTimer)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
     webhook_server.insert_pending_draft(
         "old-job",
         {"event_type": "sms"},
@@ -355,9 +359,10 @@ def test_claim_expired_pending_drafts_leaves_fresh_rows(tmp_path):
     finally:
         conn.close()
 
-    claimed = webhook_server.claim_expired_pending_drafts(timeout_seconds=1, db_path=db_path)
+    resumed = webhook_server.resume_pending_drafts_after_restart(timeout_seconds=1, db_path=db_path)
 
-    assert [row["job_id"] for row in claimed] == ["old-job"]
+    assert resumed == {"rendered": 1, "scheduled": 1}
+    assert len(telegram_sends) == 1
     assert webhook_server.claim_pending_draft("fresh-job", db_path=db_path)["job_id"] == "fresh-job"
 
 
@@ -497,9 +502,10 @@ def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, t
         "expected",
         db_path=db_path,
     )
-    webhook_server._MERGED_FLOW_COUNTERS.update(
-        {"callback": 0, "fallback": 2, "consecutive_fallback": 2}
-    )
+    with webhook_server._MERGED_FLOW_COUNTER_LOCK:
+        webhook_server._MERGED_FLOW_COUNTERS.update(
+            {"callback": 0, "fallback": 2, "consecutive_fallback": 2}
+        )
     monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
     monkeypatch.setattr(webhook_server, "_persist_callback_draft_text", lambda *_args: False)
     telegram_sends = []
@@ -513,8 +519,9 @@ def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, t
 
     assert status["code"] == 200
     assert "Fallback text" in telegram_sends[0]
-    assert webhook_server._MERGED_FLOW_COUNTERS == {
-        "callback": 1,
-        "fallback": 2,
-        "consecutive_fallback": 0,
-    }
+    with webhook_server._MERGED_FLOW_COUNTER_LOCK:
+        assert webhook_server._MERGED_FLOW_COUNTERS == {
+            "callback": 1,
+            "fallback": 2,
+            "consecutive_fallback": 0,
+        }

@@ -272,6 +272,41 @@ def test_merged_sms_storage_failure_allows_hook_when_local_card_fails(monkeypatc
     assert hook_payloads[0]["operator_notification"]["deliver"] is True
 
 
+def test_merged_sms_without_approval_draft_sends_immediate_card(monkeypatch):
+    telegram_sends = []
+    pending_rows = []
+    _stub_common_inbound_dependencies(monkeypatch, telegram_sends, pending_rows=pending_rows)
+    monkeypatch.setattr(webhook_server, "DIALPAD_MERGED_DRAFT_FLOW", True)
+    monkeypatch.setattr(
+        webhook_server,
+        "create_proactive_reply_draft",
+        lambda *_args, **_kwargs: (False, "approval_unavailable", None, None, None),
+    )
+
+    handler = object.__new__(webhook_server.DialpadWebhookHandler)
+    handler._process_inbound_post_ack(
+        {
+            "direction": "inbound",
+            "from_number": "+14155550123",
+            "to_number": ["+14155201316"],
+            "text": "Need help",
+            "id": "msg-1",
+        },
+        {"message": {}},
+        "+14155550123",
+        ["+14155201316"],
+        "Need help",
+        "inbound",
+        "sms",
+        "2026-07-06T00:00:00",
+        "disabled",
+    )
+
+    assert len(telegram_sends) == 1
+    assert "Dialpad SMS" in telegram_sends[0]
+    assert pending_rows == []
+
+
 def test_merged_sms_hook_failure_renders_local_card_immediately(monkeypatch, tmp_path):
     telegram_sends = []
     hook_payloads = []
@@ -667,6 +702,8 @@ def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path)
     assert stored["risk_state"] == webhook_server.sms_approval.RISK_RISKY
     assert stored["metadata"]["reply_policy"]["state"] == "risky"
     assert first_approval["status"] == "risky_confirmation_required"
+    assert "Risk:" in telegram_sends[0]
+    assert "Second confirmation required" in telegram_sends[0]
     assert "Please have a real person call me." in telegram_sends[0]
 
 
@@ -691,7 +728,7 @@ def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, t
             {"callback": 0, "fallback": 2, "consecutive_fallback": 2}
         )
     monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
-    monkeypatch.setattr(webhook_server, "_persist_callback_draft_text", lambda *_args: False)
+    monkeypatch.setattr(webhook_server, "_persist_callback_draft_text", lambda *_args, **_kwargs: False)
     telegram_sends = []
     monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
 

@@ -5436,11 +5436,11 @@ def _render_pending_fallback(job_id, start_monotonic=None, elapsed_ms=None, db_p
     return _render_merged_card(job_id, fallback_draft, claimed, path=path, elapsed_ms=elapsed_ms)
 
 
-def _persist_callback_draft_text(draft_id, draft_text):
+def _persist_callback_draft_text(draft_id, draft_text, reply_policy=None):
     """Keep Telegram approval buttons bound to the exact callback draft text."""
     if not draft_id or sms_approval is None:
         return True
-    reply_policy = classify_sms_reply_policy(draft_text)
+    reply_policy = reply_policy or classify_sms_reply_policy(draft_text)
     risk_state = (
         sms_approval.RISK_RISKY
         if reply_policy.get("state") == "risky"
@@ -5894,9 +5894,14 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 inbound_alert_decision["eligible"]
                 and DIALPAD_SMS_TELEGRAM_NOTIFY
             ):
-                # Merged-flow: defer card rendering to the agent callback or the fallback timer.
-                # The hook gets deliver=false + callback URL; the card renders when the draft arrives.
-                if DIALPAD_MERGED_DRAFT_FLOW and inbound_alert_decision["eligible"]:
+                # Merged-flow: defer card rendering only when there is an approval
+                # draft for the callback/fallback to update and render.
+                if (
+                    DIALPAD_MERGED_DRAFT_FLOW
+                    and inbound_alert_decision["eligible"]
+                    and auto_reply_draft_id
+                    and auto_reply_message
+                ):
                     line_display = get_line_name(to_num)
                     _merged_job_id = _generate_draft_job_id()
                     _merged_token = _generate_callback_token()
@@ -6466,7 +6471,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         elapsed_ms = max(0, _now_ms() - int(created_at_ms))
         event = claimed.get("event") if isinstance(claimed, dict) else {}
         draft_id = event.get("auto_reply_draft_id") if isinstance(event, dict) else None
-        if _persist_callback_draft_text(draft_id, draft):
+        callback_reply_policy = classify_sms_reply_policy(draft)
+        if _persist_callback_draft_text(draft_id, draft, reply_policy=callback_reply_policy):
+            if isinstance(event, dict):
+                event["reply_policy"] = callback_reply_policy
             _render_merged_card(job_id, draft, claimed, path="callback", elapsed_ms=elapsed_ms)
         else:
             fallback_draft = claimed.get("fallback_draft") or ""

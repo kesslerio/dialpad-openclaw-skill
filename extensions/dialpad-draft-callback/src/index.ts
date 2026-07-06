@@ -1,13 +1,15 @@
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 
+const DEFAULT_CALLBACK_URL = "http://host.docker.internal:8081/internal/draft-callback";
+
 export default defineToolPlugin({
   id: "dialpad-draft-callback",
   name: "Dialpad Draft Callback",
   description: "Submit a draft reply to the Dialpad webhook server.",
   configSchema: Type.Object({
     callbackUrl: Type.Optional(
-      Type.String({ description: "Dialpad webhook draft-callback URL (default: http://127.0.0.1:8081/internal/draft-callback)" }),
+      Type.String({ description: `Dialpad webhook draft-callback URL (default: ${DEFAULT_CALLBACK_URL})` }),
     ),
   }),
   tools: (tool) => [
@@ -24,7 +26,7 @@ export default defineToolPlugin({
         ),
       }),
       async execute({ jobId, draft, token }, config) {
-        const url = config.callbackUrl ?? "http://127.0.0.1:8081/internal/draft-callback";
+        const url = config.callbackUrl ?? DEFAULT_CALLBACK_URL;
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
         };

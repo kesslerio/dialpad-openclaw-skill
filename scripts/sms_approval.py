@@ -342,6 +342,55 @@ def get_draft(conn: sqlite3.Connection, draft_id: str) -> dict[str, Any] | None:
     return row_to_dict(row)
 
 
+def update_pending_draft_text(
+    conn: sqlite3.Connection,
+    *,
+    draft_id: str,
+    draft_text: str,
+    risk_state: str | None = None,
+    risk_reason: str | None = None,
+    metadata_updates: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Replace text for a still-pending approval draft."""
+    text = draft_text.strip()
+    if not text:
+        raise ValueError("draft_text cannot be empty")
+    if risk_state is not None and risk_state not in {RISK_NORMAL, RISK_RISKY}:
+        raise ValueError(f"invalid risk_state: {risk_state}")
+
+    draft = get_draft(conn, draft_id)
+    if not draft or draft.get("status") not in {STATUS_PENDING, STATUS_RISK_PENDING}:
+        return None
+    resolved_risk_state = risk_state if risk_state is not None else draft.get("risk_state")
+    resolved_risk_reason = risk_reason if risk_state is not None else draft.get("risk_reason")
+    metadata_json = _metadata_for_update(draft, **(metadata_updates or {}))
+    cursor = conn.execute(
+        """
+        UPDATE sms_approval_drafts
+        SET draft_text = ?, risk_state = ?, risk_reason = ?, status = ?,
+            first_confirmed_by = NULL, first_confirmed_username = NULL,
+            first_confirmed_at_ms = NULL, metadata_json = ?
+        WHERE draft_id = ?
+          AND status IN (?, ?)
+          AND invalidated_at_ms IS NULL
+        """,
+        (
+            text,
+            resolved_risk_state,
+            resolved_risk_reason,
+            STATUS_PENDING,
+            metadata_json,
+            draft_id,
+            STATUS_PENDING,
+            STATUS_RISK_PENDING,
+        ),
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        return None
+    return get_draft(conn, draft_id)
+
+
 def invalidate_pending(
     conn: sqlite3.Connection,
     *,

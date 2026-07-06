@@ -4,7 +4,12 @@
   "description": "Submit a draft reply to the Dialpad webhook server.",
   "type": "module",
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ]
   },
   "scripts": {
     "build": "tsc",
@@ -12,9 +17,10 @@
     "plugin:validate": "openclaw plugins validate"
   },
   "dependencies": {
-    "typebox": "^0.34.0"
+    "typebox": "1.1.38"
   },
   "devDependencies": {
+    "openclaw": "^2026.6.10",
     "typescript": "^5.7.0"
   }
 }

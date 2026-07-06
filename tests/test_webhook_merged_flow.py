@@ -479,3 +479,42 @@ def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path)
     assert status["code"] == 200
     assert stored["draft_text"] == "Agent callback text"
     assert "Agent callback text" in telegram_sends[0]
+
+
+def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, tmp_path):
+    db_path = tmp_path / "pending.db"
+    webhook_server.insert_pending_draft(
+        "job-1",
+        {
+            "event_type": "sms",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "Hello",
+            "auto_reply_draft_id": "smsdraft_1",
+            "reply_policy": {"state": "eligible"},
+        },
+        "Fallback text",
+        "expected",
+        db_path=db_path,
+    )
+    webhook_server._MERGED_FLOW_COUNTERS.update(
+        {"callback": 0, "fallback": 2, "consecutive_fallback": 2}
+    )
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
+    monkeypatch.setattr(webhook_server, "_persist_callback_draft_text", lambda *_args: False)
+    telegram_sends = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
+
+    handler, status = _build_handler(
+        {"jobId": "job-1", "draft": "Agent callback text"},
+        headers={"X-Callback-Token": "expected"},
+    )
+    handler.handle_draft_callback()
+
+    assert status["code"] == 200
+    assert "Fallback text" in telegram_sends[0]
+    assert webhook_server._MERGED_FLOW_COUNTERS == {
+        "callback": 1,
+        "fallback": 2,
+        "consecutive_fallback": 0,
+    }

@@ -5338,7 +5338,7 @@ def send_sms_to_openclaw_hooks(normalized_sms, line_display=None):
 
 def _record_merged_flow_path(path):
     """Update process-local merged-flow health counters."""
-    if path == "callback":
+    if path in {"callback", "callback_persist_failed"}:
         _MERGED_FLOW_COUNTERS["callback"] += 1
         _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
     elif path == "fallback":
@@ -6454,7 +6454,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             _render_merged_card(job_id, draft, claimed, path="callback", elapsed_ms=elapsed_ms)
         else:
             fallback_draft = claimed.get("fallback_draft") or ""
-            _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
+            _render_merged_card(job_id, fallback_draft, claimed, path="callback_persist_failed", elapsed_ms=elapsed_ms)
         self.send_json_response(200, {"status": "delivered", "jobId": job_id})
 
     def handle_voicemail_webhook(self):

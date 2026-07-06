@@ -1939,28 +1939,20 @@ def claim_expired_pending_drafts(timeout_seconds=None, db_path=None):
     return claimed
 
 
-def render_expired_pending_drafts(timeout_seconds=None, db_path=None):
-    """Render stale pending drafts through the normal fallback path."""
-    claimed_rows = claim_expired_pending_drafts(timeout_seconds=timeout_seconds, db_path=db_path)
-    for claimed in claimed_rows:
-        job_id = claimed.get("job_id")
-        fallback_draft = claimed.get("fallback_draft") or ""
-        created_at_ms = claimed.get("created_at_ms") or _now_ms()
-        elapsed_ms = max(0, _now_ms() - int(created_at_ms))
-        _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
-    return len(claimed_rows)
-
-
 def resume_pending_drafts_after_restart(timeout_seconds=None, db_path=None):
     """Resume every waiting draft row after restart: render expired, reschedule fresh."""
     timeout_seconds = DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     timeout_ms = int(timeout_seconds * 1000)
+    _prune_pending_drafts(db_path=db_path)
     now_ms = _now_ms()
+    retention_cutoff_ms = now_ms - PENDING_DRAFTS_RETENTION_MS
     rendered = 0
     scheduled = 0
     for pending in list_waiting_pending_drafts(db_path=db_path):
         job_id = pending.get("job_id")
         created_at_ms = int(pending.get("created_at_ms") or now_ms)
+        if created_at_ms < retention_cutoff_ms:
+            continue
         elapsed_ms = max(0, now_ms - created_at_ms)
         remaining_ms = timeout_ms - elapsed_ms
         if remaining_ms <= 0:

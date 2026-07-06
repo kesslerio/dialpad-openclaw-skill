@@ -389,6 +389,34 @@ def test_resume_pending_drafts_after_restart_schedules_fresh_rows(monkeypatch, t
     assert RecordingTimer.instances[0].args[0] == "fresh-job"
 
 
+def test_resume_pending_drafts_after_restart_skips_over_retention_rows(monkeypatch, tmp_path):
+    db_path = tmp_path / "pending.db"
+    telegram_sends = []
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
+    webhook_server.insert_pending_draft(
+        "stale-job",
+        {"event_type": "sms"},
+        "Fallback",
+        "token",
+    )
+    conn = webhook_server._init_pending_drafts_db(db_path=db_path)
+    try:
+        conn.execute(
+            f"UPDATE {webhook_server.PENDING_DRAFTS_TABLE} SET created_at_ms=? WHERE job_id=?",
+            (webhook_server._now_ms() - webhook_server.PENDING_DRAFTS_RETENTION_MS - 1000, "stale-job"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    resumed = webhook_server.resume_pending_drafts_after_restart(timeout_seconds=1)
+
+    assert resumed == {"rendered": 0, "scheduled": 0}
+    assert telegram_sends == []
+    assert webhook_server.claim_pending_draft("stale-job", db_path=db_path) is None
+
+
 def test_draft_callback_rejects_missing_or_wrong_token(monkeypatch):
     rendered = []
     monkeypatch.setattr(webhook_server, "get_pending_draft_callback_token", lambda _job_id: {"token": "expected"})

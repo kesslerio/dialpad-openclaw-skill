@@ -42,7 +42,7 @@ class SmsReceiptTests(unittest.TestCase):
         self.original_max_bytes = sms_receipts.MAX_LEDGER_BYTES
         self.original_env_path = os.environ.get("DIALPAD_SMS_RECEIPT_LEDGER")
         os.environ["DIALPAD_SMS_RECEIPT_LEDGER"] = str(self.ledger_path)
-        _dialpad_compat.take_receipt_status()
+        _dialpad_compat.take_receipt_meta()
         self.addCleanup(self._restore_receipts)
 
     def _restore_receipts(self) -> None:
@@ -51,7 +51,7 @@ class SmsReceiptTests(unittest.TestCase):
             os.environ.pop("DIALPAD_SMS_RECEIPT_LEDGER", None)
         else:
             os.environ["DIALPAD_SMS_RECEIPT_LEDGER"] = self.original_env_path
-        _dialpad_compat.take_receipt_status()
+        _dialpad_compat.take_receipt_meta()
 
     def _read_receipts(self, path: Path | None = None) -> list[dict[str, object]]:
         ledger = path or self.ledger_path
@@ -290,6 +290,24 @@ class SmsReceiptTests(unittest.TestCase):
         self.assertIn("failed to append Dialpad SMS receipt ledger", err)
         parsed = json.loads(out)
         self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["meta"]["receipt_ledger"], "append_failed")
+
+    def test_partial_success_error_meta_carries_prospect_append_failure(self):
+        self.ledger_path.parent.mkdir(parents=True)
+        self.ledger_path.mkdir()
+
+        code, out, err = self._run_group_intro(
+            [
+                _completed({"id": "prospect-only", "message_status": "pending"}),
+                _completed({}, returncode=1, stderr="Dialpad failed"),
+            ],
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("failed to append Dialpad SMS receipt ledger", err)
+        parsed = json.loads(out)
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["error"]["code"], "partial_success")
         self.assertEqual(parsed["meta"]["receipt_ledger"], "append_failed")
 
     def test_growth_cap_rotates_existing_ledger(self):

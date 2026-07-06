@@ -20,7 +20,7 @@ from _dialpad_compat import (
     resolve_sender,
     run_generated_json,
     set_receipt_source,
-    take_receipt_status,
+    take_receipt_meta,
     WrapperError,
 )
 
@@ -342,16 +342,9 @@ def attach_approval_audit(result: object, approval_audit: dict[str, object] | No
     return annotated
 
 
-def receipt_meta_extra() -> dict[str, object] | None:
-    status = take_receipt_status()
-    if status == "append_failed":
-        return {"receipt_ledger": "append_failed"}
-    return None
-
-
 def main() -> int:
     set_receipt_source("send_sms")
-    take_receipt_status()
+    take_receipt_meta()
     json_mode = "--json" in sys.argv
     command = COMMAND_IDS["send_sms.send"]
     wrapper = "send_sms.py"
@@ -403,7 +396,7 @@ def main() -> int:
         except WrapperError as err:
             fail_claimed_approval_audit(args, err)
             raise
-        receipt_meta = receipt_meta_extra()
+        receipt_meta = take_receipt_meta()
         approval_audit = record_approval_audit(args, result)
         annotated_result = attach_approval_audit(result, approval_audit)
 

@@ -22,6 +22,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED_DIALPAD = ROOT / "generated" / "dialpad"
 SCRIPTS_DIR = ROOT / "scripts"
+
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import sms_receipts  # noqa: E402 - needs SCRIPTS_DIR on sys.path; module-top import so a broken deploy fails before any send, never after one
+
 SCHEMA_VERSION = "1"
 PROFILE_ENV_KEYS = {
     "work": "DIALPAD_PROFILE_WORK_FROM",
@@ -254,11 +260,14 @@ def set_receipt_source(name: str) -> None:
     _RECEIPT_SOURCE = name
 
 
-def take_receipt_status() -> str | None:
+def take_receipt_meta() -> dict[str, object] | None:
+    """Envelope meta for the most recent send's receipt append, clear-on-read."""
     global _RECEIPT_STATUS
     status = _RECEIPT_STATUS
     _RECEIPT_STATUS = None
-    return status
+    if status == "append_failed":
+        return {"receipt_ledger": "append_failed"}
+    return None
 
 
 def _append_sms_receipt(args: list[str], result: Any) -> None:
@@ -270,11 +279,6 @@ def _append_sms_receipt(args: list[str], result: Any) -> None:
     payload = _sms_send_payload(args)
     if payload is None:
         return
-
-    if str(SCRIPTS_DIR) not in sys.path:
-        sys.path.insert(0, str(SCRIPTS_DIR))
-
-    import sms_receipts
 
     _RECEIPT_STATUS = sms_receipts.append_receipt(
         request_payload=payload,

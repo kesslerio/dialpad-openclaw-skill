@@ -92,6 +92,10 @@ export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
 
+# Optional merged-flow agent draft callback URL. The default is reachable from
+# the AlphaClaw/OpenClaw gateway container when the webhook binds 0.0.0.0:8081.
+export DIALPAD_DRAFT_CALLBACK_URL="http://host.docker.internal:8081/internal/draft-callback"
+
 # Optional sales-line first-contact auto-replies (disabled by default)
 export DIALPAD_AUTO_REPLY_ENABLED="1"
 export DIALPAD_SMS_APPROVAL_DB="/home/art/clawd/logs/sms_approvals.db"
@@ -103,6 +107,10 @@ export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 ```
 
 When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are only forwarded to OpenClaw when the matching event flag is explicitly enabled. Leave `OPENCLAW_HOOKS_SMS_ENABLED=0` and `OPENCLAW_HOOKS_CALL_ENABLED=0` for notification-only mode.
+When `DIALPAD_MERGED_DRAFT_FLOW=1`, the webhook sends no immediate Telegram card for eligible inbound SMS or missed calls.
+It waits for `/internal/draft-callback` from the agent, then falls back to the deterministic draft after `DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS`.
+The webhook uses `DIALPAD_DRAFT_CALLBACK_URL` in the hook prompt; the `dialpad-draft-callback` OpenClaw plugin should use the same value through its `callbackUrl` config key.
+The default, `http://host.docker.internal:8081/internal/draft-callback`, is intended for the AlphaClaw container-to-host path.
 When OpenClaw hook delivery and the local Dialpad Telegram card route to the same Telegram target, the local Dialpad card owns the operator-visible notification by default because it carries the approval UI. The hook payload is still sent as structured context with `deliver=false` and ownership metadata so downstream agents do not post a second same-target operator message. Set `DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY=1` only when intentional fanout to the same target is desired.
 If your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly.
 The local gateway allows explicit `niemand-work` routing and `hook:dialpad:` session keys.

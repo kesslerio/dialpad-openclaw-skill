@@ -137,6 +137,10 @@ DIALPAD_MERGED_DRAFT_FLOW = parse_bool_env(
     False,
 )
 DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS = int(os.environ.get("DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS", "180"))
+DIALPAD_DRAFT_CALLBACK_URL = os.environ.get(
+    "DIALPAD_DRAFT_CALLBACK_URL",
+    "http://host.docker.internal:8081/internal/draft-callback",
+)
 DIALPAD_DRAFT_CALLBACK_MAX_CHARS = 1000
 DIALPAD_SMS_TELEGRAM_NOTIFY = os.environ.get("DIALPAD_SMS_TELEGRAM_NOTIFY", "1").lower() in {"1", "true", "yes", "on"}
 DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED = parse_bool_env(
@@ -228,6 +232,12 @@ ATTIO_NOTE_DEDUPE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 PENDING_DRAFTS_TABLE = "pending_agent_drafts"
 PENDING_DRAFTS_RETENTION_MS = 1 * 60 * 60 * 1000
+MERGED_FLOW_FALLBACK_WARNING_THRESHOLD = 3
+_MERGED_FLOW_COUNTERS = {
+    "callback": 0,
+    "fallback": 0,
+    "consecutive_fallback": 0,
+}
 
 TELEGRAM_STATUS_SENT = "sent"
 TELEGRAM_STATUS_FILTERED = "filtered"
@@ -1831,10 +1841,12 @@ def insert_pending_draft(job_id, event_dict, fallback_draft, callback_token,
                  fallback_draft, callback_token, route_chat_id, route_thread_id),
             )
             conn.commit()
+            return True
         finally:
             conn.close()
-    except Exception as exc:  # noqa: BLE001 - merged flow degrades to dual-delivery.
+    except Exception as exc:  # noqa: BLE001 - merged flow degrades to local-only delivery.
         print(f"⚠️  pending_drafts insert failed ({type(exc).__name__})")
+        return False
 
 
 def claim_pending_draft(job_id, db_path=None):
@@ -1855,7 +1867,7 @@ def claim_pending_draft(job_id, db_path=None):
                 conn.commit()
                 return None
             row = conn.execute(
-                f"SELECT job_id, event_json, fallback_draft, callback_token, "
+                f"SELECT job_id, created_at_ms, event_json, fallback_draft, callback_token, "
                 f"route_chat_id, route_thread_id FROM {PENDING_DRAFTS_TABLE} WHERE job_id=?",
                 (job_id,),
             ).fetchone()
@@ -1864,11 +1876,12 @@ def claim_pending_draft(job_id, db_path=None):
                 return None
             return {
                 "job_id": row[0],
-                "event": json.loads(row[1]) if row[1] else {},
-                "fallback_draft": row[2],
-                "callback_token": row[3],
-                "route_chat_id": row[4],
-                "route_thread_id": row[5],
+                "created_at_ms": row[1],
+                "event": json.loads(row[2]) if row[2] else {},
+                "fallback_draft": row[3],
+                "callback_token": row[4],
+                "route_chat_id": row[5],
+                "route_thread_id": row[6],
             }
         finally:
             conn.close()
@@ -1892,6 +1905,44 @@ def get_pending_draft_callback_token(job_id, db_path=None):
     except Exception as exc:  # noqa: BLE001 - auth fails closed.
         print(f"⚠️  pending_drafts lookup failed ({type(exc).__name__})")
         return None
+
+
+def claim_expired_pending_drafts(timeout_seconds=None, db_path=None):
+    """Claim stale waiting drafts after restart so they render exactly once."""
+    timeout_seconds = DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    cutoff_ms = _now_ms() - int(timeout_seconds * 1000)
+    try:
+        conn = _init_pending_drafts_db(db_path=db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT job_id FROM {PENDING_DRAFTS_TABLE} "
+                f"WHERE status='waiting' AND created_at_ms <= ? ORDER BY created_at_ms ASC",
+                (cutoff_ms,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - startup recovery is best-effort.
+        print(f"⚠️  pending_drafts startup sweep failed ({type(exc).__name__})")
+        return []
+
+    claimed = []
+    for (job_id,) in rows:
+        row = claim_pending_draft(job_id, db_path=db_path)
+        if row is not None:
+            claimed.append(row)
+    return claimed
+
+
+def render_expired_pending_drafts(timeout_seconds=None, db_path=None):
+    """Render stale pending drafts through the normal fallback path."""
+    claimed_rows = claim_expired_pending_drafts(timeout_seconds=timeout_seconds, db_path=db_path)
+    for claimed in claimed_rows:
+        job_id = claimed.get("job_id")
+        fallback_draft = claimed.get("fallback_draft") or ""
+        created_at_ms = claimed.get("created_at_ms") or _now_ms()
+        elapsed_ms = max(0, _now_ms() - int(created_at_ms))
+        _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
+    return len(claimed_rows)
 
 
 def _prune_pending_drafts(db_path=None):
@@ -5081,6 +5132,12 @@ def format_hook_message(normalized_event, line_display=None, callback_url=None,
 
     if callback_url and callback_job_id:
         lines.append("")
+        lines.append(
+            "Draft guidance: Write a specific, warm plain-text SMS reply from the context above. "
+            "Use the contact identity, deal stage, booked-demo details, and recent thread when present; "
+            "match the sender's tone; keep it to one or two short sentences; no markdown or links unless "
+            "the customer asked for one."
+        )
         lines.append("Reply-Draft Callback: When you have a draft reply ready, call the submit_draft tool with:")
         lines.append(f'- jobId: "{callback_job_id}"')
         lines.append(f'- draft: "<your draft reply text>"')
@@ -5243,6 +5300,33 @@ def send_sms_to_openclaw_hooks(normalized_sms, line_display=None):
     return send_to_openclaw_hooks(normalized_sms, line_display=line_display)
 
 
+def _record_merged_flow_path(path):
+    """Update process-local merged-flow health counters."""
+    if path == "callback":
+        _MERGED_FLOW_COUNTERS["callback"] += 1
+        _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
+    elif path == "fallback":
+        _MERGED_FLOW_COUNTERS["fallback"] += 1
+        _MERGED_FLOW_COUNTERS["consecutive_fallback"] += 1
+        streak = _MERGED_FLOW_COUNTERS["consecutive_fallback"]
+        if streak == MERGED_FLOW_FALLBACK_WARNING_THRESHOLD:
+            print(
+                "⚠️  [merged-flow] consecutive fallback threshold reached "
+                f"({streak}); callback pipe may be dead. Check submit_draft tool exposure, "
+                "plugin callbackUrl, and webhook callback URL reachability."
+            )
+    elif path == "callback_lost":
+        _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
+
+
+def _merged_flow_counter_suffix():
+    return (
+        f"callback={_MERGED_FLOW_COUNTERS['callback']} "
+        f"fallback={_MERGED_FLOW_COUNTERS['fallback']} "
+        f"consecutive_fallback={_MERGED_FLOW_COUNTERS['consecutive_fallback']}"
+    )
+
+
 def _render_merged_card(job_id, draft_text, claimed_row, path, elapsed_ms=0):
     """Render and send the rich Telegram card with the given draft text.
 
@@ -5288,6 +5372,9 @@ def _render_merged_card(job_id, draft_text, claimed_row, path, elapsed_ms=0):
             auto_reply_status=event.get("auto_reply_status"),
             auto_reply_draft_created=bool(event.get("fallback_draft")),
         )
+    provenance = _build_draft_provenance(event)
+    if provenance:
+        tg_text += f"\n↳ {escape_telegram_markdown(provenance)}"
 
     draft_id = event.get("auto_reply_draft_id")
     reply_policy = event.get("reply_policy", {"state": "eligible"})
@@ -5301,8 +5388,11 @@ def _render_merged_card(job_id, draft_text, claimed_row, path, elapsed_ms=0):
         chat_id=route_chat_id,
         message_thread_id=route_thread_id,
     )
+    _record_merged_flow_path(path)
     print(f"[merged-flow] job_id={job_id} path={path} elapsed_ms={elapsed_ms} "
-          f"draft_chars={len(draft_text)} telegram_sent={'✓' if sent else '✗'}")
+          f"draft_chars={len(draft_text)} telegram_sent={'✓' if sent else '✗'} "
+          f"{_merged_flow_counter_suffix()}")
+    return sent
 
 
 def _fallback_timer_callback(job_id, start_monotonic):
@@ -5738,7 +5828,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     line_display = get_line_name(to_num)
                     _merged_job_id = _generate_draft_job_id()
                     _merged_token = _generate_callback_token()
-                    _merged_callback_url = f"http://127.0.0.1:{PORT}/internal/draft-callback"
+                    _merged_callback_url = DIALPAD_DRAFT_CALLBACK_URL
                     _merged_event = {
                         "event_type": "sms",
                         "sender_number": from_num,
@@ -5747,68 +5837,87 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                         "contact_name": sender_enrichment.get("contact_name"),
                         "line_display": line_display,
                         "inbound_context": normalized_sms.get("inbound_context"),
+                        "crm_context": normalized_sms.get("crm_context"),
+                        "calendar_context": normalized_sms.get("calendar_context"),
+                        "comms_context": normalized_sms.get("comms_context"),
+                        "rich_reply": normalized_sms.get("rich_reply"),
                         "auto_reply_draft_id": auto_reply_draft_id,
                         "auto_reply_status": auto_reply_status,
                         "fallback_draft": auto_reply_message or "",
                         "reply_policy": reply_policy if isinstance(reply_policy, dict) else {"state": "eligible"},
                     }
-                    insert_pending_draft(
+                    _merged_pending_inserted = insert_pending_draft(
                         _merged_job_id, _merged_event, auto_reply_message or "",
                         _merged_token, route_chat_id=route_chat_id,
                         route_thread_id=route_thread_id,
                     )
-                    normalized_sms["callback_url"] = _merged_callback_url
-                    normalized_sms["callback_job_id"] = _merged_job_id
-                    normalized_sms["callback_token"] = _merged_token
-                    normalized_sms["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
-                    hook_sent, hook_status = send_sms_to_openclaw_hooks(
-                        normalized_sms, line_display=line_display
-                    )
-                    _merged_start = time.monotonic()
-                    _merged_timer = threading.Timer(
-                        DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS,
-                        _fallback_timer_callback,
-                        args=(_merged_job_id, _merged_start),
-                    )
-                    _merged_timer.daemon = True
-                    _merged_timer.start()
-                    telegram_sms_sent = None
-                    telegram_status = "merged_flow_waiting"
+                    if _merged_pending_inserted:
+                        normalized_sms["callback_url"] = _merged_callback_url
+                        normalized_sms["callback_job_id"] = _merged_job_id
+                        normalized_sms["callback_token"] = _merged_token
+                        normalized_sms["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
+                        _merged_start = time.monotonic()
+                        _merged_timer = threading.Timer(
+                            DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS,
+                            _fallback_timer_callback,
+                            args=(_merged_job_id, _merged_start),
+                        )
+                        _merged_timer.daemon = True
+                        _merged_timer.start()
+                        hook_sent, hook_status = send_sms_to_openclaw_hooks(
+                            normalized_sms, line_display=line_display
+                        )
+                        telegram_sms_sent = None
+                        telegram_status = "merged_flow_waiting"
+                    else:
+                        print("⚠️  [merged-flow] pending draft unavailable; rendering deterministic SMS card now")
+                        telegram_sms_sent = _render_merged_card(
+                            _merged_job_id,
+                            auto_reply_message or "",
+                            {
+                                "event": _merged_event,
+                                "route_chat_id": route_chat_id,
+                                "route_thread_id": route_thread_id,
+                            },
+                            path="fallback",
+                            elapsed_ms=0,
+                        )
+                        telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
                 else:
                     line_display = get_line_name(to_num)
-                to_display = line_display or str(first_value(to_num) or "Unknown")
-                contact_info = sender_enrichment.get("contact_name")
-                from_display = f"{contact_info} ({from_num})" if contact_info else str(from_num)
-                time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
-                tg_text = (
-                    "📩 Dialpad SMS\n"
-                    f"From: {escape_telegram_markdown(from_display)}\n"
-                    f"To: {escape_telegram_markdown(to_display)}\n"
-                    f"Time: {escape_telegram_markdown(time_display)}\n\n"
-                    f"Message: {escape_telegram_markdown(text)}"
-                )
-                tg_text += build_inbound_context_brief(
-                    normalized_sms.get("inbound_context"),
-                    auto_reply_status=auto_reply_status,
-                    auto_reply_draft_created=auto_reply_draft_created,
-                )
-                provenance = _build_draft_provenance(normalized_sms)
-                if provenance:
-                    tg_text += f"\n↳ {escape_telegram_markdown(provenance)}"
-                tg_text += build_approval_review_suffix(
-                    auto_reply_draft_id,
-                    auto_reply_message,
-                    reply_policy,
-                )
-                tg_text += build_human_only_blocked_suffix(reply_policy)
-                reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
-                telegram_sms_sent = send_to_telegram(
-                    tg_text,
-                    reply_markup=reply_markup,
-                    chat_id=route_chat_id,
-                    message_thread_id=route_thread_id,
-                )
-                telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
+                    to_display = line_display or str(first_value(to_num) or "Unknown")
+                    contact_info = sender_enrichment.get("contact_name")
+                    from_display = f"{contact_info} ({from_num})" if contact_info else str(from_num)
+                    time_display = datetime.now().strftime("%I:%M %p").lstrip("0")
+                    tg_text = (
+                        "📩 Dialpad SMS\n"
+                        f"From: {escape_telegram_markdown(from_display)}\n"
+                        f"To: {escape_telegram_markdown(to_display)}\n"
+                        f"Time: {escape_telegram_markdown(time_display)}\n\n"
+                        f"Message: {escape_telegram_markdown(text)}"
+                    )
+                    tg_text += build_inbound_context_brief(
+                        normalized_sms.get("inbound_context"),
+                        auto_reply_status=auto_reply_status,
+                        auto_reply_draft_created=auto_reply_draft_created,
+                    )
+                    provenance = _build_draft_provenance(normalized_sms)
+                    if provenance:
+                        tg_text += f"\n↳ {escape_telegram_markdown(provenance)}"
+                    tg_text += build_approval_review_suffix(
+                        auto_reply_draft_id,
+                        auto_reply_message,
+                        reply_policy,
+                    )
+                    tg_text += build_human_only_blocked_suffix(reply_policy)
+                    reply_markup = build_sms_approval_reply_markup(auto_reply_draft_id, reply_policy)
+                    telegram_sms_sent = send_to_telegram(
+                        tg_text,
+                        reply_markup=reply_markup,
+                        chat_id=route_chat_id,
+                        message_thread_id=route_thread_id,
+                    )
+                    telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
             elif hook_status == "filtered_opt_out":
                 contact_info = sender_enrichment.get("contact_name")
                 from_display = f"{contact_info} ({from_num})" if contact_info else str(from_num)
@@ -6074,7 +6183,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             if DIALPAD_MERGED_DRAFT_FLOW:
                 _call_job_id = _generate_draft_job_id()
                 _call_token = _generate_callback_token()
-                _call_callback_url = f"http://127.0.0.1:{PORT}/internal/draft-callback"
+                _call_callback_url = DIALPAD_DRAFT_CALLBACK_URL
                 _call_event = {
                     "event_type": "missed_call",
                     "sender_number": from_num,
@@ -6083,32 +6192,58 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     "contact_name": contact_info,
                     "line_display": line_display,
                     "inbound_context": normalized_event.get("inbound_context"),
+                    "crm_context": normalized_event.get("crm_context"),
+                    "calendar_context": normalized_event.get("calendar_context"),
+                    "comms_context": normalized_event.get("comms_context"),
+                    "rich_reply": normalized_event.get("rich_reply"),
                     "auto_reply_draft_id": auto_reply_draft_id,
                     "auto_reply_status": auto_reply_status,
                     "fallback_draft": auto_reply_message or "",
                     "reply_policy": reply_policy if isinstance(reply_policy, dict) else {"state": "eligible"},
                 }
-                insert_pending_draft(
+                _call_pending_inserted = insert_pending_draft(
                     _call_job_id, _call_event, auto_reply_message or "",
                     _call_token, route_chat_id=route_chat_id,
                     route_thread_id=route_thread_id,
                 )
-                normalized_event["callback_url"] = _call_callback_url
-                normalized_event["callback_job_id"] = _call_job_id
-                normalized_event["callback_token"] = _call_token
-                normalized_event["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
-                hook_sent, hook_status = send_to_openclaw_hooks(
-                    normalized_event, line_display=line_display
-                )
-                _call_start = time.monotonic()
-                _call_merged_timer = threading.Timer(
-                    DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS,
-                    _fallback_timer_callback,
-                    args=(_call_job_id, _call_start),
-                )
-                _call_merged_timer.daemon = True
-                _call_merged_timer.start()
-                telegram_sent = False
+                if _call_pending_inserted:
+                    normalized_event["callback_url"] = _call_callback_url
+                    normalized_event["callback_job_id"] = _call_job_id
+                    normalized_event["callback_token"] = _call_token
+                    normalized_event["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
+                    _call_start = time.monotonic()
+                    _call_merged_timer = threading.Timer(
+                        DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS,
+                        _fallback_timer_callback,
+                        args=(_call_job_id, _call_start),
+                    )
+                    _call_merged_timer.daemon = True
+                    _call_merged_timer.start()
+                    hook_sent, hook_status = send_to_openclaw_hooks(
+                        normalized_event, line_display=line_display
+                    )
+                    telegram_sent = False
+                else:
+                    print("⚠️  [merged-flow] pending draft unavailable; rendering deterministic missed-call card now")
+                    telegram_sent = _render_merged_card(
+                        _call_job_id,
+                        auto_reply_message or "",
+                        {
+                            "event": _call_event,
+                            "route_chat_id": route_chat_id,
+                            "route_thread_id": route_thread_id,
+                        },
+                        path="fallback",
+                        elapsed_ms=0,
+                    )
+                    normalized_event["operator_notification"] = resolve_operator_notification_delivery(
+                        normalized_event,
+                        local_telegram_enabled=telegram_sent is True,
+                    )
+                    hook_sent, hook_status = send_to_openclaw_hooks(
+                        normalized_event,
+                        line_display=line_display,
+                    )
             else:
                 tg_text += build_inbound_context_brief(
                     normalized_event.get("inbound_context"),
@@ -6226,13 +6361,15 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         # Race: atomically claim the draft row (first-wins)
         claimed = claim_pending_draft(job_id)
         if claimed is None:
-            elapsed_ms = int((time.monotonic() - 0) * 1000)
-            print(f"[merged-flow] job_id={job_id} path=callback_lost elapsed_ms=N/A draft_chars={len(draft)}")
+            _record_merged_flow_path("callback_lost")
+            print(f"[merged-flow] job_id={job_id} path=callback_lost elapsed_ms=N/A "
+                  f"draft_chars={len(draft)} {_merged_flow_counter_suffix()}")
             self.send_json_response(200, {"status": "lost", "reason": "timer already fired"})
             return
 
         # Callback won — render the rich card with the agent's draft
-        elapsed_ms = int((time.monotonic() - claimed.get("_start_monotonic", time.monotonic())) * 1000)
+        created_at_ms = claimed.get("created_at_ms") or _now_ms()
+        elapsed_ms = max(0, _now_ms() - int(created_at_ms))
         _render_merged_card(job_id, draft, claimed, path="callback", elapsed_ms=elapsed_ms)
         self.send_json_response(200, {"status": "delivered", "jobId": job_id})
 
@@ -6457,6 +6594,9 @@ def main():
     print("=" * 60)
     print("Press Ctrl+C to stop")
     print()
+    recovered = render_expired_pending_drafts()
+    if recovered:
+        print(f"Recovered {recovered} expired merged-flow draft(s)")
 
     try:
         server.serve_forever()

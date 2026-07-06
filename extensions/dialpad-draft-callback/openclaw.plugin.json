@@ -1,0 +1,21 @@
+{
+  "id": "dialpad-draft-callback",
+  "name": "Dialpad Draft Callback",
+  "description": "Submit a draft reply to the Dialpad webhook server.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": ["submit_draft"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "callbackUrl": {
+        "type": "string",
+        "description": "Dialpad webhook draft-callback URL reachable from the gateway container."
+      }
+    }
+  }
+}

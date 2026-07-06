@@ -1907,26 +1907,32 @@ def get_pending_draft_callback_token(job_id, db_path=None):
         return None
 
 
-def claim_expired_pending_drafts(timeout_seconds=None, db_path=None):
-    """Claim stale waiting drafts after restart so they render exactly once."""
-    timeout_seconds = DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    cutoff_ms = _now_ms() - int(timeout_seconds * 1000)
+def list_waiting_pending_drafts(db_path=None):
+    """Return waiting draft jobs so restart recovery can resume their timers."""
     try:
         conn = _init_pending_drafts_db(db_path=db_path)
         try:
             rows = conn.execute(
-                f"SELECT job_id FROM {PENDING_DRAFTS_TABLE} "
-                f"WHERE status='waiting' AND created_at_ms <= ? ORDER BY created_at_ms ASC",
-                (cutoff_ms,),
+                f"SELECT job_id, created_at_ms FROM {PENDING_DRAFTS_TABLE} "
+                f"WHERE status='waiting' ORDER BY created_at_ms ASC",
             ).fetchall()
+            return [{"job_id": row[0], "created_at_ms": row[1]} for row in rows]
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - startup recovery is best-effort.
         print(f"⚠️  pending_drafts startup sweep failed ({type(exc).__name__})")
         return []
 
+
+def claim_expired_pending_drafts(timeout_seconds=None, db_path=None):
+    """Claim stale waiting drafts after restart so they render exactly once."""
+    timeout_seconds = DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    cutoff_ms = _now_ms() - int(timeout_seconds * 1000)
     claimed = []
-    for (job_id,) in rows:
+    for pending in list_waiting_pending_drafts(db_path=db_path):
+        if int(pending.get("created_at_ms") or 0) > cutoff_ms:
+            continue
+        job_id = pending.get("job_id")
         row = claim_pending_draft(job_id, db_path=db_path)
         if row is not None:
             claimed.append(row)
@@ -1943,6 +1949,43 @@ def render_expired_pending_drafts(timeout_seconds=None, db_path=None):
         elapsed_ms = max(0, _now_ms() - int(created_at_ms))
         _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
     return len(claimed_rows)
+
+
+def resume_pending_drafts_after_restart(timeout_seconds=None, db_path=None):
+    """Resume every waiting draft row after restart: render expired, reschedule fresh."""
+    timeout_seconds = DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    timeout_ms = int(timeout_seconds * 1000)
+    now_ms = _now_ms()
+    rendered = 0
+    scheduled = 0
+    for pending in list_waiting_pending_drafts(db_path=db_path):
+        job_id = pending.get("job_id")
+        created_at_ms = int(pending.get("created_at_ms") or now_ms)
+        elapsed_ms = max(0, now_ms - created_at_ms)
+        remaining_ms = timeout_ms - elapsed_ms
+        if remaining_ms <= 0:
+            claimed = claim_pending_draft(job_id, db_path=db_path)
+            if claimed is None:
+                continue
+            _render_merged_card(
+                job_id,
+                claimed.get("fallback_draft") or "",
+                claimed,
+                path="fallback",
+                elapsed_ms=elapsed_ms,
+            )
+            rendered += 1
+            continue
+        start_monotonic = time.monotonic() - (elapsed_ms / 1000)
+        timer = threading.Timer(
+            remaining_ms / 1000,
+            _fallback_timer_callback,
+            args=(job_id, start_monotonic, db_path),
+        )
+        timer.daemon = True
+        timer.start()
+        scheduled += 1
+    return {"rendered": rendered, "scheduled": scheduled}
 
 
 def _prune_pending_drafts(db_path=None):
@@ -5141,6 +5184,7 @@ def format_hook_message(normalized_event, line_display=None, callback_url=None,
         lines.append("Reply-Draft Callback: When you have a draft reply ready, call the submit_draft tool with:")
         lines.append(f'- jobId: "{callback_job_id}"')
         lines.append(f'- draft: "<your draft reply text>"')
+        lines.append(f'- token: "{callback_token}"')
         lines.append(f"(Fallback: if the tool is unavailable, HTTP POST to {callback_url} with header X-Callback-Token: {callback_token} and JSON body {{\"jobId\": \"{callback_job_id}\", \"draft\": \"<your answer>\"}})")
 
     return "\n".join(lines)
@@ -5395,15 +5439,45 @@ def _render_merged_card(job_id, draft_text, claimed_row, path, elapsed_ms=0):
     return sent
 
 
-def _fallback_timer_callback(job_id, start_monotonic):
-    """Fallback timer: if the callback hasn't arrived, render with the deterministic draft."""
-    claimed = claim_pending_draft(job_id)
+def _render_pending_fallback(job_id, start_monotonic=None, elapsed_ms=None, db_path=None):
+    """Claim and render a pending row with its deterministic fallback draft."""
+    claimed = claim_pending_draft(job_id, db_path=db_path)
     if claimed is None:
-        # Callback already won — nothing to do
-        return
-    elapsed_ms = int((time.monotonic() - start_monotonic) * 1000)
+        return None
+    if elapsed_ms is None:
+        if start_monotonic is None:
+            created_at_ms = claimed.get("created_at_ms") or _now_ms()
+            elapsed_ms = max(0, _now_ms() - int(created_at_ms))
+        else:
+            elapsed_ms = int((time.monotonic() - start_monotonic) * 1000)
     fallback_draft = claimed.get("fallback_draft") or ""
-    _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
+    return _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
+
+
+def _persist_callback_draft_text(draft_id, draft_text):
+    """Keep Telegram approval buttons bound to the exact callback draft text."""
+    if not draft_id or sms_approval is None:
+        return True
+    try:
+        conn = sms_approval.init_db()
+        try:
+            updated = sms_approval.update_pending_draft_text(
+                conn,
+                draft_id=draft_id,
+                draft_text=draft_text,
+                metadata_updates={"agent_callback_draft": True},
+            )
+            return bool(updated and updated.get("draft_text") == draft_text.strip())
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - fall back to the already-persisted deterministic draft.
+        print(f"⚠️  callback draft persistence failed ({type(exc).__name__}); using deterministic draft")
+        return False
+
+
+def _fallback_timer_callback(job_id, start_monotonic, db_path=None):
+    """Fallback timer: if the callback hasn't arrived, render with the deterministic draft."""
+    _render_pending_fallback(job_id, start_monotonic=start_monotonic, db_path=db_path)
 
 
 class DialpadWebhookHandler(BaseHTTPRequestHandler):
@@ -5867,8 +5941,14 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                         hook_sent, hook_status = send_sms_to_openclaw_hooks(
                             normalized_sms, line_display=line_display
                         )
-                        telegram_sms_sent = None
-                        telegram_status = "merged_flow_waiting"
+                        if hook_sent:
+                            telegram_sms_sent = None
+                            telegram_status = "merged_flow_waiting"
+                        else:
+                            _merged_timer.cancel()
+                            print("⚠️  [merged-flow] hook not sent; rendering deterministic SMS card now")
+                            telegram_sms_sent = _render_pending_fallback(_merged_job_id, start_monotonic=_merged_start)
+                            telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
                     else:
                         print("⚠️  [merged-flow] pending draft unavailable; rendering deterministic SMS card now")
                         telegram_sms_sent = _render_merged_card(
@@ -5883,6 +5963,7 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                             elapsed_ms=0,
                         )
                         telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
+                        normalized_sms["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
                 else:
                     line_display = get_line_name(to_num)
                     to_display = line_display or str(first_value(to_num) or "Unknown")
@@ -6222,7 +6303,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     hook_sent, hook_status = send_to_openclaw_hooks(
                         normalized_event, line_display=line_display
                     )
-                    telegram_sent = False
+                    if hook_sent:
+                        telegram_sent = False
+                    else:
+                        _call_merged_timer.cancel()
+                        print("⚠️  [merged-flow] hook not sent; rendering deterministic missed-call card now")
+                        telegram_sent = _render_pending_fallback(_call_job_id, start_monotonic=_call_start)
                 else:
                     print("⚠️  [merged-flow] pending draft unavailable; rendering deterministic missed-call card now")
                     telegram_sent = _render_merged_card(
@@ -6370,7 +6456,13 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         # Callback won — render the rich card with the agent's draft
         created_at_ms = claimed.get("created_at_ms") or _now_ms()
         elapsed_ms = max(0, _now_ms() - int(created_at_ms))
-        _render_merged_card(job_id, draft, claimed, path="callback", elapsed_ms=elapsed_ms)
+        event = claimed.get("event") if isinstance(claimed, dict) else {}
+        draft_id = event.get("auto_reply_draft_id") if isinstance(event, dict) else None
+        if _persist_callback_draft_text(draft_id, draft):
+            _render_merged_card(job_id, draft, claimed, path="callback", elapsed_ms=elapsed_ms)
+        else:
+            fallback_draft = claimed.get("fallback_draft") or ""
+            _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
         self.send_json_response(200, {"status": "delivered", "jobId": job_id})
 
     def handle_voicemail_webhook(self):
@@ -6594,9 +6686,12 @@ def main():
     print("=" * 60)
     print("Press Ctrl+C to stop")
     print()
-    recovered = render_expired_pending_drafts()
-    if recovered:
-        print(f"Recovered {recovered} expired merged-flow draft(s)")
+    resumed = resume_pending_drafts_after_restart()
+    if resumed["rendered"] or resumed["scheduled"]:
+        print(
+            "Recovered merged-flow drafts: "
+            f"rendered={resumed['rendered']} scheduled={resumed['scheduled']}"
+        )
 
     try:
         server.serve_forever()

@@ -23,11 +23,31 @@ class ImmediateTimer:
         self.started = True
 
 
+class RecordingTimer:
+    instances = []
+
+    def __init__(self, seconds, callback, args=()):
+        self.seconds = seconds
+        self.callback = callback
+        self.args = args
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+        self.__class__.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+
 @pytest.fixture(autouse=True)
 def reset_merged_flow_counters():
     webhook_server._MERGED_FLOW_COUNTERS.update(
         {"callback": 0, "fallback": 0, "consecutive_fallback": 0}
     )
+    RecordingTimer.instances.clear()
 
 
 def _build_handler(payload, headers=None):
@@ -177,6 +197,46 @@ def test_merged_sms_storage_failure_sends_local_card_without_callback(monkeypatc
     assert hook_payloads[0]["operator_notification"]["deliver"] is False
 
 
+def test_merged_sms_hook_failure_renders_local_card_immediately(monkeypatch, tmp_path):
+    telegram_sends = []
+    hook_payloads = []
+    real_insert_pending_draft = webhook_server.insert_pending_draft
+    _stub_common_inbound_dependencies(monkeypatch, telegram_sends)
+    monkeypatch.setattr(webhook_server, "DIALPAD_MERGED_DRAFT_FLOW", True)
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: tmp_path / "pending.db")
+    monkeypatch.setattr(webhook_server, "insert_pending_draft", real_insert_pending_draft)
+    monkeypatch.setattr(webhook_server.threading, "Timer", RecordingTimer)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized, **_kwargs: hook_payloads.append(dict(normalized)) or (False, "disabled"),
+    )
+
+    handler = object.__new__(webhook_server.DialpadWebhookHandler)
+    handler._process_inbound_post_ack(
+        {
+            "direction": "inbound",
+            "from_number": "+14155550123",
+            "to_number": ["+14155201316"],
+            "text": "Need help",
+            "id": "msg-1",
+        },
+        {"message": {}},
+        "+14155550123",
+        ["+14155201316"],
+        "Need help",
+        "inbound",
+        "sms",
+        "2026-07-06T00:00:00",
+        "disabled",
+    )
+
+    assert len(telegram_sends) == 1
+    assert "Draft text" in telegram_sends[0]
+    assert hook_payloads[0]["callback_job_id"] == "draft-job-1"
+    assert RecordingTimer.instances[0].cancelled is True
+
+
 def test_non_merged_sms_flow_sends_one_immediate_telegram(monkeypatch):
     telegram_sends = []
     _stub_common_inbound_dependencies(monkeypatch, telegram_sends)
@@ -223,6 +283,7 @@ def test_hook_message_uses_context_aware_draft_guidance():
     assert "specific, warm plain-text SMS reply" in message
     assert "booked-demo details" in message
     assert "submit_draft tool" in message
+    assert '- token: "token-1"' in message
     assert "X-Callback-Token: token-1" in message
 
 
@@ -300,6 +361,34 @@ def test_claim_expired_pending_drafts_leaves_fresh_rows(tmp_path):
     assert webhook_server.claim_pending_draft("fresh-job", db_path=db_path)["job_id"] == "fresh-job"
 
 
+def test_resume_pending_drafts_after_restart_schedules_fresh_rows(monkeypatch, tmp_path):
+    db_path = tmp_path / "pending.db"
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
+    monkeypatch.setattr(webhook_server.threading, "Timer", RecordingTimer)
+    webhook_server.insert_pending_draft(
+        "fresh-job",
+        {"event_type": "sms"},
+        "Fallback",
+        "token",
+    )
+    conn = webhook_server._init_pending_drafts_db(db_path=db_path)
+    try:
+        conn.execute(
+            f"UPDATE {webhook_server.PENDING_DRAFTS_TABLE} SET created_at_ms=? WHERE job_id=?",
+            (webhook_server._now_ms() - 500, "fresh-job"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    resumed = webhook_server.resume_pending_drafts_after_restart(timeout_seconds=2)
+
+    assert resumed == {"rendered": 0, "scheduled": 1}
+    assert RecordingTimer.instances[0].started is True
+    assert 1.0 <= RecordingTimer.instances[0].seconds <= 2.0
+    assert RecordingTimer.instances[0].args[0] == "fresh-job"
+
+
 def test_draft_callback_rejects_missing_or_wrong_token(monkeypatch):
     rendered = []
     monkeypatch.setattr(webhook_server, "get_pending_draft_callback_token", lambda _job_id: {"token": "expected"})
@@ -311,3 +400,54 @@ def test_draft_callback_rejects_missing_or_wrong_token(monkeypatch):
 
     assert status["code"] == 401
     assert rendered == []
+
+
+def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path):
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        webhook_server.sms_approval.create_draft(
+            conn,
+            draft_id="smsdraft_1",
+            thread_key="thread-1",
+            customer_number="+14155550123",
+            sender_number="+14155201316",
+            draft_text="Fallback text",
+        )
+    finally:
+        conn.close()
+
+    db_path = tmp_path / "pending.db"
+    webhook_server.insert_pending_draft(
+        "job-1",
+        {
+            "event_type": "sms",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "Hello",
+            "auto_reply_draft_id": "smsdraft_1",
+            "reply_policy": {"state": "eligible"},
+        },
+        "Fallback text",
+        "expected",
+        db_path=db_path,
+    )
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
+    telegram_sends = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
+
+    handler, status = _build_handler(
+        {"jobId": "job-1", "draft": "Agent callback text"},
+        headers={"X-Callback-Token": "expected"},
+    )
+    handler.handle_draft_callback()
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        stored = webhook_server.sms_approval.get_draft(conn, "smsdraft_1")
+    finally:
+        conn.close()
+    assert status["code"] == 200
+    assert stored["draft_text"] == "Agent callback text"
+    assert "Agent callback text" in telegram_sends[0]

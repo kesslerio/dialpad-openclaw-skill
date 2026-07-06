@@ -342,6 +342,38 @@ def get_draft(conn: sqlite3.Connection, draft_id: str) -> dict[str, Any] | None:
     return row_to_dict(row)
 
 
+def update_pending_draft_text(
+    conn: sqlite3.Connection,
+    *,
+    draft_id: str,
+    draft_text: str,
+    metadata_updates: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Replace text for a still-pending approval draft."""
+    text = draft_text.strip()
+    if not text:
+        raise ValueError("draft_text cannot be empty")
+
+    draft = get_draft(conn, draft_id)
+    if not draft or draft.get("status") not in {STATUS_PENDING, STATUS_RISK_PENDING}:
+        return None
+    metadata_json = _metadata_for_update(draft, **(metadata_updates or {}))
+    cursor = conn.execute(
+        """
+        UPDATE sms_approval_drafts
+        SET draft_text = ?, metadata_json = ?
+        WHERE draft_id = ?
+          AND status IN (?, ?)
+          AND invalidated_at_ms IS NULL
+        """,
+        (text, metadata_json, draft_id, STATUS_PENDING, STATUS_RISK_PENDING),
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        return get_draft(conn, draft_id)
+    return get_draft(conn, draft_id)
+
+
 def invalidate_pending(
     conn: sqlite3.Connection,
     *,

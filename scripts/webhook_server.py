@@ -139,7 +139,7 @@ DIALPAD_MERGED_DRAFT_FLOW = parse_bool_env(
 DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS = int(os.environ.get("DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS", "180"))
 DIALPAD_DRAFT_CALLBACK_URL = os.environ.get(
     "DIALPAD_DRAFT_CALLBACK_URL",
-    "http://host.docker.internal:8081/internal/draft-callback",
+    f"http://host.docker.internal:{PORT}/internal/draft-callback",
 )
 DIALPAD_DRAFT_CALLBACK_MAX_CHARS = 1000
 DIALPAD_SMS_TELEGRAM_NOTIFY = os.environ.get("DIALPAD_SMS_TELEGRAM_NOTIFY", "1").lower() in {"1", "true", "yes", "on"}
@@ -5948,7 +5948,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                             elapsed_ms=0,
                         )
                         telegram_status = TELEGRAM_STATUS_SENT if telegram_sms_sent else TELEGRAM_STATUS_FAILED
-                        normalized_sms["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
+                        normalized_sms["operator_notification"] = resolve_operator_notification_delivery(
+                            normalized_sms,
+                            local_telegram_enabled=telegram_sms_sent is True,
+                        )
                 else:
                     line_display = get_line_name(to_num)
                     to_display = line_display or str(first_value(to_num) or "Unknown")

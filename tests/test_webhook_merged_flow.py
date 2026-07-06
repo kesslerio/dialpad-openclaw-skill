@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -126,6 +128,31 @@ def _stub_common_inbound_dependencies(monkeypatch, telegram_sends, pending_rows=
     monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
 
 
+def test_default_callback_url_uses_webhook_port_env():
+    env = os.environ.copy()
+    env["PORT"] = "9099"
+    env.pop("DIALPAD_DRAFT_CALLBACK_URL", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.path.insert(0, 'scripts'); "
+                "import webhook_server; "
+                "print(webhook_server.DIALPAD_DRAFT_CALLBACK_URL)"
+            ),
+        ],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "http://host.docker.internal:9099/internal/draft-callback"
+
+
 def test_merged_sms_flow_does_not_send_immediate_telegram(monkeypatch):
     telegram_sends = []
     pending_rows = []
@@ -196,6 +223,42 @@ def test_merged_sms_storage_failure_sends_local_card_without_callback(monkeypatc
     assert "callback_url" not in hook_payloads[0]
     assert "callback_job_id" not in hook_payloads[0]
     assert hook_payloads[0]["operator_notification"]["deliver"] is False
+
+
+def test_merged_sms_storage_failure_allows_hook_when_local_card_fails(monkeypatch):
+    telegram_sends = []
+    hook_payloads = []
+    _stub_common_inbound_dependencies(monkeypatch, telegram_sends)
+    monkeypatch.setattr(webhook_server, "DIALPAD_MERGED_DRAFT_FLOW", True)
+    monkeypatch.setattr(webhook_server, "insert_pending_draft", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized, **_kwargs: hook_payloads.append(dict(normalized)) or (True, "http_200"),
+    )
+
+    handler = object.__new__(webhook_server.DialpadWebhookHandler)
+    handler._process_inbound_post_ack(
+        {
+            "direction": "inbound",
+            "from_number": "+14155550123",
+            "to_number": ["+14155201316"],
+            "text": "Need help",
+            "id": "msg-1",
+        },
+        {"message": {}},
+        "+14155550123",
+        ["+14155201316"],
+        "Need help",
+        "inbound",
+        "sms",
+        "2026-07-06T00:00:00",
+        "disabled",
+    )
+
+    assert hook_payloads
+    assert hook_payloads[0]["operator_notification"]["deliver"] is True
 
 
 def test_merged_sms_hook_failure_renders_local_card_immediately(monkeypatch, tmp_path):

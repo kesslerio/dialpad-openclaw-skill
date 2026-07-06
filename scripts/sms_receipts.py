@@ -10,18 +10,42 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-import sms_approval
-
 
 DEFAULT_LEDGER_PATH = Path("/data/.openclaw/state/dialpad/sms-receipts.jsonl")
-LEDGER_PATH = Path(os.environ.get("DIALPAD_SMS_RECEIPT_LEDGER", DEFAULT_LEDGER_PATH))
 MAX_LEDGER_BYTES = 5 * 1024 * 1024
+FAILED_DELIVERY_STATUSES = {
+    "failed",
+    "failure",
+    "undelivered",
+    "rejected",
+    "error",
+    "errored",
+    "cancelled",
+    "canceled",
+}
 
 AppendReceiptStatus = Literal["appended", "not_applicable", "append_failed"]
 
 
 def _ledger_path() -> Path:
-    return Path(os.environ.get("DIALPAD_SMS_RECEIPT_LEDGER", str(LEDGER_PATH)))
+    return Path(os.environ.get("DIALPAD_SMS_RECEIPT_LEDGER", str(DEFAULT_LEDGER_PATH)))
+
+
+def extract_send_result(result: Any) -> tuple[str | None, str | None]:
+    if not isinstance(result, dict):
+        return None, "unknown"
+    sms_id = result.get("id") or result.get("message_id")
+    status = result.get("delivery_status") or result.get("message_status") or result.get("status")
+    return (str(sms_id) if sms_id is not None else None, str(status) if status is not None else None)
+
+
+def send_result_failure_reason(sms_id: str | None, delivery_status: str | None) -> str | None:
+    if not sms_id:
+        return "missing_dialpad_sms_id"
+    normalized_status = str(delivery_status or "").strip().lower()
+    if normalized_status in FAILED_DELIVERY_STATUSES:
+        return f"delivery_status_{normalized_status}"
+    return None
 
 
 def _request_recipients(request_payload: dict[str, Any]) -> list[str]:
@@ -75,28 +99,28 @@ def append_receipt(
 
     Returns ``append_failed`` for non-fatal ledger write failures, ``appended``
     for a written receipt, and ``not_applicable`` when the send result is not a
-    successful Dialpad SMS response.
+    successful Dialpad SMS response. Never raises.
     """
-    sms_id, delivery_status = sms_approval._extract_send_result(send_result)
-    failure_reason = sms_approval._send_result_failure_reason(sms_id, delivery_status)
-    if failure_reason:
-        return "not_applicable"
-
-    recipients = _request_recipients(request_payload)
-    if not recipients:
-        return "not_applicable"
-
-    payload = {
-        "schema_version": "1",
-        "message_id": sms_id,
-        "to": recipients,
-        "from": request_payload.get("from_number"),
-        "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "delivery_status": delivery_status or "unknown",
-        "source": source,
-    }
-
     try:
+        sms_id, delivery_status = extract_send_result(send_result)
+        failure_reason = send_result_failure_reason(sms_id, delivery_status)
+        if failure_reason:
+            return "not_applicable"
+
+        recipients = _request_recipients(request_payload)
+        if not recipients:
+            return "not_applicable"
+
+        payload = {
+            "schema_version": "1",
+            "message_id": sms_id,
+            "to": recipients,
+            "from": request_payload.get("from_number"),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "delivery_status": delivery_status or "unknown",
+            "source": source,
+        }
+
         _append_jsonl(_ledger_path(), payload)
     except Exception as exc:  # noqa: BLE001 - receipt persistence is observational only.
         print(f"Warning: failed to append Dialpad SMS receipt ledger: {exc}", file=sys.stderr)

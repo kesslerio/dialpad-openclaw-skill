@@ -61,7 +61,8 @@ ERROR_CODES = {
     "internal_error",
 }
 E164_RE = re.compile(r"^\+\d{7,15}$")
-_PENDING_SUCCESS_META_EXTRA: dict[str, object] = {}
+_RECEIPT_SOURCE: str | None = None
+_RECEIPT_STATUS: str | None = None
 
 
 class WrapperError(Exception):
@@ -248,20 +249,21 @@ def _sms_send_payload(args: list[str]) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _receipt_source() -> str:
-    stem = Path(sys.argv[0]).stem
-    if stem in {"send_sms", "send_group_intro"}:
-        return stem
-    return "generated_sms_send"
+def set_receipt_source(name: str) -> None:
+    global _RECEIPT_SOURCE
+    _RECEIPT_SOURCE = name
 
 
-def _consume_pending_success_meta_extra() -> dict[str, object]:
-    pending = dict(_PENDING_SUCCESS_META_EXTRA)
-    _PENDING_SUCCESS_META_EXTRA.clear()
-    return pending
+def take_receipt_status() -> str | None:
+    global _RECEIPT_STATUS
+    status = _RECEIPT_STATUS
+    _RECEIPT_STATUS = None
+    return status
 
 
 def _append_sms_receipt(args: list[str], result: Any) -> None:
+    global _RECEIPT_STATUS
+
     if not _is_sms_send_command(args):
         return
 
@@ -272,20 +274,13 @@ def _append_sms_receipt(args: list[str], result: Any) -> None:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
 
-    try:
-        import sms_receipts
+    import sms_receipts
 
-        status = sms_receipts.append_receipt(
-            request_payload=payload,
-            send_result=result,
-            source=_receipt_source(),
-        )
-    except Exception as exc:  # noqa: BLE001 - receipt persistence must never break sends.
-        print(f"Warning: failed to append Dialpad SMS receipt ledger: {exc}", file=sys.stderr)
-        status = "append_failed"
-
-    if status == "append_failed":
-        _PENDING_SUCCESS_META_EXTRA["receipt_ledger"] = "append_failed"
+    _RECEIPT_STATUS = sms_receipts.append_receipt(
+        request_payload=payload,
+        send_result=result,
+        source=_RECEIPT_SOURCE or "generated_sms_send",
+    )
 
 
 def run_generated_json(args: list[str]) -> Any:
@@ -326,16 +321,13 @@ def emit_success(
     data: dict[str, object],
     meta_extra: dict[str, object] | None = None,
 ) -> None:
-    resolved_meta_extra = _consume_pending_success_meta_extra()
-    if meta_extra:
-        resolved_meta_extra.update(meta_extra)
     print(
         json.dumps(
             {
                 "ok": True,
                 "command": command,
                 "data": data,
-                "meta": build_meta(wrapper, resolved_meta_extra or None),
+                "meta": build_meta(wrapper, meta_extra),
             },
             indent=2,
         )
@@ -350,7 +342,6 @@ def emit_error(
     retryable: bool,
     meta_extra: dict[str, object] | None = None,
 ) -> None:
-    _consume_pending_success_meta_extra()
     resolved_code = code if code in ERROR_CODES else "internal_error"
     print(
         json.dumps(
@@ -411,6 +402,5 @@ def handle_wrapper_exception(command: str, wrapper: str, err: Exception, json_mo
         emit_error(command, wrapper, code, str(err), retryable, meta_extra=meta_extra)
         return 2
 
-    _consume_pending_success_meta_extra()
     print_wrapper_error(err)
     return 2

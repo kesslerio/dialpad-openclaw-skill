@@ -17,6 +17,8 @@ from _dialpad_compat import (
     require_api_key,
     resolve_sender,
     run_generated_json,
+    set_receipt_source,
+    take_receipt_status,
     WrapperError,
 )
 
@@ -83,7 +85,16 @@ def _send_single_sms(sender: str, to_number: str, message: str) -> dict[str, obj
     return run_generated_json(["sms", "send", "--data", json.dumps(payload)])
 
 
+def _receipt_meta_extra() -> dict[str, object] | None:
+    status = take_receipt_status()
+    if status == "append_failed":
+        return {"receipt_ledger": "append_failed"}
+    return None
+
+
 def main() -> int:
+    set_receipt_source("send_group_intro")
+    take_receipt_status()
     command = COMMAND_IDS["send_group_intro.send"]
     wrapper = "send_group_intro.py"
     json_mode = "--json" in sys.argv
@@ -148,10 +159,12 @@ def main() -> int:
 
         require_api_key()
         prospect_result = _send_single_sms(sender_number, args.prospect, prospect_message)
+        prospect_receipt_meta = _receipt_meta_extra()
         prospect_id = prospect_result.get("id") or "N/A"
 
         try:
             reference_result = _send_single_sms(sender_number, args.reference, reference_message)
+            reference_receipt_meta = _receipt_meta_extra()
         except WrapperError as err:
             raise WrapperError(
                 "Prospect message sent successfully "
@@ -180,6 +193,7 @@ def main() -> int:
                         "status": reference_result.get("message_status"),
                     },
                 },
+                meta_extra=prospect_receipt_meta or reference_receipt_meta,
             )
         else:
             print("Mode: mirrored_fallback")

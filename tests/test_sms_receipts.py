@@ -39,22 +39,19 @@ class SmsReceiptTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.ledger_path = Path(self.temp_dir.name) / "state" / "sms-receipts.jsonl"
-        self.original_ledger_path = sms_receipts.LEDGER_PATH
         self.original_max_bytes = sms_receipts.MAX_LEDGER_BYTES
         self.original_env_path = os.environ.get("DIALPAD_SMS_RECEIPT_LEDGER")
-        sms_receipts.LEDGER_PATH = self.ledger_path
-        os.environ.pop("DIALPAD_SMS_RECEIPT_LEDGER", None)
-        _dialpad_compat._consume_pending_success_meta_extra()
+        os.environ["DIALPAD_SMS_RECEIPT_LEDGER"] = str(self.ledger_path)
+        _dialpad_compat.take_receipt_status()
         self.addCleanup(self._restore_receipts)
 
     def _restore_receipts(self) -> None:
-        sms_receipts.LEDGER_PATH = self.original_ledger_path
         sms_receipts.MAX_LEDGER_BYTES = self.original_max_bytes
         if self.original_env_path is None:
             os.environ.pop("DIALPAD_SMS_RECEIPT_LEDGER", None)
         else:
             os.environ["DIALPAD_SMS_RECEIPT_LEDGER"] = self.original_env_path
-        _dialpad_compat._consume_pending_success_meta_extra()
+        _dialpad_compat.take_receipt_status()
 
     def _read_receipts(self, path: Path | None = None) -> list[dict[str, object]]:
         ledger = path or self.ledger_path

@@ -370,7 +370,7 @@ def update_pending_draft_text(
     )
     conn.commit()
     if cursor.rowcount != 1:
-        return get_draft(conn, draft_id)
+        return None
     return get_draft(conn, draft_id)
 
 

@@ -5328,7 +5328,7 @@ def _record_merged_flow_path(path):
         if path in {"callback", "callback_persist_failed"}:
             _MERGED_FLOW_COUNTERS["callback"] += 1
             _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
-        elif path == "fallback":
+        elif path == "fallback_timeout":
             _MERGED_FLOW_COUNTERS["fallback"] += 1
             _MERGED_FLOW_COUNTERS["consecutive_fallback"] += 1
             streak = _MERGED_FLOW_COUNTERS["consecutive_fallback"]
@@ -5419,7 +5419,7 @@ def _render_merged_card(job_id, draft_text, claimed_row, path, elapsed_ms=0):
     return sent
 
 
-def _render_pending_fallback(job_id, start_monotonic=None, elapsed_ms=None, db_path=None):
+def _render_pending_fallback(job_id, start_monotonic=None, elapsed_ms=None, db_path=None, path="fallback"):
     """Claim and render a pending row with its deterministic fallback draft."""
     claimed = claim_pending_draft(job_id, db_path=db_path)
     if claimed is None:
@@ -5431,7 +5431,7 @@ def _render_pending_fallback(job_id, start_monotonic=None, elapsed_ms=None, db_p
         else:
             elapsed_ms = int((time.monotonic() - start_monotonic) * 1000)
     fallback_draft = claimed.get("fallback_draft") or ""
-    return _render_merged_card(job_id, fallback_draft, claimed, path="fallback", elapsed_ms=elapsed_ms)
+    return _render_merged_card(job_id, fallback_draft, claimed, path=path, elapsed_ms=elapsed_ms)
 
 
 def _persist_callback_draft_text(draft_id, draft_text):
@@ -5457,7 +5457,12 @@ def _persist_callback_draft_text(draft_id, draft_text):
 
 def _fallback_timer_callback(job_id, start_monotonic, db_path=None):
     """Fallback timer: if the callback hasn't arrived, render with the deterministic draft."""
-    _render_pending_fallback(job_id, start_monotonic=start_monotonic, db_path=db_path)
+    _render_pending_fallback(
+        job_id,
+        start_monotonic=start_monotonic,
+        db_path=db_path,
+        path="fallback_timeout",
+    )
 
 
 class DialpadWebhookHandler(BaseHTTPRequestHandler):

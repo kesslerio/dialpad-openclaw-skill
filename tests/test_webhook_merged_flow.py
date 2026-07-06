@@ -309,25 +309,36 @@ def test_render_merged_card_includes_provenance_and_counters(monkeypatch, capsys
                 "crm_context": {"usable": True, "company": "Acme", "stage": "Demo booked"},
             },
         },
-        path="fallback",
+        path="fallback_timeout",
         elapsed_ms=180000,
     )
 
     assert "Attio: Acme" in telegram_sends[0]
     assert "stage: Demo booked" in telegram_sends[0]
     output = capsys.readouterr().out
-    assert "path=fallback" in output
+    assert "path=fallback_timeout" in output
     assert "callback=0 fallback=1 consecutive_fallback=1" in output
 
 
 def test_fallback_warning_threshold_and_callback_reset(capsys):
-    webhook_server._record_merged_flow_path("fallback")
-    webhook_server._record_merged_flow_path("fallback")
-    webhook_server._record_merged_flow_path("fallback")
+    webhook_server._record_merged_flow_path("fallback_timeout")
+    webhook_server._record_merged_flow_path("fallback_timeout")
+    webhook_server._record_merged_flow_path("fallback_timeout")
     assert "consecutive fallback threshold reached" in capsys.readouterr().out
 
     webhook_server._record_merged_flow_path("callback_lost")
     assert webhook_server._MERGED_FLOW_COUNTERS["consecutive_fallback"] == 0
+
+
+def test_non_timeout_fallback_does_not_increment_dead_pipe_counter():
+    webhook_server._record_merged_flow_path("fallback")
+
+    with webhook_server._MERGED_FLOW_COUNTER_LOCK:
+        assert webhook_server._MERGED_FLOW_COUNTERS == {
+            "callback": 0,
+            "fallback": 0,
+            "consecutive_fallback": 0,
+        }
 
 
 def test_resume_pending_drafts_after_restart_renders_expired_and_leaves_fresh(monkeypatch, tmp_path):

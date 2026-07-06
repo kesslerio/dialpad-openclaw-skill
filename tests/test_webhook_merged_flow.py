@@ -312,6 +312,69 @@ def test_merged_sms_hook_failure_renders_local_card_immediately(monkeypatch, tmp
     assert RecordingTimer.instances[0].cancelled is True
 
 
+def test_merged_missed_call_waiting_hook_stays_visible(monkeypatch):
+    hook_payloads = []
+    monkeypatch.setattr(webhook_server, "verify_webhook_auth", lambda *_args: (True, "test"))
+    monkeypatch.setattr(webhook_server, "DIALPAD_MERGED_DRAFT_FLOW", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_CALLBACK_URL", "http://callback/internal/draft-callback")
+    monkeypatch.setattr(webhook_server, "_generate_draft_job_id", lambda: "draft-job-1")
+    monkeypatch.setattr(webhook_server, "_generate_callback_token", lambda: "token-1")
+    monkeypatch.setattr(webhook_server.threading, "Timer", RecordingTimer)
+    monkeypatch.setattr(
+        webhook_server,
+        "resolve_missed_call_context",
+        lambda *_args, **_kwargs: {
+            "from_number": "+14155550123",
+            "to_number": "+14155201316",
+            "event_ts_ms": 1770000000000,
+            "line_display": "Sales",
+            "caller_resolution_path": "payload_direct",
+            "line_resolution_path": "payload_direct",
+            "caller_confidence": "high",
+            "line_confidence": "high",
+            "history_matched": False,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "build_missed_call_dedupe_key", lambda *_args, **_kwargs: "call-1")
+    monkeypatch.setattr(webhook_server, "claim_missed_call_notification", lambda *_args, **_kwargs: {"duplicate": False, "status": "claimed"})
+    monkeypatch.setattr(webhook_server, "lookup_contact_enrichment", lambda _number: {"contact_name": "Jane"})
+    monkeypatch.setattr(webhook_server, "apply_payload_contact_fallback", lambda enrichment, _data: enrichment)
+    monkeypatch.setattr(webhook_server, "get_line_name", lambda _number: "Sales")
+    monkeypatch.setattr(webhook_server, "lookup_recent_call_context", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(webhook_server, "prepare_inbound_reply_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(webhook_server, "should_send_proactive_reply", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        webhook_server,
+        "create_proactive_reply_draft",
+        lambda *_args, **_kwargs: (True, "draft_created", "Draft text", "smsdraft_1", {"state": "eligible"}),
+    )
+    monkeypatch.setattr(webhook_server, "log_auto_send_shadow", lambda _event: None)
+    monkeypatch.setattr(webhook_server, "resolve_telegram_route", lambda *_args: ("chat-1", 42))
+    monkeypatch.setattr(webhook_server, "insert_pending_draft", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_to_openclaw_hooks",
+        lambda normalized, **_kwargs: hook_payloads.append(dict(normalized)) or (True, "http_200"),
+    )
+
+    handler, status = _build_handler(
+        {
+            "direction": "inbound",
+            "call_missed": True,
+            "duration": 0,
+            "from_number": "+14155550123",
+            "to_number": "+14155201316",
+            "call_id": "call-1",
+        }
+    )
+    handler.handle_call_webhook()
+
+    assert status["code"] == 200
+    assert hook_payloads
+    assert hook_payloads[0]["operator_notification"]["deliver"] is True
+    assert hook_payloads[0]["operator_notification"]["hookDelivery"] == "visible"
+
+
 def test_non_merged_sms_flow_sends_one_immediate_telegram(monkeypatch):
     telegram_sends = []
     _stub_common_inbound_dependencies(monkeypatch, telegram_sends)
@@ -507,6 +570,33 @@ def test_resume_pending_drafts_after_restart_skips_over_retention_rows(monkeypat
     assert webhook_server.claim_pending_draft("stale-job", db_path=db_path) is None
 
 
+def test_resume_pending_drafts_after_restart_keeps_rows_inside_long_timeout(monkeypatch, tmp_path):
+    db_path = tmp_path / "pending.db"
+    monkeypatch.setattr(webhook_server.threading, "Timer", RecordingTimer)
+    webhook_server.insert_pending_draft(
+        "slow-job",
+        {"event_type": "sms"},
+        "Fallback",
+        "token",
+        db_path=db_path,
+    )
+    conn = webhook_server._init_pending_drafts_db(db_path=db_path)
+    try:
+        conn.execute(
+            f"UPDATE {webhook_server.PENDING_DRAFTS_TABLE} SET created_at_ms=? WHERE job_id=?",
+            (webhook_server._now_ms() - (80 * 60 * 1000), "slow-job"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    resumed = webhook_server.resume_pending_drafts_after_restart(timeout_seconds=7200, db_path=db_path)
+
+    assert resumed == {"rendered": 0, "scheduled": 1}
+    assert RecordingTimer.instances[0].args[0] == "slow-job"
+    assert webhook_server.claim_pending_draft("slow-job", db_path=db_path)["job_id"] == "slow-job"
+
+
 def test_draft_callback_rejects_missing_or_wrong_token(monkeypatch):
     rendered = []
     monkeypatch.setattr(webhook_server, "get_pending_draft_callback_token", lambda _job_id: {"token": "expected"})
@@ -556,7 +646,7 @@ def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path)
     monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
 
     handler, status = _build_handler(
-        {"jobId": "job-1", "draft": "Agent callback text"},
+        {"jobId": "job-1", "draft": "Please have a real person call me."},
         headers={"X-Callback-Token": "expected"},
     )
     handler.handle_draft_callback()
@@ -564,11 +654,20 @@ def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path)
     conn = webhook_server.sms_approval.init_db()
     try:
         stored = webhook_server.sms_approval.get_draft(conn, "smsdraft_1")
+        first_approval = webhook_server.sms_approval.approve_draft(
+            conn,
+            draft_id="smsdraft_1",
+            send_func=lambda *_args, **_kwargs: {"id": "sms-1"},
+            actor_id="human",
+        )
     finally:
         conn.close()
     assert status["code"] == 200
-    assert stored["draft_text"] == "Agent callback text"
-    assert "Agent callback text" in telegram_sends[0]
+    assert stored["draft_text"] == "Please have a real person call me."
+    assert stored["risk_state"] == webhook_server.sms_approval.RISK_RISKY
+    assert stored["metadata"]["reply_policy"]["state"] == "risky"
+    assert first_approval["status"] == "risky_confirmation_required"
+    assert "Please have a real person call me." in telegram_sends[0]
 
 
 def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, tmp_path):

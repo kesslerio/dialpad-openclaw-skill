@@ -1929,9 +1929,10 @@ def resume_pending_drafts_after_restart(timeout_seconds=None, db_path=None):
     """Resume every waiting draft row after restart: render expired, reschedule fresh."""
     timeout_seconds = DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     timeout_ms = int(timeout_seconds * 1000)
-    _prune_pending_drafts(db_path=db_path)
+    retention_ms = max(PENDING_DRAFTS_RETENTION_MS, timeout_ms)
+    _prune_pending_drafts(db_path=db_path, retention_ms=retention_ms)
     now_ms = _now_ms()
-    retention_cutoff_ms = now_ms - PENDING_DRAFTS_RETENTION_MS
+    retention_cutoff_ms = now_ms - retention_ms
     rendered = 0
     scheduled = 0
     for pending in list_waiting_pending_drafts(db_path=db_path):
@@ -1966,14 +1967,15 @@ def resume_pending_drafts_after_restart(timeout_seconds=None, db_path=None):
     return {"rendered": rendered, "scheduled": scheduled}
 
 
-def _prune_pending_drafts(db_path=None):
+def _prune_pending_drafts(db_path=None, retention_ms=None):
     """Prune stale pending_drafts rows past the retention window."""
     try:
         conn = _init_pending_drafts_db(db_path=db_path)
         try:
+            resolved_retention_ms = PENDING_DRAFTS_RETENTION_MS if retention_ms is None else int(retention_ms)
             conn.execute(
                 f"DELETE FROM {PENDING_DRAFTS_TABLE} WHERE created_at_ms < ?",
-                (_now_ms() - PENDING_DRAFTS_RETENTION_MS,),
+                (_now_ms() - resolved_retention_ms,),
             )
             conn.commit()
         finally:
@@ -5438,6 +5440,12 @@ def _persist_callback_draft_text(draft_id, draft_text):
     """Keep Telegram approval buttons bound to the exact callback draft text."""
     if not draft_id or sms_approval is None:
         return True
+    reply_policy = classify_sms_reply_policy(draft_text)
+    risk_state = (
+        sms_approval.RISK_RISKY
+        if reply_policy.get("state") == "risky"
+        else sms_approval.RISK_NORMAL
+    )
     try:
         conn = sms_approval.init_db()
         try:
@@ -5445,7 +5453,12 @@ def _persist_callback_draft_text(draft_id, draft_text):
                 conn,
                 draft_id=draft_id,
                 draft_text=draft_text,
-                metadata_updates={"agent_callback_draft": True},
+                risk_state=risk_state,
+                risk_reason=reply_policy.get("risk_reason") if risk_state == sms_approval.RISK_RISKY else None,
+                metadata_updates={
+                    "agent_callback_draft": True,
+                    "reply_policy": reply_policy,
+                },
             )
             return bool(updated and updated.get("draft_text") == draft_text.strip())
         finally:
@@ -6283,7 +6296,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                     normalized_event["callback_url"] = _call_callback_url
                     normalized_event["callback_job_id"] = _call_job_id
                     normalized_event["callback_token"] = _call_token
-                    normalized_event["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
+                    normalized_event["operator_notification"] = resolve_operator_notification_delivery(
+                        normalized_event,
+                        local_telegram_enabled=False,
+                    )
                     _call_start = time.monotonic()
                     _call_merged_timer = threading.Timer(
                         DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS,

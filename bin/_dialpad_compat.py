@@ -21,6 +21,13 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED_DIALPAD = ROOT / "generated" / "dialpad"
+SCRIPTS_DIR = ROOT / "scripts"
+
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import sms_receipts  # noqa: E402 - needs SCRIPTS_DIR on sys.path; module-top import so a broken deploy fails before any send, never after one
+
 SCHEMA_VERSION = "1"
 PROFILE_ENV_KEYS = {
     "work": "DIALPAD_PROFILE_WORK_FROM",
@@ -60,6 +67,8 @@ ERROR_CODES = {
     "internal_error",
 }
 E164_RE = re.compile(r"^\+\d{7,15}$")
+_RECEIPT_SOURCE: str | None = None
+_RECEIPT_STATUS: str | None = None
 
 
 class WrapperError(Exception):
@@ -227,6 +236,57 @@ def run_generated(args: list[str], capture_output: bool = False) -> subprocess.C
 
 
 
+def _is_sms_send_command(args: list[str]) -> bool:
+    return len(args) >= 4 and args[0:2] == ["sms", "send"] and "--data" in args
+
+
+def _sms_send_payload(args: list[str]) -> dict[str, object] | None:
+    try:
+        data_index = args.index("--data")
+        raw_payload = args[data_index + 1]
+    except (ValueError, IndexError):
+        return None
+
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def set_receipt_source(name: str) -> None:
+    global _RECEIPT_SOURCE
+    _RECEIPT_SOURCE = name
+
+
+def take_receipt_meta() -> dict[str, object] | None:
+    """Envelope meta for the most recent send's receipt append, clear-on-read."""
+    global _RECEIPT_STATUS
+    status = _RECEIPT_STATUS
+    _RECEIPT_STATUS = None
+    if status == "append_failed":
+        return {"receipt_ledger": "append_failed"}
+    return None
+
+
+def _append_sms_receipt(args: list[str], result: Any) -> None:
+    global _RECEIPT_STATUS
+
+    if not _is_sms_send_command(args):
+        return
+
+    payload = _sms_send_payload(args)
+    if payload is None:
+        return
+
+    _RECEIPT_STATUS = sms_receipts.append_receipt(
+        request_payload=payload,
+        send_result=result,
+        source=_RECEIPT_SOURCE or "generated_sms_send",
+    )
+
+
 def run_generated_json(args: list[str]) -> Any:
     cmd = ["--output", "json", *args]
     proc = run_generated(cmd, capture_output=True)
@@ -235,9 +295,12 @@ def run_generated_json(args: list[str]) -> Any:
         raise WrapperError(message, code="upstream_error", retryable=True)
 
     try:
-        return json.loads(proc.stdout)
+        result = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise WrapperError(f"Failed to parse JSON output: {exc}") from exc
+
+    _append_sms_receipt(args, result)
+    return result
 
 
 

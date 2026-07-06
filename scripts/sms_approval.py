@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+import sms_receipts
+
 
 DB_PATH = Path(os.environ.get("DIALPAD_SMS_APPROVAL_DB", "/home/art/niemand/logs/sms_approvals.db"))
 DEFAULT_EMERGENCY_OPT_OUT_PATH = Path("/tmp/dialpad_sms_approval_emergency_opt_outs.jsonl")
@@ -34,16 +36,7 @@ APPROVAL_SOURCE_AGENT_DIRECT_SEND = "agent_direct_send"
 APPROVAL_ACTOR_TRUST_AGENT_ASSERTED = "agent_asserted"
 
 BOT_ACTOR_IDS = {"", "agent", "bot", "openclaw", "niemand", "niemand-work"}
-FAILED_DELIVERY_STATUSES = {
-    "failed",
-    "failure",
-    "undelivered",
-    "rejected",
-    "error",
-    "errored",
-    "cancelled",
-    "canceled",
-}
+FAILED_DELIVERY_STATUSES = sms_receipts.FAILED_DELIVERY_STATUSES
 
 
 def now_ms() -> int:
@@ -502,23 +495,6 @@ def _actor_is_allowed(actor_id: str | None) -> bool:
     return str(actor_id or "").strip() in allowed
 
 
-def _extract_send_result(result: Any) -> tuple[str | None, str | None]:
-    if not isinstance(result, dict):
-        return None, "unknown"
-    sms_id = result.get("id") or result.get("message_id")
-    status = result.get("delivery_status") or result.get("message_status") or result.get("status")
-    return (str(sms_id) if sms_id is not None else None, str(status) if status is not None else None)
-
-
-def _send_result_failure_reason(sms_id: str | None, delivery_status: str | None) -> str | None:
-    if not sms_id:
-        return "missing_dialpad_sms_id"
-    normalized_status = str(delivery_status or "").strip().lower()
-    if normalized_status in FAILED_DELIVERY_STATUSES:
-        return f"delivery_status_{normalized_status}"
-    return None
-
-
 def preflight_agent_direct_send(
     conn: sqlite3.Connection,
     *,
@@ -678,8 +654,8 @@ def record_agent_direct_send(
             "draft": draft,
         }
 
-    sms_id, delivery_status = _extract_send_result(send_result)
-    failure_reason = _send_result_failure_reason(sms_id, delivery_status)
+    sms_id, delivery_status = sms_receipts.extract_send_result(send_result)
+    failure_reason = sms_receipts.send_result_failure_reason(sms_id, delivery_status)
     resolved_actor_username = actor_username if actor_username is not None else draft.get("approved_username")
     ts = approved_at_ms or draft.get("approved_at_ms") or now_ms()
     metadata_json = _metadata_for_update(
@@ -880,8 +856,8 @@ def approve_draft(
             draft["draft_text"],
             from_number=draft["sender_number"],
         )
-        sms_id, delivery_status = _extract_send_result(result)
-        failure_reason = _send_result_failure_reason(sms_id, delivery_status)
+        sms_id, delivery_status = sms_receipts.extract_send_result(result)
+        failure_reason = sms_receipts.send_result_failure_reason(sms_id, delivery_status)
         if failure_reason:
             conn.execute(
                 """
@@ -901,6 +877,18 @@ def approve_draft(
                 "delivery_status": delivery_status,
                 "draft": get_draft(conn, draft_id),
             }
+        # The receipt records the completed provider send; it is deliberately
+        # independent of the approval-DB bookkeeping below. Deferring it past
+        # commit() would drop the receipt for a real send on a DB failure.
+        receipt_status = sms_receipts.append_receipt(
+            request_payload={
+                "to_numbers": [draft["customer_number"]],
+                "text": draft["draft_text"],
+                "from_number": draft["sender_number"],
+            },
+            send_result=result,
+            source="approval_lane",
+        )
         conn.execute(
             """
             UPDATE sms_approval_drafts
@@ -914,6 +902,7 @@ def approve_draft(
             "ok": True,
             "status": STATUS_SENT,
             "sent": True,
+            **({"receipt_ledger": "append_failed"} if receipt_status == "append_failed" else {}),
             "dialpad_sms_id": sms_id,
             "delivery_status": delivery_status,
             "draft": get_draft(conn, draft_id),

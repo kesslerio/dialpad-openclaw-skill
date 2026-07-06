@@ -23,6 +23,9 @@ export DIALPAD_API_KEY="your-api-key"
 # Optional local SMS history DB override
 export DIALPAD_SMS_DB="/home/art/niemand/logs/sms.db"
 
+# Optional authoritative SMS receipt ledger override
+export DIALPAD_SMS_RECEIPT_LEDGER="/data/.openclaw/state/dialpad/sms-receipts.jsonl"
+
 # Optional premium TTS
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
 ```
@@ -107,6 +110,7 @@ For first-time or unknown inbound contacts, the payload also carries a `firstCon
 For all eligible inbound SMS and missed calls, the payload may also carry `inboundContext`: a compact identity/provenance/recency brief that explains exact phone matches, Dialpad contact evidence, recent SMS/call continuity, whether a context-aware approval draft is allowed, and whether a generic fallback draft is allowed.
 That pattern is CRM-agnostic: Attio is one example, but the same setup works with HubSpot, Pipedrive, Airtable, a spreadsheet, or a custom directory service downstream.
 Current-turn verification still applies: "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory.
+Successful SMS sends through `bin/send_sms.py`, both legs of `bin/send_group_intro.py`, and the approval lane append authoritative receipt evidence to `DIALPAD_SMS_RECEIPT_LEDGER` when configured, defaulting to `/data/.openclaw/state/dialpad/sms-receipts.jsonl`. The ledger is JSONL and is used by the OpenClaw SMS receipt guard as delivery evidence; failed sends and dry runs do not write receipts. When confirming a sent SMS to an operator, always include a literal `To: <number>` line or phrase so the downstream guard can bind the receipt to the intended recipient.
 For SMS response checks, use `bin/list_sms_thread.py --phone PHONE --json` before claiming a thread has no visible reply history. The local SQLite store is the first-line operational history; Dialpad Stats export is slower and should be treated as a fallback/export path.
 If the runtime stores live SMS history outside the legacy `/home/art/clawd/logs/sms.db` path, set `DIALPAD_SMS_DB`. AlphaClaw exposes the live DB at `/home/art/niemand/logs/sms.db`; a missing `/home/art/clawd` path there means the old alias/default path is wrong, not that SMS history is unmounted.
 For completeness after direct Dialpad UI sends or other out-of-band sends, run `bin/sync_sms_export.py` for the relevant date range. The export sync upserts previously unseen message IDs only and skips existing local messages so webhook-captured plaintext is not replaced by export metadata.

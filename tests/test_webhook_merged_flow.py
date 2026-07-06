@@ -155,10 +155,16 @@ def test_default_callback_url_uses_webhook_port_env():
 
 def test_merged_sms_flow_does_not_send_immediate_telegram(monkeypatch):
     telegram_sends = []
+    hook_payloads = []
     pending_rows = []
     _stub_common_inbound_dependencies(monkeypatch, telegram_sends, pending_rows=pending_rows)
     monkeypatch.setattr(webhook_server, "DIALPAD_MERGED_DRAFT_FLOW", True)
     monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_CALLBACK_URL", "http://callback/internal/draft-callback")
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized, **_kwargs: hook_payloads.append(dict(normalized)) or (True, "http_200"),
+    )
 
     handler = object.__new__(webhook_server.DialpadWebhookHandler)
     handler._process_inbound_post_ack(
@@ -180,6 +186,8 @@ def test_merged_sms_flow_does_not_send_immediate_telegram(monkeypatch):
     )
 
     assert telegram_sends == []
+    assert hook_payloads[0]["operator_notification"]["deliver"] is True
+    assert hook_payloads[0]["operator_notification"]["hookDelivery"] == "visible"
     assert pending_rows[0]["event"]["crm_context"]["company"] == "Acme"
     assert pending_rows[0]["event"]["calendar_context"]["summary"] == "Demo tomorrow"
     assert pending_rows[0]["event"]["comms_context"]["summary"] == "2 recent SMS"
@@ -192,6 +200,9 @@ def test_merged_sms_storage_failure_sends_local_card_without_callback(monkeypatc
     _stub_common_inbound_dependencies(monkeypatch, telegram_sends)
     monkeypatch.setattr(webhook_server, "DIALPAD_MERGED_DRAFT_FLOW", True)
     monkeypatch.setattr(webhook_server, "insert_pending_draft", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "telegram:group:chat-1:topic:42")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setattr(
         webhook_server,
         "send_sms_to_openclaw_hooks",

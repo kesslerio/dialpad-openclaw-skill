@@ -5914,7 +5914,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                         normalized_sms["callback_url"] = _merged_callback_url
                         normalized_sms["callback_job_id"] = _merged_job_id
                         normalized_sms["callback_token"] = _merged_token
-                        normalized_sms["operator_notification"] = {"deliver": False, "hookDelivery": "context_only"}
+                        normalized_sms["operator_notification"] = resolve_operator_notification_delivery(
+                            normalized_sms,
+                            local_telegram_enabled=False,
+                        )
                         _merged_start = time.monotonic()
                         _merged_timer = threading.Timer(
                             DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS,

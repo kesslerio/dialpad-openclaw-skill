@@ -1594,6 +1594,20 @@ def test_knowledge_query_extracts_salient_keywords_for_and_search():
     assert webhook_server._knowledge_query_for_category("pricing", "how much does it cost") == "pricing cost"
 
 
+def test_cad_how_much_question_classifies_as_pricing():
+    text = "Personal use\nHow\nMuch is it in CAD dollars?"
+
+    assert webhook_server.classify_rich_sms_question(text) == "pricing"
+    assert webhook_server._knowledge_query_for_category("pricing", text) == "pricing cost"
+
+
+def test_how_much_near_matches_do_not_force_pricing():
+    assert webhook_server._is_pricing_question("how much effort to pay attention") is False
+    assert webhook_server._is_pricing_question("how much time does it take") is False
+    assert webhook_server._is_pricing_question("how much data can it scan") is False
+    assert webhook_server.classify_rich_sms_question("how much data can it scan") == "product"
+
+
 def test_knowledge_query_keeps_cost_keyword_for_pricing_question():
     # Regression: "I want to know cost please" used to collapse to just "pricing"
     # because cost/want/know/please were all stopwords. The bare "pricing" query
@@ -1601,6 +1615,94 @@ def test_knowledge_query_keeps_cost_keyword_for_pricing_question():
     # "not available for new orders" disclaimer) instead of pricing details.
     # `cost` must survive stopword stripping so the AND query discriminates.
     assert webhook_server._knowledge_query_for_category("pricing", "I want to know cost please") == "pricing cost"
+
+
+def test_cad_pricing_question_uses_knowledge_before_crm(monkeypatch):
+    queries = []
+    crm_calls = []
+    monkeypatch.setattr(webhook_server, "lookup_recent_sms_thread", lambda *_args, **_kwargs: [])
+
+    def _knowledge(query):
+        queries.append(query)
+        return {
+            "usable": True,
+            "status": "ok",
+            "text": "ShapeScale pricing is quoted in USD. For CAD, we can confirm the current converted amount before you purchase.",
+        }
+
+    def _crm_context(*_args, **_kwargs):
+        crm_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Prima Soins Maison",
+            "stage": "Qualifying Sequence",
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_shapescale_knowledge", _knowledge)
+    monkeypatch.setattr(webhook_server, "lookup_sales_crm_context", _crm_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(
+        {
+            "event_type": "sms",
+            "sender_number": "+15148179929",
+            "recipient_number": "+14155201316",
+            "text": "Personal use\nHow\nMuch is it in CAD dollars?",
+            "inbound_context": {
+                "identityConfidence": "high",
+                "contextDraftAllowed": True,
+            },
+        }
+    )
+
+    assert queries == ["pricing cost"]
+    assert crm_calls == []
+    assert rich_reply["usable"] is True
+    assert rich_reply["basis"] == "shapescale_knowledge"
+    assert rich_reply["category"] == "pricing"
+    assert "follow up shortly" not in rich_reply["message"]
+
+
+def test_pricing_question_with_unavailable_knowledge_does_not_use_generic_crm_fallback(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "lookup_recent_sms_thread", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_shapescale_knowledge",
+        lambda _query: {"usable": False, "status": "timeout", "text": ""},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Prima Soins Maison",
+            "stage": "Qualifying Sequence",
+        },
+    )
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15148179929",
+        "recipient_number": "+14155201316",
+        "text": "Personal use\nHow\nMuch is it in CAD dollars?",
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "lookup": {"status": "exact_match", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+    assert normalized_event["rich_reply"]["category"] == "pricing"
+    assert normalized_event["rich_reply"]["status"] == "knowledge_timeout"
 
 
 def test_compose_knowledge_sms_skips_availability_disclaimer_at_lead_for_pricing():
@@ -4327,6 +4429,7 @@ def test_hook_payload_deliver_respects_operator_notification_when_no_merge():
 
 def test_merged_flow_disabled_by_default(monkeypatch):
     """U5: DIALPAD_MERGED_DRAFT_FLOW defaults to False."""
+    assert webhook_server.PORT == 8888
     assert webhook_server.DIALPAD_MERGED_DRAFT_FLOW is False
     assert webhook_server.DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS == 180
 

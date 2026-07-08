@@ -15,7 +15,7 @@ Features:
 - All secrets from environment variables
 
 Environment Variables:
-- PORT (default: 8081) - HTTP server port
+- PORT (default: 8888) - HTTP server port
 - DIALPAD_TELEGRAM_BOT_TOKEN - Telegram bot token (required for call/voicemail notifications)
 - DIALPAD_TELEGRAM_CHAT_ID - Telegram chat ID (required for call/voicemail notifications)
 - DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED (default: disabled)
@@ -111,7 +111,7 @@ def parse_bool_env(raw_value, default=True):
 
 
 # Environment configuration (NO HARDCODED SECRETS)
-PORT = int(os.environ.get("PORT", "8081"))
+PORT = int(os.environ.get("PORT", "8888"))
 WEBHOOK_SECRET = os.environ.get("DIALPAD_WEBHOOK_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("DIALPAD_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("DIALPAD_TELEGRAM_CHAT_ID", "")
@@ -2689,6 +2689,19 @@ def build_proactive_reply_message(normalized_event, sender_enrichment=None):
     return f"Hi {greeting_name}, {body}"
 
 
+_PRICING_KEYWORD_RE = re.compile(r"\b(price|pricing|cost|quote|lease|buyout|finance|financing|monthly|payment)\b")
+_PRICING_AMOUNT_RE = re.compile(r"\bhow\s+much\b")
+_PRICING_AMOUNT_CONTEXT_RE = re.compile(
+    r"\b(cad|usd|dollars?|canadian|quote|lease|buy|purchase|finance|financing|monthly|payment)\b|\$"
+)
+
+
+def _is_pricing_question(body):
+    if _PRICING_KEYWORD_RE.search(body):
+        return True
+    return bool(_PRICING_AMOUNT_RE.search(body) and _PRICING_AMOUNT_CONTEXT_RE.search(body))
+
+
 def classify_rich_sms_question(text, recent_thread=None):
     """Classify bounded Sales SMS questions that are safe candidates for richer drafts."""
     body = str(text or "").strip().lower()
@@ -2703,7 +2716,7 @@ def classify_rich_sms_question(text, recent_thread=None):
         return "link_issue"
     if re.search(r"\b(book|booking|schedule|demo|appointment|calendar|time)\b", body):
         return "booking"
-    if re.search(r"\b(price|pricing|cost|quote|lease|buyout|finance|financing|monthly|payment)\b", body):
+    if _is_pricing_question(body):
         return "pricing"
     if re.search(r"\b(business|consumer|version|scan|scanner|results|client|clients|how does|how it works)\b", body):
         return "product"
@@ -3049,7 +3062,7 @@ def _rich_reply_has_calendar_status(rich_reply):
 def _rich_reply_blocks_generic_fallback(rich_reply):
     return (
         isinstance(rich_reply, dict)
-        and rich_reply.get("category") == "scheduling_availability"
+        and rich_reply.get("category") in {"pricing", "scheduling_availability"}
         and rich_reply.get("usable") is not True
     )
 
@@ -4268,6 +4281,7 @@ _QMD_STOPWORDS = frozenset(
     thank hi hello there here just like into out up down over more most any some
     your shapescale shape scale""".split()
 )
+_PRICING_QUERY_STOPWORDS = frozenset("personal cad usd dollar dollars canadian use".split())
 # cost/costs/price/priced are NOT stopwords: they discriminate pricing docs from
 # availability docs that merely mention "pricing" in their heading. Keeping them
 # in the AND-query prevents a cost question from collapsing to the bare anchor.
@@ -4288,10 +4302,14 @@ def _knowledge_query_for_category(category, text):
     arbitrary doc across the whole collection.
     """
     anchor = {"pricing": "pricing", "booking": "book demo"}.get(category, "")
-    words = re.findall(r"[a-zA-Z]{3,}", str(text or "").lower())
+    body = str(text or "").lower()
+    words = re.findall(r"[a-zA-Z]{3,}", body)
+    stopwords = _QMD_STOPWORDS | (_PRICING_QUERY_STOPWORDS if category == "pricing" else frozenset())
+    if category == "pricing" and _is_pricing_question(body):
+        words.append("cost")
     # Longest content words first; lexicographic tie-break keeps the query stable
     # across processes (set iteration order is hash-randomized).
-    candidates = sorted({w for w in words if w not in _QMD_STOPWORDS}, key=lambda w: (-len(w), w))
+    candidates = sorted({w for w in words if w not in stopwords}, key=lambda w: (-len(w), w))
     # Dedup against the anchor's own words so we don't emit "book demo book demo".
     tokens = anchor.split()
     for word in candidates:

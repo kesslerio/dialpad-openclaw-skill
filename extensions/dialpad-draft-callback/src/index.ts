@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 
-const DEFAULT_CALLBACK_URL = "http://host.docker.internal:8081/internal/draft-callback";
+const DEFAULT_CALLBACK_URL = "http://host.docker.internal:8888/internal/draft-callback";
 
 export default defineToolPlugin({
   id: "dialpad-draft-callback",

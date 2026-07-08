@@ -154,7 +154,7 @@ export DIALPAD_PROFILE_SALES_FROM="+14155201316"
 export DIALPAD_DEFAULT_PROFILE="work"
 export DIALPAD_DEFAULT_FROM_NUMBER="+14155201316"
 export DIALPAD_SMS_RECEIPT_LEDGER="/data/.openclaw/state/dialpad/sms-receipts.jsonl"
-export DIALPAD_DRAFT_CALLBACK_URL="http://host.docker.internal:8081/internal/draft-callback"
+export DIALPAD_DRAFT_CALLBACK_URL="http://host.docker.internal:8888/internal/draft-callback"
 ```
 
 For merged agent-draft flow, keep `DIALPAD_DRAFT_CALLBACK_URL` aligned with the

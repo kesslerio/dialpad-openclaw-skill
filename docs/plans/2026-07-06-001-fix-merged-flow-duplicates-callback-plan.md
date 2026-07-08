@@ -33,9 +33,9 @@ Scope the webhook's immediate Telegram send to the non-merged path (single-send 
 Diagnosed in-session (2026-07-06). The merged flow (PRs #118/#120) intends: hook the agent with `deliver=false`, wait for its draft via `/internal/draft-callback`, render one rich card; fall back to the deterministic draft after 180s. Two defects ship instead:
 
 1. **Duplicates (SMS only):** the immediate card build + send block sits outside the SMS merged branch's `else` in `scripts/webhook_server.py`, so merged mode also sends immediately; the fallback then re-sends at +180s. Every inbound SMS posts twice (journal: paired sends 180s apart on every event). The missed-call merged branch is already correctly scoped — its immediate send lives inside the `else` — so missed-call work is regression coverage, not a code move.
-2. **Dead callback → generic drafts:** `path=fallback` on 22/22 merged renders in 7 days. Three independent blockers: (a) the gateway strips `submit_draft` from agent sessions via `tools.profile: "coding"`; (b) the plugin's default `callbackUrl` is `http://127.0.0.1:8081` — container loopback — and the live plugin config carries no override (the untracked manifest's `configSchema` would even reject one: `additionalProperties: false` with no properties); (c) the webhook embeds `http://127.0.0.1:{PORT}` as the raw-HTTP fallback URL in the hook message (both the SMS and missed-call sites).
+2. **Dead callback → generic drafts:** `path=fallback` on 22/22 merged renders in 7 days. Three independent blockers: (a) the gateway strips `submit_draft` from agent sessions via `tools.profile: "coding"`; (b) the plugin's previous default `callbackUrl` was `http://127.0.0.1:8081` — container loopback — and the live plugin config carried no override (the untracked manifest's `configSchema` would even reject one: `additionalProperties: false` with no properties); (c) the webhook embedded `http://127.0.0.1:{PORT}` as the raw-HTTP fallback URL in the hook message (both the SMS and missed-call sites).
 
-Verified environment facts the fixes rest on: the webhook binds `0.0.0.0:8081` (no bind change needed); the AlphaClaw compose already maps `host.docker.internal:host-gateway` (container→host works today); the hook agent is `niemand-work` (`hooks.allowedAgentIds`); per-agent `tools.alsoAllow` on top of the profile has a live precedent (`niemand` + `browser`); `/internal/draft-callback` enforces a per-job `X-Callback-Token` with constant-time compare (401 otherwise); `production-config-seed.mjs` repairs `openclaw.json` on every start, so durable config belongs in the seed.
+Verified environment facts the fixes rest on: the webhook binds `0.0.0.0:8888` (no bind change needed); the AlphaClaw compose already maps `host.docker.internal:host-gateway` (container→host works today); the hook agent is `niemand-work` (`hooks.allowedAgentIds`); per-agent `tools.alsoAllow` on top of the profile has a live precedent (`niemand` + `browser`); `/internal/draft-callback` enforces a per-job `X-Callback-Token` with constant-time compare (401 otherwise); `production-config-seed.mjs` repairs `openclaw.json` on every start, so durable config belongs in the seed.
 
 ### Requirements
 
@@ -71,7 +71,7 @@ Verified environment facts the fixes rest on: the webhook binds `0.0.0.0:8081` (
 ### Key Technical Decisions
 
 - KTD1 — **Enforce the single-send invariant structurally, not with a flag.** The immediate card build + send moves inside the non-merged branch (both flows); merged mode's only senders remain the claim-based renders (`claim_pending_draft` already makes callback/fallback mutually exclusive). No `if telegram_status == "merged_flow_waiting"` guards sprinkled around shared code.
-- KTD2 — **Reachability is a URL fix, not a network fix.** `host.docker.internal:8081` works today (compose `extra_hosts` present; webhook binds `0.0.0.0`). Both URL producers become configurable with that default: a webhook env var for the embedded fallback URL, and the plugin's `callbackUrl` config (manifest schema must gain the property — the current untracked manifest rejects unknown config keys).
+- KTD2 — **Reachability is a URL fix, not a network fix.** `host.docker.internal:8888` works today (compose `extra_hosts` present; webhook binds `0.0.0.0`). Both URL producers become configurable with that default: a webhook env var for the embedded fallback URL, and the plugin's `callbackUrl` config (manifest schema must gain the property — the current untracked manifest rejects unknown config keys).
 - KTD3 — **Tool exposure is per-agent and seed-durable — with replace-not-layer semantics respected.** Agent-level `tools.alsoAllow` SHADOWS the global list (nullish-coalescing in openclaw's policy resolution, not a union), so seeding `niemand-work.tools.alsoAllow` must write the union of the global `tools.alsoAllow` entries (currently browser + tavily) plus `submit_draft` — seeding `[submit_draft]` alone would strip the work lane's existing tools. Done via `production-config-seed.mjs` alongside `plugins.entries["dialpad-draft-callback"].config.callbackUrl`; live-JSON edits alone are wiped by restart repair.
 - KTD4 — **Security posture unchanged.** The endpoint was already LAN-exposed (`0.0.0.0` bind); the per-job token with constant-time compare stays mandatory and gets an explicit regression test (no token / wrong token → 401, no render).
 - KTD5 — **Draft quality is prompt-level.** Extend `format_hook_message`'s callback instructions with drafting guidance grounded in the context block the agent already receives; no new data sources.
@@ -92,7 +92,7 @@ flowchart TD
     P -.->|removed: dedented immediate send| X((was: second send))
 ```
 
-Callback reachability (all three URL surfaces converge on one value): plugin `callbackUrl` (seeded config) = webhook `DIALPAD_DRAFT_CALLBACK_URL` env default = `http://host.docker.internal:8081/internal/draft-callback`, reachable via the compose `host-gateway` mapping.
+Callback reachability (all three URL surfaces converge on one value): plugin `callbackUrl` (seeded config) = webhook `DIALPAD_DRAFT_CALLBACK_URL` env default = `http://host.docker.internal:8888/internal/draft-callback`, reachable via the compose `host-gateway` mapping.
 
 ---
 
@@ -122,7 +122,7 @@ Callback reachability (all three URL surfaces converge on one value): plugin `ca
 **Goal:** The hook message's raw-HTTP fallback URL is reachable from the container (R5).
 **Dependencies:** none.
 **Files:** `scripts/webhook_server.py` (both callback-URL construction sites — SMS and missed-call), `tests/test_webhook_merged_flow.py`, `README.md`/`SKILL.md` (env var doc).
-**Approach:** Per KTD2: one module-level env-resolved constant (e.g. `DIALPAD_DRAFT_CALLBACK_URL`) defaulting to the `host.docker.internal:8081` callback path; both sites use it.
+**Approach:** Per KTD2: one module-level env-resolved constant (e.g. `DIALPAD_DRAFT_CALLBACK_URL`) defaulting to the `host.docker.internal:8888` callback path; both sites use it.
 **Test scenarios:** default embeds `host.docker.internal` in the hook message; env override is respected at both sites.
 **Verification:** tests green.
 

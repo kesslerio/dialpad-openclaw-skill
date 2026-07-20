@@ -223,6 +223,92 @@ def find_matching_contact(
     return matches[0] if matches else None
 
 
+def _existing_list_values(match: dict[str, Any], keys: tuple[str, ...], primary_key: str) -> list[str]:
+    # Same non-string contract as get_contact_list_values (match detection):
+    # Dialpad list fields can carry dict/None entries, and str()-ing those
+    # would replay fabricated identifiers into the update payload.
+    values: list[str] = []
+    primary = match.get(primary_key) if primary_key else None
+    if isinstance(primary, str) and primary.strip():
+        values.append(primary.strip())
+    for key in keys:
+        raw = match.get(key) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        if isinstance(raw, list):
+            values.extend(item.strip() for item in raw if isinstance(item, str) and item.strip())
+    return values
+
+
+def _coerce_e164(value: str) -> str:
+    """Best-effort E.164 coercion for phones replayed from an existing contact.
+
+    contacts.update requires E.164 for every submitted phone, but only
+    caller-supplied phones pass validate_args — a legacy formatted entry like
+    "(415) 555-0100" replayed verbatim would fail the whole PATCH and drop
+    every identifier, which is worse than normalizing one entry. Only shapes
+    with a defensible mapping are coerced (already-E.164, 10-digit NANP,
+    11-digit leading-1); anything else returns "" and is dropped — a bare
+    "+<digits>" guess would PASS the API's E.164 check while being a
+    fabricated wrong number, which is worse than losing the entry.
+    """
+    value = (value or "").strip()
+    if PHONE_RE.fullmatch(value):
+        return value
+    digits = normalize_phone(value)
+    if value.startswith("+") and 7 <= len(digits) <= 15:
+        # Explicit country code, formatting only ("+44 20 7183 8750") —
+        # stripping separators cannot fabricate a different number.
+        return f"+{digits}"
+    if len(digits) == 10 and digits[0] not in "01":
+        # NANP shape only: a 10-digit non-NANP local format ("0412 345 678")
+        # prefixed with +1 would be a different, fabricated number.
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    return ""
+
+
+def _merge_unique(existing: list[str], new: list[str], key_of) -> list[str]:
+    """Union existing-first, dropping values whose key repeats or is empty."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in existing + new:
+        key = key_of(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(value)
+    return merged
+
+
+def merged_update_payload(match: dict[str, Any], base_payload: dict[str, Any]) -> dict[str, Any]:
+    """Merge the matched contact's identifier lists into an update payload.
+
+    PATCH /contacts/{id} replaces list fields wholesale, so an upsert that
+    matched by email and sent only its own phone silently dropped every number
+    other engines had attached (2026-07-20: a calendar-sourced demo phone was
+    clobbered by a later Attio-sourced upsert, and the lead's texts showed as a
+    raw number). Existing values come first so the contact's primary phone and
+    primary email stay primary; new values are appended, deduped (phones by
+    digit normalization, emails case-insensitively, urls exact).
+    """
+    payload = dict(base_payload)
+    merges = (
+        ("phones", ("phones", "phone_numbers"), "primary_phone", normalize_phone, _coerce_e164),
+        ("emails", ("emails",), "primary_email", lambda value: value.strip().lower(), None),
+        ("urls", ("urls",), "", lambda value: value.strip(), None),
+    )
+    for field, keys, primary_key, key_of, coerce in merges:
+        existing = _existing_list_values(match, keys, primary_key)
+        if coerce:
+            existing = [coerced for coerced in (coerce(value) for value in existing) if coerced]
+        merged = _merge_unique(existing, list(base_payload.get(field) or []), key_of)
+        if merged:
+            payload[field] = merged
+    return payload
+
+
 def create_contact(payload: dict[str, Any]) -> dict[str, Any]:
     return run_generated_json(build_create_contact_command_args(payload))
 
@@ -270,7 +356,7 @@ def sync_shared_contact(
     match = find_matching_contact(phones, emails, owner_id=None, max_pages=max_pages, include_local=False)
     if not match:
         return "created", create_contact(base_payload)
-    return "updated", update_contact(str(match.get("id")), base_payload)
+    return "updated", update_contact(str(match.get("id")), merged_update_payload(match, base_payload))
 
 
 def sync_local_contact(
@@ -293,7 +379,7 @@ def sync_local_contact(
         include_local="true",
     )
     if match:
-        return "updated", update_contact(str(match.get("id")), base_payload)
+        return "updated", update_contact(str(match.get("id")), merged_update_payload(match, base_payload))
 
     payload = {**base_payload, "owner_id": owner_id}
     return "created", create_contact(payload)

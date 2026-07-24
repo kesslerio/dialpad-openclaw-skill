@@ -145,10 +145,15 @@ def _structured_destination_numbers(
     raise ValueError("Structured call destination has no supported variant")
 
 
-def _is_true(value: object) -> bool:
+def _parse_click_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
 
 
 def _body_from_args(command_args: list[str]) -> dict[str, object]:
@@ -179,14 +184,16 @@ def _preflight_meeting(
             "Meeting updates must explicitly set call_out because stored "
             "call-out state and participants cannot be validated locally."
         )
+    if call_out_value is None:
+        return
     if command == ("meetings", "meetings.update"):
-        if _is_true(call_out_value):
+        if _parse_click_bool(call_out_value):
             raise ValueError(
                 "Enabling meeting call-out is disabled because stored "
                 "participants cannot be validated locally."
             )
         return
-    if not _is_true(call_out_value):
+    if not _parse_click_bool(call_out_value):
         return
     if participants_value is None:
         return

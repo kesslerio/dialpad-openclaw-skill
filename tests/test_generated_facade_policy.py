@@ -136,6 +136,17 @@ def test_generated_facade_rejects_international_meeting_callout():
         )
 
 
+def test_generated_facade_allows_meeting_create_without_callout():
+    facade._preflight_outbound_destination(
+        [
+            "meetings",
+            "meetings.create",
+            "--title",
+            "Internal meeting",
+        ]
+    )
+
+
 def test_generated_facade_rejects_unverifiable_meeting_update():
     with pytest.raises(ValueError, match="stored call-out state"):
         facade._preflight_outbound_destination(
@@ -234,6 +245,35 @@ def test_generated_facade_allows_non_phone_participant_target():
     facade._preflight_outbound_destination(
         ["call", "call.participants.add", "--participant", "user-id-123"]
     )
+
+
+@pytest.mark.parametrize("call_out", ["true", "t", "yes", "y", "on", "1"])
+def test_generated_facade_rejects_all_click_true_meeting_update_values(call_out):
+    with pytest.raises(ValueError, match="Enabling meeting call-out"):
+        facade._preflight_outbound_destination(
+            [
+                "meetings",
+                "meetings.update",
+                "--call-out",
+                call_out,
+                "--title",
+                "Rescheduled",
+            ]
+        )
+
+
+def test_generated_facade_rejects_invalid_meeting_boolean():
+    with pytest.raises(ValueError, match="Invalid boolean"):
+        facade._preflight_outbound_destination(
+            [
+                "meetings",
+                "meetings.update",
+                "--call-out",
+                "maybe",
+                "--title",
+                "Rescheduled",
+            ]
+        )
 
 
 @pytest.mark.parametrize(

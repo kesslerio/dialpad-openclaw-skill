@@ -159,6 +159,8 @@ def _body_from_args(command_args: list[str]) -> dict[str, object]:
     data_value = _option_value(command_args, "--data")
     if data_value is None:
         return {}
+    # generated/dialpad.openapi replaces its option-built body with --data
+    # wholesale, so preflight must use the same precedence rather than merge.
     decoded = json.loads(data_value)
     if not isinstance(decoded, dict):
         raise ValueError("--data must be a JSON object")
@@ -195,7 +197,10 @@ def _preflight_meeting(
     if not _parse_click_bool(call_out_value):
         return
     if participants_value is None:
-        return
+        raise ValueError(
+            "Meeting call-out requires explicit participants because implicit "
+            "recipients cannot be validated locally."
+        )
     if isinstance(participants_value, str):
         participants_value = json.loads(participants_value)
     if not isinstance(participants_value, list) or any(

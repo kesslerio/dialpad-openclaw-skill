@@ -147,6 +147,20 @@ def test_generated_facade_allows_meeting_create_without_callout():
     )
 
 
+def test_generated_facade_rejects_meeting_callout_without_participants():
+    with pytest.raises(ValueError, match="explicit participants"):
+        facade._preflight_outbound_destination(
+            [
+                "meetings",
+                "meetings.create",
+                "--call-out",
+                "true",
+                "--title",
+                "Call-out meeting",
+            ]
+        )
+
+
 def test_generated_facade_rejects_unverifiable_meeting_update():
     with pytest.raises(ValueError, match="stored call-out state"):
         facade._preflight_outbound_destination(

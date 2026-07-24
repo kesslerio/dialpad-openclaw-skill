@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import sms_approval
+from outbound_destination_policy import normalize_supported_outbound_destinations
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -352,6 +353,13 @@ def main() -> int:
     try:
         args = build_parser().parse_args()
         json_mode = args.json
+        try:
+            args.to = normalize_supported_outbound_destinations(
+                args.to,
+                allow_nanp_national=args.infer_country_code,
+            )
+        except ValueError as exc:
+            raise WrapperError(str(exc), code="invalid_argument", retryable=False) from exc
         require_generated_cli()
         sender_number, sender_source = resolve_sender(
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch

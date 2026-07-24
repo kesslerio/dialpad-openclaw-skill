@@ -18,6 +18,8 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
+from outbound_destination_policy import require_supported_outbound_destinations
+
 
 # Configuration
 DIALPAD_API_KEY = os.environ.get("DIALPAD_API_KEY")
@@ -57,11 +59,13 @@ def make_call(to_number, from_number=None, user_id=None, text_to_speak=None):
     Returns:
         dict: API response with call details
     """
-    if not DIALPAD_API_KEY:
-        raise ValueError("DIALPAD_API_KEY environment variable not set")
-
     if not to_number:
         raise ValueError("Recipient number is required")
+
+    require_supported_outbound_destinations((to_number,))
+
+    if not DIALPAD_API_KEY:
+        raise ValueError("DIALPAD_API_KEY environment variable not set")
 
     # Get user_id from known users if not provided
     if not user_id:

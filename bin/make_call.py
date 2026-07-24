@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from _dialpad_compat import (
     COMMAND_IDS,
@@ -19,6 +20,11 @@ from _dialpad_compat import (
     run_generated_json,
     WrapperError,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "scripts"))
+
+from outbound_destination_policy import require_supported_outbound_destinations
 
 # Map of E.164 phone numbers to Dialpad user IDs.
 # Set via DIALPAD_USER_MAP env var as JSON, e.g.:
@@ -78,6 +84,10 @@ def main() -> int:
     try:
         args = build_parser().parse_args()
         json_mode = args.json
+        try:
+            require_supported_outbound_destinations((args.to,))
+        except ValueError as exc:
+            raise WrapperError(str(exc), code="invalid_argument", retryable=False) from exc
         require_generated_cli()
         require_api_key()
         user_id = resolve_user_id(args.from_number, args.user_id)

@@ -15,6 +15,8 @@ import sys
 import urllib.request
 import urllib.error
 
+from outbound_destination_policy import normalize_supported_outbound_destinations
+
 
 # Configuration
 DIALPAD_API_KEY = os.environ.get("DIALPAD_API_KEY")
@@ -34,14 +36,19 @@ def send_sms(to_numbers, message, from_number=None, infer_country_code=False):
     Returns:
         dict: API response with SMS details
     """
-    if not DIALPAD_API_KEY:
-        raise ValueError("DIALPAD_API_KEY environment variable not set")
-
     if not to_numbers:
         raise ValueError("At least one recipient number is required")
 
     if len(to_numbers) > 10:
         raise ValueError("Maximum 10 recipients per SMS request")
+
+    to_numbers = normalize_supported_outbound_destinations(
+        to_numbers,
+        allow_nanp_national=infer_country_code,
+    )
+
+    if not DIALPAD_API_KEY:
+        raise ValueError("DIALPAD_API_KEY environment variable not set")
 
     url = f"{DIALPAD_API_BASE}/sms"
 

@@ -43,6 +43,7 @@ DESTINATION_RULES: dict[Command, DestinationRule] = {
     ("call", "call.call"): DestinationRule("phone_number"),
     ("call", "call.initiate_ivr_call"): DestinationRule("phone_number"),
     ("callback", "call.callback"): DestinationRule("phone_number"),
+    ("callback", "call.validate_callback"): DestinationRule("phone_number"),
     ("users", "users.initiate_call"): DestinationRule("phone_number"),
     ("call", "call.transfer_call"): DestinationRule(
         "to",
@@ -197,10 +198,15 @@ def _preflight_meeting(
         )
     if call_out_value is None:
         return
-    if _parse_click_bool(call_out_value):
+    call_out = _parse_click_bool(call_out_value)
+    if call_out:
         raise ValueError(
             "Meeting call-out is disabled because its effective participants "
             "cannot be validated locally."
+        )
+    if not data_supplied:
+        raise ValueError(
+            "Meeting call_out must be supplied through --data as a JSON boolean"
         )
 
 
@@ -256,6 +262,14 @@ def preflight_outbound_destination(argv: list[str]) -> None:
         )
     if recipient_value is None:
         return
+    if (
+        command == ("message", "schedules.update")
+        and not data_supplied
+    ):
+        raise ValueError(
+            "Schedule update recipients must be supplied through --data as a "
+            "JSON array"
+        )
     structured_numbers = _structured_destination_numbers(recipient_value, rule)
     if structured_numbers is not None:
         recipients = structured_numbers.phone_numbers

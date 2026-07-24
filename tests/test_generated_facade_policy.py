@@ -43,6 +43,18 @@ FACADE_SPEC.loader.exec_module(facade)
             '{"phone_number":"+442071838750"}',
         ],
         ["callback", "call.callback", "--phone-number", "+442071838750"],
+        [
+            "callback",
+            "call.validate_callback",
+            "--phone-number",
+            "+442071838750",
+        ],
+        [
+            "callback",
+            "call.validate_callback",
+            "--data",
+            '{"phone_number":"+442071838750"}',
+        ],
         ["users", "users.initiate_call", "--phone-number", "+442071838750"],
         ["call", "call.transfer_call", "--to", "+442071838750"],
         ["call", "call.participants.add", "--participant", "+442071838750"],
@@ -86,6 +98,18 @@ def test_generated_facade_rejects_international_destinations(argv):
             '{"phone_number":"+14155550100"}',
         ],
         ["callback", "call.callback", "--phone-number", "+14155550100"],
+        [
+            "callback",
+            "call.validate_callback",
+            "--phone-number",
+            "+14155550100",
+        ],
+        [
+            "callback",
+            "call.validate_callback",
+            "--data",
+            '{"phone_number":"+14155550100"}',
+        ],
         ["users", "users.initiate_call", "--phone-number", "+14155550100"],
         ["call", "call.transfer_call", "--to", "+14155550100"],
         ["call", "call.participants.add", "--participant", "+14155550100"],
@@ -213,15 +237,51 @@ def test_generated_facade_data_does_not_inherit_ignored_meeting_options():
         )
 
 
-def test_generated_facade_allows_meeting_update_that_disables_callout():
+@pytest.mark.parametrize("operation", ["meetings.create", "meetings.update"])
+def test_generated_facade_rejects_string_false_meeting_callout(operation):
+    with pytest.raises(ValueError, match="JSON boolean"):
+        facade._preflight_outbound_destination(
+            [
+                "meetings",
+                operation,
+                "--call-out",
+                "false",
+                "--title",
+                "Rescheduled",
+            ]
+        )
+
+
+def test_generated_facade_allows_json_false_meeting_update_callout():
     facade._preflight_outbound_destination(
         [
             "meetings",
             "meetings.update",
-            "--call-out",
-            "false",
-            "--title",
-            "Rescheduled",
+            "--data",
+            '{"call_out":false}',
+        ]
+    )
+
+
+def test_generated_facade_rejects_string_schedule_recipient_array():
+    with pytest.raises(ValueError, match="JSON array"):
+        facade._preflight_outbound_destination(
+            [
+                "message",
+                "schedules.update",
+                "--to-numbers",
+                '["+14155550100"]',
+            ]
+        )
+
+
+def test_generated_facade_allows_json_schedule_recipient_array():
+    facade._preflight_outbound_destination(
+        [
+            "message",
+            "schedules.update",
+            "--data",
+            '{"to_numbers":["+14155550100"]}',
         ]
     )
 

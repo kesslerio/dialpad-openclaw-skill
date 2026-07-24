@@ -38,10 +38,11 @@ NANP territories; non-NANP international destinations are rejected before any
 Dialpad API request.
 The generated `message schedules.send_now` command is disabled because its
 stored recipients cannot be validated locally. Schedule updates must repeat
-their phone recipients for the same reason; use a supported SMS wrapper.
-Generated meeting updates must explicitly set `call_out`; enabling call-out on
-meeting create or update is disabled because effective participants cannot be
-validated locally.
+their phone recipients through `--data` as a JSON array for the same reason;
+use a supported SMS wrapper for normal agent work. Generated meeting updates
+must explicitly set `call_out` through `--data` as a JSON boolean; enabling
+call-out on meeting create or update is disabled because effective participants
+cannot be validated locally.
 
 ```bash
 # Send SMS (recommended: explicit sender)

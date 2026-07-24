@@ -39,7 +39,6 @@ DESTINATION_RULES: dict[Command, DestinationRule] = {
     ("message", "schedules.update"): DestinationRule(
         "to_numbers",
         requires_explicit_destination=True,
-        alternate_internal_field="channel_hashtag",
     ),
     ("call", "call.call"): DestinationRule("phone_number"),
     ("call", "call.initiate_ivr_call"): DestinationRule("phone_number"),

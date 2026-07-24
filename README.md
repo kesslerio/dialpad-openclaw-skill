@@ -38,7 +38,7 @@ NANP territories; non-NANP international destinations are rejected before any
 Dialpad API request.
 The generated `message schedules.send_now` command is disabled because its
 stored recipients cannot be validated locally. Schedule updates must repeat
-their recipients for the same reason; use a supported SMS wrapper.
+their phone recipients for the same reason; use a supported SMS wrapper.
 Generated meeting updates must explicitly set `call_out`; enabling call-out on
 an existing meeting is disabled because stored participants cannot be validated.
 

@@ -205,22 +205,14 @@ def test_generated_facade_requires_explicit_nanp_even_with_country_inference(com
     [
         ["sms", "sms.send", "--channel-hashtag", "sales"],
         ["message", "schedules.create", "--channel-hashtag", "sales"],
-        [
-            "message",
-            "schedules.update",
-            "--id",
-            "schedule-123",
-            "--channel-hashtag",
-            "sales",
-        ],
     ],
 )
 def test_generated_facade_allows_explicit_channel_destination(argv):
     facade._preflight_outbound_destination(argv)
 
 
-@pytest.mark.parametrize("channel_hashtag", ["", " sales "])
-def test_generated_facade_rejects_empty_or_noncanonical_schedule_channel(
+@pytest.mark.parametrize("channel_hashtag", ["", "sales", " sales "])
+def test_generated_facade_rejects_channel_only_schedule_update(
     channel_hashtag,
 ):
     with pytest.raises(ValueError, match="stored recipients"):

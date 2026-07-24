@@ -116,6 +116,20 @@ def test_generated_facade_rejects_schedule_update_without_recipients():
         )
 
 
+def test_generated_facade_data_does_not_inherit_ignored_schedule_options():
+    with pytest.raises(ValueError, match="stored recipients"):
+        facade._preflight_outbound_destination(
+            [
+                "message",
+                "schedules.update",
+                "--data",
+                '{"start_date":"1785000000"}',
+                "--to-numbers",
+                '["+14155550100"]',
+            ]
+        )
+
+
 def test_generated_facade_rejects_international_meeting_callout():
     with pytest.raises(ValueError, match="NANP"):
         facade._preflight_outbound_destination(
@@ -181,6 +195,20 @@ def test_generated_facade_rejects_unverifiable_meeting_update():
                 "true",
                 "--title",
                 "Rescheduled",
+            ]
+        )
+
+
+def test_generated_facade_data_does_not_inherit_ignored_meeting_options():
+    with pytest.raises(ValueError, match="stored call-out state"):
+        facade._preflight_outbound_destination(
+            [
+                "meetings",
+                "meetings.update",
+                "--data",
+                '{"participants_info":[{"phone_number":"+442071838750"}]}',
+                "--call-out",
+                "false",
             ]
         )
 

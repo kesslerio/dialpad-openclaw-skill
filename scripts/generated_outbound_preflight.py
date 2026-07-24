@@ -155,30 +155,46 @@ def _parse_click_bool(value: object) -> bool:
     raise ValueError(f"Invalid boolean value: {value!r}")
 
 
-def _body_from_args(command_args: list[str]) -> dict[str, object]:
+def _body_from_args(command_args: list[str]) -> tuple[dict[str, object], bool]:
     data_value = _option_value(command_args, "--data")
     if data_value is None:
-        return {}
+        return {}, False
     # generated/dialpad.openapi replaces its option-built body with --data
     # wholesale, so preflight must use the same precedence rather than merge.
     decoded = json.loads(data_value)
     if not isinstance(decoded, dict):
         raise ValueError("--data must be a JSON object")
-    return decoded
+    return decoded, True
+
+
+def _effective_value(
+    field: str,
+    command_args: list[str],
+    body: dict[str, object],
+    data_supplied: bool,
+) -> object | None:
+    if data_supplied:
+        return body.get(field)
+    return _option_value(command_args, f"--{field.replace('_', '-')}")
 
 
 def _preflight_meeting(
     command: Command,
     command_args: list[str],
     body: dict[str, object],
+    data_supplied: bool,
 ) -> None:
-    call_out_value = body.get(
+    call_out_value = _effective_value(
         "call_out",
-        _option_value(command_args, "--call-out"),
+        command_args,
+        body,
+        data_supplied,
     )
-    participants_value = body.get(
+    participants_value = _effective_value(
         "participants_info",
-        _option_value(command_args, "--participants-info"),
+        command_args,
+        body,
+        data_supplied,
     )
     if command == ("meetings", "meetings.update") and call_out_value is None:
         raise ValueError(
@@ -232,26 +248,28 @@ def preflight_outbound_destination(argv: list[str]) -> None:
             "validate stored recipients; use a validated SMS wrapper instead."
         )
 
-    body = _body_from_args(command_args)
+    body, data_supplied = _body_from_args(command_args)
     if command in {("meetings", "meetings.create"), ("meetings", "meetings.update")}:
-        _preflight_meeting(command, command_args, body)
+        _preflight_meeting(command, command_args, body, data_supplied)
         return
 
     rule = DESTINATION_RULES.get(command)
     if rule is None:
         return
 
-    option_name = f"--{rule.field.replace('_', '-')}"
-    recipient_value = body.get(
+    recipient_value = _effective_value(
         rule.field,
-        _option_value(command_args, option_name),
+        command_args,
+        body,
+        data_supplied,
     )
     alternate_value = None
     if rule.alternate_internal_field is not None:
-        alternate_option = f"--{rule.alternate_internal_field.replace('_', '-')}"
-        alternate_value = body.get(
+        alternate_value = _effective_value(
             rule.alternate_internal_field,
-            _option_value(command_args, alternate_option),
+            command_args,
+            body,
+            data_supplied,
         )
     has_alternate_destination = (
         isinstance(alternate_value, str)

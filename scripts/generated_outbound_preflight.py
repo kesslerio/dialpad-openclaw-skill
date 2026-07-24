@@ -14,22 +14,26 @@ Command = tuple[str, str]
 @dataclass(frozen=True)
 class DestinationRule:
     field: str
-    supports_country_inference: bool = False
     allows_internal_target: bool = False
     requires_explicit_destination: bool = False
+    alternate_internal_field: str | None = None
     internal_variants: tuple[frozenset[str], ...] = ()
 
 
 DESTINATION_RULES: dict[Command, DestinationRule] = {
     ("sms", "sms.send"): DestinationRule(
         "to_numbers",
-        supports_country_inference=True,
+        alternate_internal_field="channel_hashtag",
     ),
     ("message", "bulk_messages.send"): DestinationRule("to_numbers"),
-    ("message", "schedules.create"): DestinationRule("to_numbers"),
+    ("message", "schedules.create"): DestinationRule(
+        "to_numbers",
+        alternate_internal_field="channel_hashtag",
+    ),
     ("message", "schedules.update"): DestinationRule(
         "to_numbers",
         requires_explicit_destination=True,
+        alternate_internal_field="channel_hashtag",
     ),
     ("call", "call.call"): DestinationRule("phone_number"),
     ("call", "call.initiate_ivr_call"): DestinationRule("phone_number"),
@@ -167,13 +171,15 @@ def _preflight_meeting(
             "Meeting updates must explicitly set call_out because stored "
             "call-out state and participants cannot be validated locally."
         )
+    if command == ("meetings", "meetings.update"):
+        if _is_true(call_out_value):
+            raise ValueError(
+                "Enabling meeting call-out is disabled because stored "
+                "participants cannot be validated locally."
+            )
+        return
     if not _is_true(call_out_value):
         return
-    if command == ("meetings", "meetings.update") and participants_value is None:
-        raise ValueError(
-            "Call-out meeting updates must include explicit participants "
-            "because stored participants cannot be validated locally."
-        )
     if participants_value is None:
         return
     if isinstance(participants_value, str):
@@ -221,11 +227,22 @@ def preflight_outbound_destination(argv: list[str]) -> None:
         rule.field,
         _option_value(command_args, option_name),
     )
-    if rule.requires_explicit_destination and recipient_value is None:
-        raise ValueError(
-            "Schedule updates must include explicit recipients because stored "
-            "recipients cannot be validated locally."
+    alternate_value = None
+    if rule.alternate_internal_field is not None:
+        alternate_option = f"--{rule.alternate_internal_field.replace('_', '-')}"
+        alternate_value = body.get(
+            rule.alternate_internal_field,
+            _option_value(command_args, alternate_option),
         )
+    if recipient_value is None and alternate_value is not None:
+        return
+    if recipient_value is None and rule.requires_explicit_destination:
+        raise ValueError(
+            "Schedule updates must include explicit phone or channel recipients "
+            "because stored recipients cannot be validated locally."
+        )
+    if recipient_value is None:
+        return
     structured_numbers = _structured_destination_numbers(recipient_value, rule)
     if structured_numbers is not None:
         recipients = structured_numbers
@@ -233,10 +250,10 @@ def preflight_outbound_destination(argv: list[str]) -> None:
         recipients = _recipient_list(recipient_value)
     else:
         recipients = [str(recipient_value)] if recipient_value is not None else []
-    if rule.requires_explicit_destination and not recipients:
+    if rule.requires_explicit_destination and not recipients and alternate_value is None:
         raise ValueError(
-            "Schedule updates must include explicit recipients because stored "
-            "recipients cannot be validated locally."
+            "Schedule updates must include explicit phone or channel recipients "
+            "because stored recipients cannot be validated locally."
         )
     if (
         rule.allows_internal_target
@@ -245,14 +262,4 @@ def preflight_outbound_destination(argv: list[str]) -> None:
     ):
         return
     if recipients:
-        infer_country_code = body.get(
-            "infer_country_code",
-            _option_value(command_args, "--infer-country-code"),
-        )
-        require_supported_outbound_destinations(
-            recipients,
-            allow_nanp_national=(
-                rule.supports_country_inference
-                and _is_true(infer_country_code)
-            ),
-        )
+        require_supported_outbound_destinations(recipients)

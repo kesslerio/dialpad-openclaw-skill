@@ -36,11 +36,26 @@ def require_supported_outbound_destinations(
     allow_nanp_national: bool = False,
 ) -> None:
     """Reject the whole action when any destination is outside the NANP."""
-    if any(
-        not is_supported_outbound_destination(
-            number,
-            allow_nanp_national=allow_nanp_national,
-        )
-        for number in phone_numbers
-    ):
-        raise ValueError(_UNSUPPORTED_MESSAGE)
+    normalize_supported_outbound_destinations(
+        phone_numbers,
+        allow_nanp_national=allow_nanp_national,
+    )
+
+
+def normalize_supported_outbound_destinations(
+    phone_numbers: Iterable[str],
+    *,
+    allow_nanp_national: bool = False,
+) -> list[str]:
+    """Return explicit NANP E.164 destinations or reject the whole action."""
+
+    normalized: list[str] = []
+    for number in phone_numbers:
+        candidate = str(number)
+        if _NANP_E164_RE.fullmatch(candidate):
+            normalized.append(candidate)
+        elif allow_nanp_national and _NANP_NATIONAL_RE.fullmatch(candidate):
+            normalized.append(f"+1{candidate}")
+        else:
+            raise ValueError(_UNSUPPORTED_MESSAGE)
+    return normalized

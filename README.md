@@ -39,8 +39,8 @@ Dialpad API request.
 The generated `message schedules.send_now` command is disabled because its
 stored recipients cannot be validated locally. Schedule updates must repeat
 their recipients for the same reason; use a supported SMS wrapper.
-Generated meeting updates must explicitly set `call_out`; call-out updates must
-also repeat participant details so phone destinations can be validated.
+Generated meeting updates must explicitly set `call_out`; enabling call-out on
+an existing meeting is disabled because stored participants cannot be validated.
 
 ```bash
 # Send SMS (recommended: explicit sender)

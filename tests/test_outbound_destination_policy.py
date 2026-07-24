@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -63,6 +64,24 @@ def test_approval_lane_transport_rejects_mixed_batch_before_api(monkeypatch):
     urlopen.assert_not_called()
 
 
+def test_legacy_sms_normalizes_inferred_nanp_before_api(monkeypatch):
+    monkeypatch.setattr(legacy_send_sms, "DIALPAD_API_KEY", "test-key")
+
+    with patch.object(legacy_send_sms.urllib.request, "urlopen") as urlopen:
+        urlopen.return_value.__enter__.return_value.read.return_value = (
+            b'{"id":"sms-1","message_status":"pending"}'
+        )
+        legacy_send_sms.send_sms(
+            ["4155550100"],
+            "Hello",
+            from_number="+14155201316",
+            infer_country_code=True,
+        )
+
+    request = urlopen.call_args.args[0]
+    assert json.loads(request.data)["to_numbers"] == ["+14155550100"]
+
+
 def test_operator_call_transport_rejects_non_nanp_recipient_before_api(monkeypatch):
     monkeypatch.setattr(legacy_make_call, "DIALPAD_API_KEY", "test-key")
 
@@ -96,10 +115,10 @@ def test_policy_allows_nanp_national_only_when_country_inference_is_explicit():
             ["4155550100"]
         )
 
-    outbound_destination_policy.require_supported_outbound_destinations(
+    assert outbound_destination_policy.normalize_supported_outbound_destinations(
         ["4155550100"],
         allow_nanp_national=True,
-    )
+    ) == ["+14155550100"]
 
 
 def test_policy_rejects_whitespace_instead_of_validating_a_changed_value():

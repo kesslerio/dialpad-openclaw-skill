@@ -237,7 +237,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertTrue(json.loads(out)["ok"])
         payload = json.loads(calls[0][3])
-        self.assertEqual(payload["to_numbers"], ["4155550100"])
+        self.assertEqual(payload["to_numbers"], ["+14155550100"])
         self.assertTrue(payload["infer_country_code"])
 
     def test_send_sms_message_file_preserves_dollar_sign_in_payload(self):

@@ -147,7 +147,7 @@ def test_generated_facade_rejects_unverifiable_meeting_update():
             ]
         )
 
-    with pytest.raises(ValueError, match="stored participants"):
+    with pytest.raises(ValueError, match="Enabling meeting call-out"):
         facade._preflight_outbound_destination(
             [
                 "meetings",
@@ -173,29 +173,39 @@ def test_generated_facade_allows_meeting_update_that_disables_callout():
     )
 
 
-def test_generated_facade_preserves_explicit_nanp_country_inference():
-    facade._preflight_outbound_destination(
-        [
-            "sms",
-            "sms.send",
-            "--to-numbers",
-            '["4155550100"]',
-            "--infer-country-code",
-            "true",
-        ]
-    )
-
-
-def test_generated_facade_limits_country_inference_to_sms_contract():
+@pytest.mark.parametrize("command", [["sms", "sms.send"], ["call", "call.call"]])
+def test_generated_facade_requires_explicit_nanp_even_with_country_inference(command):
     with pytest.raises(ValueError, match="NANP"):
         facade._preflight_outbound_destination(
             [
-                "call",
-                "call.call",
+                *command,
                 "--data",
-                '{"phone_number":"4155550100","infer_country_code":true}',
+                (
+                    '{"to_numbers":["4155550100"],"infer_country_code":true}'
+                    if command[0] == "sms"
+                    else '{"phone_number":"4155550100","infer_country_code":true}'
+                ),
             ]
         )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["sms", "sms.send", "--channel-hashtag", "sales"],
+        ["message", "schedules.create", "--channel-hashtag", "sales"],
+        [
+            "message",
+            "schedules.update",
+            "--id",
+            "schedule-123",
+            "--channel-hashtag",
+            "sales",
+        ],
+    ],
+)
+def test_generated_facade_allows_explicit_channel_destination(argv):
+    facade._preflight_outbound_destination(argv)
 
 
 def test_generated_facade_allows_non_phone_transfer_target():

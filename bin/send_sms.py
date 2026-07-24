@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import sms_approval
-from outbound_destination_policy import require_supported_outbound_destinations
+from outbound_destination_policy import normalize_supported_outbound_destinations
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -354,7 +354,7 @@ def main() -> int:
         args = build_parser().parse_args()
         json_mode = args.json
         try:
-            require_supported_outbound_destinations(
+            args.to = normalize_supported_outbound_destinations(
                 args.to,
                 allow_nanp_national=args.infer_country_code,
             )

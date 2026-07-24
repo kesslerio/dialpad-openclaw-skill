@@ -15,7 +15,7 @@ import sys
 import urllib.request
 import urllib.error
 
-from outbound_destination_policy import require_supported_outbound_destinations
+from outbound_destination_policy import normalize_supported_outbound_destinations
 
 
 # Configuration
@@ -42,7 +42,7 @@ def send_sms(to_numbers, message, from_number=None, infer_country_code=False):
     if len(to_numbers) > 10:
         raise ValueError("Maximum 10 recipients per SMS request")
 
-    require_supported_outbound_destinations(
+    to_numbers = normalize_supported_outbound_destinations(
         to_numbers,
         allow_nanp_national=infer_country_code,
     )

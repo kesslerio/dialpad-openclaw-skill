@@ -373,6 +373,26 @@ class JsonContractTests(unittest.TestCase):
         self.assertEqual(err, "")
         self._assert_success(self._parse(out), "make_call.call")
 
+    def test_make_call_rejects_non_nanp_recipient_before_api(self):
+        with patch("make_call.require_generated_cli"), \
+                patch("make_call.require_api_key") as require_key, \
+                patch("make_call.resolve_user_id") as resolve_user, \
+                patch("make_call.run_generated_json") as run_generated_json:
+            code, out, err = self._run(
+                make_call,
+                ["bin/make_call.py", "--to", "+442071838750", "--user-id", "u1", "--json"],
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "make_call.call")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+        self.assertIn("NANP", parsed["error"]["message"])
+        require_key.assert_not_called()
+        resolve_user.assert_not_called()
+        run_generated_json.assert_not_called()
+
     def test_list_calls_json_success_envelope(self):
         with patch.object(list_calls_wrapper, "require_api_key"), \
                 patch.object(

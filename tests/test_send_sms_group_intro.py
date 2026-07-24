@@ -178,6 +178,68 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertIn("Message preview:", out)
         self.assertIn("Hello", out)
 
+    def test_send_sms_rejects_non_nanp_recipient_before_api(self):
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.require_api_key") as require_key, \
+                patch("send_sms.run_generated_json") as run_json:
+            code, out, err = self._run_main(send_sms, [
+                "--to", "+442071838750",
+                "--from", "+14155201316",
+                "--message", "Hello",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("NANP", err)
+        require_key.assert_not_called()
+        run_json.assert_not_called()
+
+    def test_send_sms_json_rejection_is_non_retryable_invalid_argument(self):
+        with patch("send_sms.require_generated_cli") as require_cli, \
+                patch("send_sms.require_api_key") as require_key, \
+                patch("send_sms.run_generated_json") as run_json:
+            code, out, err = self._run_main(send_sms, [
+                "--to", "+442071838750",
+                "--from", "+14155201316",
+                "--message", "Hello",
+                "--json",
+            ])
+
+        envelope = json.loads(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "invalid_argument")
+        self.assertFalse(envelope["error"]["retryable"])
+        require_cli.assert_not_called()
+        require_key.assert_not_called()
+        run_json.assert_not_called()
+
+    def test_send_sms_preserves_nanp_country_inference_contract(self):
+        calls: list[list[str]] = []
+
+        with patch("send_sms.require_generated_cli"), \
+                patch("send_sms.require_api_key"), \
+                patch(
+                    "send_sms.run_generated_json",
+                    side_effect=lambda command: calls.append(command)
+                    or {"id": "msg-1", "message_status": "pending"},
+                ):
+            code, out, err = self._run_main(send_sms, [
+                "--to", "4155550100",
+                "--from", "+14155201316",
+                "--message", "Hello",
+                "--infer-country-code",
+                "--json",
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertTrue(json.loads(out)["ok"])
+        payload = json.loads(calls[0][3])
+        self.assertEqual(payload["to_numbers"], ["4155550100"])
+        self.assertTrue(payload["infer_country_code"])
+
     def test_send_sms_message_file_preserves_dollar_sign_in_payload(self):
         calls: list[list[str]] = []
 
@@ -331,6 +393,44 @@ class SendGroupIntroTests(unittest.TestCase):
         self.assertTrue(parsed["data"]["dry_run"])
         self.assertEqual(parsed["data"]["prospect"]["to"], "+14155550111")
         self.assertEqual(parsed["data"]["reference"]["to"], "+14155559999")
+
+    def test_send_group_intro_rejects_non_nanp_party_before_api(self):
+        with patch("send_group_intro.require_generated_cli"), \
+                patch("send_group_intro.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_group_intro.require_api_key") as require_key, \
+                patch("send_group_intro.run_generated_json") as run_json:
+            code, out, err = self._run_main([
+                "--prospect", "+14155550111",
+                "--reference", "+442071838750",
+                "--confirm-share",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("NANP", err)
+        require_key.assert_not_called()
+        run_json.assert_not_called()
+
+    def test_send_group_intro_json_rejection_is_non_retryable_invalid_argument(self):
+        with patch("send_group_intro.require_generated_cli") as require_cli, \
+                patch("send_group_intro.require_api_key") as require_key, \
+                patch("send_group_intro.run_generated_json") as run_json:
+            code, out, err = self._run_main([
+                "--prospect", "+14155550111",
+                "--reference", "+442071838750",
+                "--confirm-share",
+                "--json",
+            ])
+
+        envelope = json.loads(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "invalid_argument")
+        self.assertFalse(envelope["error"]["retryable"])
+        require_cli.assert_not_called()
+        require_key.assert_not_called()
+        run_json.assert_not_called()
 
     def test_send_group_intro_success_sends_two_messages(self):
         calls: list[list[str]] = []

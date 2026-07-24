@@ -4,16 +4,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import threading
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import sms_approval
+
+SEND_SMS_SPEC = importlib.util.spec_from_file_location(
+    "approval_default_send_sms_policy_test",
+    ROOT / "scripts" / "send_sms.py",
+)
+assert SEND_SMS_SPEC is not None and SEND_SMS_SPEC.loader is not None
+approval_default_send_sms = importlib.util.module_from_spec(SEND_SMS_SPEC)
+SEND_SMS_SPEC.loader.exec_module(approval_default_send_sms)
 
 
 class SmsApprovalTests(unittest.TestCase):
@@ -74,6 +84,29 @@ class SmsApprovalTests(unittest.TestCase):
         stored = sms_approval.get_draft(self.conn, draft["draft_id"])
         self.assertEqual(stored["status"], sms_approval.STATUS_SENT)
         self.assertEqual(stored["approved_by"], "12345")
+
+    def test_approve_international_draft_fails_before_default_transport_api(self):
+        draft = self._draft(customer_number="+442071838750")
+        approval_default_send_sms.DIALPAD_API_KEY = "test-key"
+
+        with patch.dict(sys.modules, {"send_sms": approval_default_send_sms}), patch.object(
+            approval_default_send_sms.urllib.request,
+            "urlopen",
+        ) as urlopen:
+            result = sms_approval.approve_draft(
+                self.conn,
+                draft_id=draft["draft_id"],
+                actor_id="12345",
+            )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], sms_approval.STATUS_FAILED)
+        self.assertIn("NANP", result["error"])
+        self.assertEqual(
+            sms_approval.get_draft(self.conn, draft["draft_id"])["status"],
+            sms_approval.STATUS_FAILED,
+        )
+        urlopen.assert_not_called()
 
     def test_stale_draft_does_not_send(self):
         draft = self._draft()

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from _dialpad_compat import (
     COMMAND_IDS,
@@ -21,6 +22,11 @@ from _dialpad_compat import (
     take_receipt_meta,
     WrapperError,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "scripts"))
+
+from outbound_destination_policy import require_supported_outbound_destinations
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,13 +98,17 @@ def main() -> int:
     wrapper = "send_group_intro.py"
     json_mode = "--json" in sys.argv
     try:
-        require_generated_cli()
         args = build_parser().parse_args()
         json_mode = args.json
         if not args.confirm_share:
             raise WrapperError(
                 "Refusing to send group intro without --confirm-share because it shares phone numbers."
             )
+        try:
+            require_supported_outbound_destinations((args.prospect, args.reference))
+        except ValueError as exc:
+            raise WrapperError(str(exc), code="invalid_argument", retryable=False) from exc
+        require_generated_cli()
         sender_number, sender_source = resolve_sender(
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch
         )

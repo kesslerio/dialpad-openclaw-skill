@@ -86,7 +86,7 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 
 ## Key Rules
 
-1. **Format:** Always use E.164 format for numbers (e.g., `+14155551234`).
+1. **Destination policy:** Outbound SMS and calls support NANP (`+1`) destinations only, including all NANP territories. Non-NANP international destinations are rejected before any Dialpad API request. Always use E.164 format (e.g., `+14155551234`). The generated `message schedules.send_now` command is disabled because stored recipients cannot be validated locally, schedule updates must repeat their recipients, and meeting updates must explicitly set `call_out` plus participant details when enabled.
 2. **Escaping:** Use single quotes for inline `--message` values containing `$` to prevent shell expansion (e.g., `'Price is $10'`).
 3. **Safer message input:** Prefer `--message-file` or `--message-stdin` for pricing text, multi-line copy, or anything shell-sensitive.
 4. **Supported agent interface:** use `bin/*.py` wrappers for normal work. They are the stable command contract for agents.

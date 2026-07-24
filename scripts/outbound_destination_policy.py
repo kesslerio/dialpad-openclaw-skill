@@ -1,0 +1,46 @@
+"""Allow NANP destinations and reject non-NANP outbound Dialpad actions.
+
+NANP includes every +1 territory, not only the United States and Canada.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable
+
+
+_NANP_E164_RE = re.compile(r"^\+1[0-9]{10}$")
+_NANP_NATIONAL_RE = re.compile(r"^[0-9]{10}$")
+_UNSUPPORTED_MESSAGE = (
+    "Outbound Dialpad SMS and calls support NANP (+1) destinations only; "
+    "non-NANP international destinations are not supported."
+)
+
+
+def is_supported_outbound_destination(
+    phone_number: str,
+    *,
+    allow_nanp_national: bool = False,
+) -> bool:
+    """Return whether a destination is a NANP number in canonical E.164 form."""
+    normalized = str(phone_number)
+    return bool(
+        _NANP_E164_RE.fullmatch(normalized)
+        or (allow_nanp_national and _NANP_NATIONAL_RE.fullmatch(normalized))
+    )
+
+
+def require_supported_outbound_destinations(
+    phone_numbers: Iterable[str],
+    *,
+    allow_nanp_national: bool = False,
+) -> None:
+    """Reject the whole action when any destination is outside the NANP."""
+    if any(
+        not is_supported_outbound_destination(
+            number,
+            allow_nanp_national=allow_nanp_national,
+        )
+        for number in phone_numbers
+    ):
+        raise ValueError(_UNSUPPORTED_MESSAGE)

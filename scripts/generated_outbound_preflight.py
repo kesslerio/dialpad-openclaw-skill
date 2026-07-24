@@ -190,12 +190,6 @@ def _preflight_meeting(
         body,
         data_supplied,
     )
-    participants_value = _effective_value(
-        "participants_info",
-        command_args,
-        body,
-        data_supplied,
-    )
     if command == ("meetings", "meetings.update") and call_out_value is None:
         raise ValueError(
             "Meeting updates must explicitly set call_out because stored "
@@ -203,34 +197,11 @@ def _preflight_meeting(
         )
     if call_out_value is None:
         return
-    if command == ("meetings", "meetings.update"):
-        if _parse_click_bool(call_out_value):
-            raise ValueError(
-                "Enabling meeting call-out is disabled because stored "
-                "participants cannot be validated locally."
-            )
-        return
-    if not _parse_click_bool(call_out_value):
-        return
-    if participants_value is None:
+    if _parse_click_bool(call_out_value):
         raise ValueError(
-            "Meeting call-out requires explicit participants because implicit "
-            "recipients cannot be validated locally."
+            "Meeting call-out is disabled because its effective participants "
+            "cannot be validated locally."
         )
-    if isinstance(participants_value, str):
-        participants_value = json.loads(participants_value)
-    if not isinstance(participants_value, list) or any(
-        not isinstance(participant, dict) for participant in participants_value
-    ):
-        raise ValueError("Meeting participants must be a JSON list of objects")
-    phone_numbers = [
-        str(participant[field])
-        for participant in participants_value
-        for field in ("phone", "phone_number")
-        if participant.get(field) is not None
-    ]
-    if phone_numbers:
-        require_supported_outbound_destinations(phone_numbers)
 
 
 def preflight_outbound_destination(argv: list[str]) -> None:

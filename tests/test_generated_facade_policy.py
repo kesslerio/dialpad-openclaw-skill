@@ -130,8 +130,8 @@ def test_generated_facade_data_does_not_inherit_ignored_schedule_options():
         )
 
 
-def test_generated_facade_rejects_international_meeting_callout():
-    with pytest.raises(ValueError, match="NANP"):
+def test_generated_facade_rejects_meeting_create_callout():
+    with pytest.raises(ValueError, match="Meeting call-out is disabled"):
         facade._preflight_outbound_destination(
             [
                 "meetings",
@@ -161,8 +161,8 @@ def test_generated_facade_allows_meeting_create_without_callout():
     )
 
 
-def test_generated_facade_rejects_meeting_callout_without_participants():
-    with pytest.raises(ValueError, match="explicit participants"):
+def test_generated_facade_rejects_meeting_create_callout_without_participants():
+    with pytest.raises(ValueError, match="Meeting call-out is disabled"):
         facade._preflight_outbound_destination(
             [
                 "meetings",
@@ -186,7 +186,7 @@ def test_generated_facade_rejects_unverifiable_meeting_update():
             ]
         )
 
-    with pytest.raises(ValueError, match="Enabling meeting call-out"):
+    with pytest.raises(ValueError, match="Meeting call-out is disabled"):
         facade._preflight_outbound_destination(
             [
                 "meetings",
@@ -283,7 +283,7 @@ def test_generated_facade_allows_non_phone_participant_target():
 
 @pytest.mark.parametrize("call_out", ["true", "t", "yes", "y", "on", "1"])
 def test_generated_facade_rejects_all_click_true_meeting_update_values(call_out):
-    with pytest.raises(ValueError, match="Enabling meeting call-out"):
+    with pytest.raises(ValueError, match="Meeting call-out is disabled"):
         facade._preflight_outbound_destination(
             [
                 "meetings",

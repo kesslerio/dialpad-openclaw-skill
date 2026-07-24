@@ -20,6 +20,12 @@ class DestinationRule:
     internal_variants: tuple[frozenset[str], ...] = ()
 
 
+@dataclass(frozen=True)
+class DestinationSelection:
+    phone_numbers: list[str]
+    is_internal: bool
+
+
 DESTINATION_RULES: dict[Command, DestinationRule] = {
     ("sms", "sms.send"): DestinationRule(
         "to_numbers",
@@ -75,17 +81,19 @@ def _command_start(argv: list[str]) -> int:
 
 
 def subcommand_help_requested(argv: list[str]) -> bool:
-    """Return whether Click will treat a trailing help token as an option."""
+    """Return whether Click will treat a help token as an eager option."""
 
-    if not argv or argv[-1] not in {"-h", "--help"}:
-        return False
     command_start = _command_start(argv)
-    previous = argv[-2] if len(argv) >= 2 else ""
-    return (
-        len(argv) == command_start + 3
-        or not previous.startswith("-")
-        or "=" in previous
-    )
+    skip_value = False
+    for arg in argv[command_start + 2 :]:
+        if skip_value:
+            skip_value = False
+            continue
+        if arg in {"-h", "--help"}:
+            return True
+        if arg.startswith("-") and "=" not in arg:
+            skip_value = True
+    return False
 
 
 def _option_value(argv: list[str], option: str) -> str | None:
@@ -122,7 +130,7 @@ def _recipient_list(value: object) -> list[str]:
 def _structured_destination_numbers(
     value: object,
     rule: DestinationRule,
-) -> list[str] | None:
+) -> DestinationSelection | None:
     if not rule.allows_internal_target:
         return None
     if isinstance(value, str) and value.lstrip().startswith("{"):
@@ -130,10 +138,10 @@ def _structured_destination_numbers(
     if not isinstance(value, dict):
         return None
     if "number" in value:
-        return [str(value["number"])]
+        return DestinationSelection([str(value["number"])], is_internal=False)
     keys = frozenset(value)
     if any(required_keys <= keys for required_keys in rule.internal_variants):
-        return []
+        return DestinationSelection([], is_internal=True)
     raise ValueError("Structured call destination has no supported variant")
 
 
@@ -234,7 +242,12 @@ def preflight_outbound_destination(argv: list[str]) -> None:
             rule.alternate_internal_field,
             _option_value(command_args, alternate_option),
         )
-    if recipient_value is None and alternate_value is not None:
+    has_alternate_destination = (
+        isinstance(alternate_value, str)
+        and bool(alternate_value)
+        and alternate_value == alternate_value.strip()
+    )
+    if recipient_value is None and has_alternate_destination:
         return
     if recipient_value is None and rule.requires_explicit_destination:
         raise ValueError(
@@ -245,18 +258,23 @@ def preflight_outbound_destination(argv: list[str]) -> None:
         return
     structured_numbers = _structured_destination_numbers(recipient_value, rule)
     if structured_numbers is not None:
-        recipients = structured_numbers
+        recipients = structured_numbers.phone_numbers
     elif rule.field == "to_numbers":
         recipients = _recipient_list(recipient_value)
     else:
         recipients = [str(recipient_value)] if recipient_value is not None else []
-    if rule.requires_explicit_destination and not recipients and alternate_value is None:
+    if (
+        rule.requires_explicit_destination
+        and not recipients
+        and not has_alternate_destination
+    ):
         raise ValueError(
             "Schedule updates must include explicit phone or channel recipients "
             "because stored recipients cannot be validated locally."
         )
     if (
         rule.allows_internal_target
+        and structured_numbers is None
         and recipients
         and not recipients[0].startswith("+")
     ):

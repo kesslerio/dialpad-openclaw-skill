@@ -208,6 +208,22 @@ def test_generated_facade_allows_explicit_channel_destination(argv):
     facade._preflight_outbound_destination(argv)
 
 
+@pytest.mark.parametrize("channel_hashtag", ["", " sales "])
+def test_generated_facade_rejects_empty_or_noncanonical_schedule_channel(
+    channel_hashtag,
+):
+    with pytest.raises(ValueError, match="stored recipients"):
+        facade._preflight_outbound_destination(
+            [
+                "message",
+                "schedules.update",
+                "--id",
+                "schedule-123",
+                f"--channel-hashtag={channel_hashtag}",
+            ]
+        )
+
+
 def test_generated_facade_allows_non_phone_transfer_target():
     facade._preflight_outbound_destination(
         ["call", "call.transfer_call", "--to", "user-id-123"]
@@ -255,6 +271,23 @@ def test_generated_facade_rejects_unknown_structured_destination():
                 "call.transfer_call",
                 "--data",
                 '{"to":{"unexpected":"+442071838750"}}',
+            ]
+        )
+
+
+@pytest.mark.parametrize("field", ["to", "participant"])
+def test_generated_facade_rejects_non_e164_structured_phone(field):
+    command = (
+        ["call", "call.transfer_call"]
+        if field == "to"
+        else ["call", "call.participants.add"]
+    )
+    with pytest.raises(ValueError, match="NANP"):
+        facade._preflight_outbound_destination(
+            [
+                *command,
+                "--data",
+                json.dumps({field: {"number": "442071838750"}}),
             ]
         )
 
@@ -350,3 +383,29 @@ def test_generated_facade_does_not_mistake_option_value_for_help():
 
     runner.assert_not_called()
     run.assert_not_called()
+
+
+def test_generated_facade_recognizes_eager_help_before_other_options():
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "generated/dialpad",
+            "call",
+            "make",
+            "--help",
+            "--phone-number",
+            "+442071838750",
+        ],
+    ), patch.object(
+        facade,
+        "_raw_cli_runner",
+        return_value=["python3"],
+    ), patch.object(
+        facade.subprocess,
+        "run",
+        return_value=type("Completed", (), {"returncode": 0})(),
+    ) as run:
+        assert facade.main() == 0
+
+    run.assert_called_once()

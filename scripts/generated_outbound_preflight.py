@@ -278,6 +278,8 @@ def preflight_outbound_destination(argv: list[str]) -> None:
         and recipients
         and not recipients[0].startswith("+")
     ):
-        return
+        raise ValueError(
+            "Internal call destinations must use a supported structured object"
+        )
     if recipients:
         require_supported_outbound_destinations(recipients)

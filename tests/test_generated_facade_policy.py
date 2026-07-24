@@ -269,16 +269,18 @@ def test_generated_facade_rejects_channel_only_schedule_update(
         )
 
 
-def test_generated_facade_allows_non_phone_transfer_target():
-    facade._preflight_outbound_destination(
-        ["call", "call.transfer_call", "--to", "user-id-123"]
-    )
-
-
-def test_generated_facade_allows_non_phone_participant_target():
-    facade._preflight_outbound_destination(
-        ["call", "call.participants.add", "--participant", "user-id-123"]
-    )
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["call", "call.transfer_call", "--to", "442071838750"],
+        ["call", "call.transfer_call", "--to", "user-id-123"],
+        ["call", "call.participants.add", "--participant", "442071838750"],
+        ["call", "call.participants.add", "--participant", "user-id-123"],
+    ],
+)
+def test_generated_facade_rejects_bare_internal_targets(argv):
+    with pytest.raises(ValueError, match="structured object"):
+        facade._preflight_outbound_destination(argv)
 
 
 @pytest.mark.parametrize("call_out", ["true", "t", "yes", "y", "on", "1"])

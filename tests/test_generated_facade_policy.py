@@ -46,6 +46,18 @@ FACADE_SPEC.loader.exec_module(facade)
         ["users", "users.initiate_call", "--phone-number", "+442071838750"],
         ["call", "call.transfer_call", "--to", "+442071838750"],
         ["call", "call.participants.add", "--participant", "+442071838750"],
+        [
+            "call",
+            "call.transfer_call",
+            "--data",
+            '{"to":{"number":"+442071838750"}}',
+        ],
+        [
+            "call",
+            "call.participants.add",
+            "--data",
+            '{"participant":{"number":"+442071838750"}}',
+        ],
     ],
 )
 def test_generated_facade_rejects_international_destinations(argv):
@@ -198,6 +210,45 @@ def test_generated_facade_allows_non_phone_participant_target():
     )
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [
+            "call",
+            "call.transfer_call",
+            "--data",
+            '{"to":{"call_id":123}}',
+        ],
+        [
+            "call",
+            "call.transfer_call",
+            "--data",
+            '{"to":{"target_id":123,"target_type":"user"}}',
+        ],
+        [
+            "call",
+            "call.participants.add",
+            "--data",
+            '{"participant":{"target_id":123,"target_type":"user"}}',
+        ],
+    ],
+)
+def test_generated_facade_allows_structured_internal_targets(argv):
+    facade._preflight_outbound_destination(argv)
+
+
+def test_generated_facade_rejects_unknown_structured_destination():
+    with pytest.raises(ValueError, match="supported variant"):
+        facade._preflight_outbound_destination(
+            [
+                "call",
+                "call.transfer_call",
+                "--data",
+                '{"to":{"unexpected":"+442071838750"}}',
+            ]
+        )
+
+
 def test_generated_facade_uses_last_duplicate_option_like_click():
     with pytest.raises(ValueError, match="NANP"):
         facade._preflight_outbound_destination(
@@ -237,6 +288,53 @@ def test_generated_facade_main_rejects_before_raw_cli_subprocess():
         ],
     ), patch.object(facade, "_raw_cli_runner") as runner, patch.object(
         facade.subprocess, "run"
+    ) as run:
+        assert facade.main() == 2
+
+    runner.assert_not_called()
+    run.assert_not_called()
+
+
+def test_generated_facade_subcommand_help_bypasses_request_preflight():
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "generated/dialpad",
+            "message",
+            "schedules.update",
+            "--help",
+        ],
+    ), patch.object(
+        facade,
+        "_raw_cli_runner",
+        return_value=["python3"],
+    ), patch.object(
+        facade.subprocess,
+        "run",
+        return_value=type("Completed", (), {"returncode": 0})(),
+    ) as run:
+        assert facade.main() == 0
+
+    run.assert_called_once()
+
+
+def test_generated_facade_does_not_mistake_option_value_for_help():
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "generated/dialpad",
+            "sms",
+            "send",
+            "--to-numbers",
+            '["+442071838750"]',
+            "--text",
+            "--help",
+        ],
+    ), patch.object(facade, "_raw_cli_runner") as runner, patch.object(
+        facade.subprocess,
+        "run",
     ) as run:
         assert facade.main() == 2
 

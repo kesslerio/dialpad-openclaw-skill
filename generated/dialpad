@@ -19,6 +19,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from generated_outbound_preflight import (
     preflight_outbound_destination as _preflight_outbound_destination,
+    subcommand_help_requested,
 )
 
 RAW_CLI = Path(__file__).with_name("dialpad.openapi")
@@ -115,6 +116,10 @@ def main() -> int:
         return proc.returncode
 
     translated = _translate(sys.argv[1:])
+    if subcommand_help_requested(translated):
+        runner = _raw_cli_runner()
+        proc = subprocess.run([*runner, str(RAW_CLI), *translated], env=_auth_env())
+        return proc.returncode
     try:
         _preflight_outbound_destination(translated)
     except (ValueError, TypeError) as exc:

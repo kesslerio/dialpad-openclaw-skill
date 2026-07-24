@@ -17,6 +17,7 @@ class DestinationRule:
     supports_country_inference: bool = False
     allows_internal_target: bool = False
     requires_explicit_destination: bool = False
+    internal_variants: tuple[frozenset[str], ...] = ()
 
 
 DESTINATION_RULES: dict[Command, DestinationRule] = {
@@ -37,10 +38,16 @@ DESTINATION_RULES: dict[Command, DestinationRule] = {
     ("call", "call.transfer_call"): DestinationRule(
         "to",
         allows_internal_target=True,
+        internal_variants=(
+            frozenset({"call_id"}),
+            frozenset({"operator_id", "target_id"}),
+            frozenset({"target_id", "target_type"}),
+        ),
     ),
     ("call", "call.participants.add"): DestinationRule(
         "participant",
         allows_internal_target=True,
+        internal_variants=(frozenset({"target_id", "target_type"}),),
     ),
 }
 
@@ -61,6 +68,20 @@ def _command_start(argv: list[str]) -> int:
             continue
         return index
     return len(argv)
+
+
+def subcommand_help_requested(argv: list[str]) -> bool:
+    """Return whether Click will treat a trailing help token as an option."""
+
+    if not argv or argv[-1] not in {"-h", "--help"}:
+        return False
+    command_start = _command_start(argv)
+    previous = argv[-2] if len(argv) >= 2 else ""
+    return (
+        len(argv) == command_start + 3
+        or not previous.startswith("-")
+        or "=" in previous
+    )
 
 
 def _option_value(argv: list[str], option: str) -> str | None:
@@ -92,6 +113,24 @@ def _recipient_list(value: object) -> list[str]:
     raise ValueError(
         "Outbound recipients must be a phone number or list of phone numbers"
     )
+
+
+def _structured_destination_numbers(
+    value: object,
+    rule: DestinationRule,
+) -> list[str] | None:
+    if not rule.allows_internal_target:
+        return None
+    if isinstance(value, str) and value.lstrip().startswith("{"):
+        value = json.loads(value.lstrip())
+    if not isinstance(value, dict):
+        return None
+    if "number" in value:
+        return [str(value["number"])]
+    keys = frozenset(value)
+    if any(required_keys <= keys for required_keys in rule.internal_variants):
+        return []
+    raise ValueError("Structured call destination has no supported variant")
 
 
 def _is_true(value: object) -> bool:
@@ -187,11 +226,13 @@ def preflight_outbound_destination(argv: list[str]) -> None:
             "Schedule updates must include explicit recipients because stored "
             "recipients cannot be validated locally."
         )
-    recipients = (
-        _recipient_list(recipient_value)
-        if rule.field == "to_numbers"
-        else ([str(recipient_value)] if recipient_value is not None else [])
-    )
+    structured_numbers = _structured_destination_numbers(recipient_value, rule)
+    if structured_numbers is not None:
+        recipients = structured_numbers
+    elif rule.field == "to_numbers":
+        recipients = _recipient_list(recipient_value)
+    else:
+        recipients = [str(recipient_value)] if recipient_value is not None else []
     if rule.requires_explicit_destination and not recipients:
         raise ValueError(
             "Schedule updates must include explicit recipients because stored "

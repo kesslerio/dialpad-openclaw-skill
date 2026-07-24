@@ -3,8 +3,46 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from outbound_destination_policy import require_supported_outbound_destinations
+
+
+Command = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class DestinationRule:
+    field: str
+    supports_country_inference: bool = False
+    allows_internal_target: bool = False
+    requires_explicit_destination: bool = False
+
+
+DESTINATION_RULES: dict[Command, DestinationRule] = {
+    ("sms", "sms.send"): DestinationRule(
+        "to_numbers",
+        supports_country_inference=True,
+    ),
+    ("message", "bulk_messages.send"): DestinationRule("to_numbers"),
+    ("message", "schedules.create"): DestinationRule("to_numbers"),
+    ("message", "schedules.update"): DestinationRule(
+        "to_numbers",
+        requires_explicit_destination=True,
+    ),
+    ("call", "call.call"): DestinationRule("phone_number"),
+    ("call", "call.initiate_ivr_call"): DestinationRule("phone_number"),
+    ("callback", "call.callback"): DestinationRule("phone_number"),
+    ("users", "users.initiate_call"): DestinationRule("phone_number"),
+    ("call", "call.transfer_call"): DestinationRule(
+        "to",
+        allows_internal_target=True,
+    ),
+    ("call", "call.participants.add"): DestinationRule(
+        "participant",
+        allows_internal_target=True,
+    ),
+}
 
 
 def _command_start(argv: list[str]) -> int:
@@ -73,7 +111,7 @@ def _body_from_args(command_args: list[str]) -> dict[str, object]:
 
 
 def _preflight_meeting(
-    command: tuple[str, str],
+    command: Command,
     command_args: list[str],
     body: dict[str, object],
 ) -> None:
@@ -135,43 +173,32 @@ def preflight_outbound_destination(argv: list[str]) -> None:
         _preflight_meeting(command, command_args, body)
         return
 
-    recipient_field = {
-        ("sms", "sms.send"): "to_numbers",
-        ("message", "bulk_messages.send"): "to_numbers",
-        ("message", "schedules.create"): "to_numbers",
-        ("message", "schedules.update"): "to_numbers",
-        ("call", "call.call"): "phone_number",
-        ("call", "call.initiate_ivr_call"): "phone_number",
-        ("callback", "call.callback"): "phone_number",
-        ("users", "users.initiate_call"): "phone_number",
-        ("call", "call.transfer_call"): "to",
-        ("call", "call.participants.add"): "participant",
-    }.get(command)
-    if recipient_field is None:
+    rule = DESTINATION_RULES.get(command)
+    if rule is None:
         return
 
-    option_name = f"--{recipient_field.replace('_', '-')}"
+    option_name = f"--{rule.field.replace('_', '-')}"
     recipient_value = body.get(
-        recipient_field,
+        rule.field,
         _option_value(command_args, option_name),
     )
-    if command == ("message", "schedules.update") and recipient_value is None:
+    if rule.requires_explicit_destination and recipient_value is None:
         raise ValueError(
             "Schedule updates must include explicit recipients because stored "
             "recipients cannot be validated locally."
         )
     recipients = (
         _recipient_list(recipient_value)
-        if recipient_field == "to_numbers"
+        if rule.field == "to_numbers"
         else ([str(recipient_value)] if recipient_value is not None else [])
     )
-    if command == ("message", "schedules.update") and not recipients:
+    if rule.requires_explicit_destination and not recipients:
         raise ValueError(
             "Schedule updates must include explicit recipients because stored "
             "recipients cannot be validated locally."
         )
     if (
-        recipient_field in {"to", "participant"}
+        rule.allows_internal_target
         and recipients
         and not recipients[0].startswith("+")
     ):
@@ -183,5 +210,8 @@ def preflight_outbound_destination(argv: list[str]) -> None:
         )
         require_supported_outbound_destinations(
             recipients,
-            allow_nanp_national=_is_true(infer_country_code),
+            allow_nanp_national=(
+                rule.supports_country_inference
+                and _is_true(infer_country_code)
+            ),
         )

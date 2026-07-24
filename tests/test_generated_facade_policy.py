@@ -174,6 +174,18 @@ def test_generated_facade_preserves_explicit_nanp_country_inference():
     )
 
 
+def test_generated_facade_limits_country_inference_to_sms_contract():
+    with pytest.raises(ValueError, match="NANP"):
+        facade._preflight_outbound_destination(
+            [
+                "call",
+                "call.call",
+                "--data",
+                '{"phone_number":"4155550100","infer_country_code":true}',
+            ]
+        )
+
+
 def test_generated_facade_allows_non_phone_transfer_target():
     facade._preflight_outbound_destination(
         ["call", "call.transfer_call", "--to", "user-id-123"]

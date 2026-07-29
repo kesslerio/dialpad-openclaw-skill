@@ -15,7 +15,11 @@ Dialpad OpenClaw Skill
 │   ├── update_contact.py
 │   ├── export_sms.py
 │   ├── create_sms_webhook.py
-│   └── _dialpad_compat.py
+│   ├── create_sms_draft.py
+│   ├── approve_sms_draft.py
+│   ├── list_sms_thread.py
+│   ├── sync_sms_export.py
+│   └── _dialpad_compat.py       # internal helper, not a command
 ├── generated/                    # Internal backend CLI used by wrappers
 │   ├── dialpad
 │   └── dialpad.openapi

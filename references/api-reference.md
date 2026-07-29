@@ -69,9 +69,9 @@ Representative invocation shapes:
 
 ```bash
 # Resource + dotted operation, flags per --help
-dialpad call transfer_call --call-id "12345" --target-user-id "67890"
+dialpad call call.transfer_call --id "12345" --to "+14155551234"
 dialpad users users.get --id "5765607478525952"
-dialpad stats stats.create --stat-type "calls" --days-ago-start 7 --days-ago-end 0
+dialpad stats stats.create --stat-type "calls" --export-type "stats" --days-ago-start 7 --days-ago-end 0
 ```
 
 Wrapper-specific behavior worth knowing (not in `--help`):

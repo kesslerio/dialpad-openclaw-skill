@@ -10,6 +10,8 @@ Send SMS and make voice calls via the Dialpad API.
 
 ## When to Use
 
+**Native tools:** `submit_draft` (registered by this skill's `dialpad-draft-callback` plugin). **Owned entrypoints:** `list_sms_thread.py`, `lookup_contact.py`, `poll_voicemails.py`.
+
 Use this skill to:
 - Send SMS messages (individual or batch)
 - Make voice calls (with TTS or custom voices)

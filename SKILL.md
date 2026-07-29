@@ -93,8 +93,7 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 3. **Safer message input:** Prefer `--message-file` or `--message-stdin` for pricing text, multi-line copy, or anything shell-sensitive.
 4. **Supported agent interface:** use `bin/*.py` wrappers for normal work. They are the stable command contract for agents.
 5. **Operator-only surfaces:** `generated/dialpad` and `scripts/*` are for manual troubleshooting, storage inspection, or operational maintenance, not normal agent task execution.
-6. **Auth canonical source:** `DIALPAD_API_KEY` is canonical. `DIALPAD_TOKEN` is only needed for manual generated CLI troubleshooting.
-   - Operator example: `export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"`
+6. **Auth canonical source:** `DIALPAD_API_KEY` is canonical. `DIALPAD_TOKEN` is only needed for manual generated CLI troubleshooting (bridge command in Setup below).
 7. **SMS sender safety:** `--from` and `--profile work|sales` are supported. Prefer explicit `--from` for deterministic routing.
    - `--profile` maps to configured env vars:
      - work: `DIALPAD_PROFILE_WORK_FROM`
@@ -125,6 +124,7 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
 - **`references/sms-storage.md`** — SQLite commands, FTS5 search, legacy storage
 - **`references/voice-options.md`** — List of available TTS voices (Budget & Premium)
 - **`references/architecture.md`** — System architecture, wrappers, and CLI generation
+- **`THEORY.MD`** — Design rationale: shell-corruption invariant, 401 classification, inbound-policy-once model
 
 ## Operational Tools
 

@@ -62,6 +62,11 @@ export OPENCLAW_HOOKS_PATH="/hooks/agent"
 export OPENCLAW_HOOKS_NAME="Dialpad SMS"
 export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
 export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
+# Optional hook delivery routing: channel (e.g. "telegram") and target;
+# OPENCLAW_HOOKS_TO accepts "telegram:group:<chat>:topic:<id>" or a bare
+# numeric chat id.
+export OPENCLAW_HOOKS_CHANNEL="telegram"
+export OPENCLAW_HOOKS_TO="telegram:group:-1001234567890:topic:2"
 export OPENCLAW_HOOKS_SMS_ENABLED="0"
 export OPENCLAW_HOOKS_CALL_ENABLED="0"
 export DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY="0"

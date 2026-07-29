@@ -61,98 +61,28 @@ bin/sync_sms_export.py --start-date 2026-05-13 --end-date 2026-05-13 --json
 
 ### Manual Operator CLI Examples
 
-These examples are for human operators doing deep inspection or advanced troubleshooting.
+These examples are for human operators doing deep inspection or advanced
+troubleshooting. The generated CLI covers the full API surface (241 operations) —
+discover commands with `generated/dialpad --help` and
+`generated/dialpad <resource> --help` rather than working from a catalog here.
+Representative invocation shapes:
 
-### Campaign & Automation
 ```bash
-# Bulk SMS campaigns
-dialpad message bulk_messages.send --recipients '["+14155551234"]' --text "Campaign message"
-
-# Schedule SMS for later delivery
-dialpad message schedules.create --send-time "2026-02-15T09:00:00Z" --text "Reminder"
-
-# Manage SMS templates
-dialpad message templates.list
-dialpad message templates.create --name "Welcome" --text "Welcome to ShapeScale!"
-```
-
-### Advanced Call Management
-```bash
-# Transfer live call to another user
+# Resource + dotted operation, flags per --help
 dialpad call transfer_call --call-id "12345" --target-user-id "67890"
-
-# Get AI-generated call summary
-dialpad call ai_recap --call-id "12345"
-
-# List call dispositions (outcomes)
-dialpad dispositions list
-dialpad dispositions.create --name "Demo Scheduled" --color "#00FF00"
-
-# Initiate IVR flow
-dialpad call initiate_ivr_call --phone-number "+14155551234" --ivr-id "menu_123"
-
-# Control call recording
-dialpad call recording.start --call-id "12345"
-dialpad call recording.stop --call-id "12345"
-
-# Add call labels
-dialpad call put_call_labels --call-id "12345" --labels '["hot-lead", "follow-up"]'
-```
-
-### Organization Management
-```bash
-# User management
-dialpad users users.list
 dialpad users users.get --id "5765607478525952"
-dialpad users users.update --id "5765607478525952" --status "away"
-
-# Office/Department management
-dialpad offices offices.list
-dialpad offices offices.create --name "SF Office" --timezone "America/Los_Angeles"
-dialpad departments departments.list
-
-# Call center queues
-dialpad callcenters callcenters.list
-dialpad callcenters operators.list --callcenter-id "12345"
-
-# Access control
-dialpad accesscontrolpolicies accesscontrolpolicies.list
-dialpad accesscontrolpolicies accesscontrolpolicies.assign --id "policy_123" --user-id "456"
+dialpad stats stats.create --stat-type "calls" --days-ago-start 7 --days-ago-end 0
 ```
 
-### Contact & CRM
+Wrapper-specific behavior worth knowing (not in `--help`):
+
 ```bash
-# Full contact CRUD (manual operator use)
-dialpad contacts contacts.create --first-name "John" --last-name "Doe" --phones '["+14155551234"]'
-dialpad contacts contacts.update --id "contact_123" --first-name "John" --job-title "VP"
-dialpad contacts contacts.delete --id "contact_123"
-
-# Backward-compatible wrapper
-bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
-bin/update_contact.py --id "contact_123" --job-title "VP"
-
-# Company management
-dialpad companies companies.list
-dialpad companies companies.create --name "Acme Corp"
-
 # Contact upsert behavior (wrapper)
 # - create_contact.py matches by phone/email for shared and/or local scope and updates on match.
 # - --scope controls targets: shared, local, both, auto (owner provided => both, else shared).
 # - --allow-duplicate bypasses matching and forces create.
-
-# Contact import/export
-dialpad contacts imports.create --file "contacts.csv"
-```
-
-### Analytics & Reporting
-```bash
-# Generate stats reports
-dialpad stats stats.create --stat-type "calls" --days-ago-start 7 --days-ago-end 0
-dialpad stats stats.create --stat-type "csat" --export-type "records"
-dialpad stats stats.create --stat-type "dispositions" --target-id "office_123" --target-type "office"
-
-# Get report status and download
-dialpad stats stats.get --id "request_123"
+bin/create_contact.py --first-name "Jane" --last-name "Doe" --phone "+14155550123" --email "jane@example.com"
+bin/update_contact.py --id "contact_123" --job-title "VP"
 ```
 
 ## Webhooks

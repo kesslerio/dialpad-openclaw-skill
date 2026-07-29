@@ -98,6 +98,12 @@ export OPENCLAW_HOOKS_NAME="Dialpad SMS"
 export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
 export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 
+# Optional hook delivery routing (wired in scripts/webhook_server.py):
+# channel for hook delivery (e.g. "telegram") and its target; OPENCLAW_HOOKS_TO
+# accepts "<chat>:topic:<id>" or a bare chat id.
+export OPENCLAW_HOOKS_CHANNEL="telegram"
+export OPENCLAW_HOOKS_TO="-1001234567890:topic:2"
+
 # Optional per-event hook controls (disabled by default)
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
@@ -187,19 +193,8 @@ generated/dialpad --api-key "$DIALPAD_API_KEY" company company.get >/dev/null
 
 ## Repository Layout
 
-```text
-dialpad-openclaw-skill/
-├── SKILL.md
-├── README.md
-├── bin/
-│   ├── get_call_transcript.py
-│   ├── list_calls.py
-├── generated/
-├── scripts/
-├── references/
-├── tests/
-└── LICENSE
-```
+See `references/architecture.md` for the accurate, complete layout (the `bin/`
+wrapper surface alone has 16 commands — don't work from a partial tree).
 
 ## Reference Docs
 

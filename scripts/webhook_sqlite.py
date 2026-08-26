@@ -61,7 +61,13 @@ def _has_full_message_shape(data: dict) -> bool:
 
 
 def _has_delivery_signal(data: dict) -> bool:
-    return "message_status" in data or "status" in data or "message_delivery_result" in data or "delivery_result" in data
+    return (
+        "message_status" in data
+        or "status" in data
+        or "message_delivery_result" in data
+        or "delivery_result" in data
+        or "event_timestamp" in data
+    )
 
 
 def classify_sms_webhook_event(data: dict) -> str:

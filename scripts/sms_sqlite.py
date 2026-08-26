@@ -64,16 +64,16 @@ DELIVERY_PENDING_STATUSES = frozenset({
     "processing",
     "in_progress",
 })
-DELIVERY_POSITIVE_RESULTS = frozenset({"success", "delivered", "accepted", "sent", "ok"})
+DELIVERY_TERMINAL_SUCCESS_RESULTS = frozenset({"accepted"})
 DELIVERY_PENDING_RESULTS = frozenset({"pending", "queued", "accepted", "sent"})
 
 
 def normalize_provider_id(value: Any) -> str | None:
-    """Return a non-empty provider identifier without guessing or coercing bools."""
+    """Return a canonical decimal provider identifier without guessing."""
     if value is None or isinstance(value, (bool, dict, list, tuple)):
         return None
     value = str(value).strip()
-    return value or None
+    return value if value.isascii() and value.isdigit() else None
 
 
 def parse_provider_event_timestamp(value: Any) -> int | None:
@@ -126,12 +126,12 @@ def classify_delivery_status(message_status: Any, delivery_result: Any) -> dict[
     if status in {"delivered"}:
         if result in DELIVERY_FAILURE_RESULTS:
             return {"outcome": "delivery_unknown", "terminal": True, "conflict": True}
-        if not result or result in DELIVERY_POSITIVE_RESULTS:
+        if not result or result in DELIVERY_TERMINAL_SUCCESS_RESULTS:
             return {"outcome": "delivered", "terminal": True, "conflict": False}
         return {"outcome": "delivery_unknown", "terminal": False, "conflict": False}
 
     if status in {"failed", "undelivered"}:
-        if result in DELIVERY_POSITIVE_RESULTS:
+        if result in DELIVERY_TERMINAL_SUCCESS_RESULTS:
             return {"outcome": "delivery_unknown", "terminal": True, "conflict": True}
         if not result or result in DELIVERY_FAILURE_RESULTS:
             return {"outcome": "undelivered", "terminal": True, "conflict": False}

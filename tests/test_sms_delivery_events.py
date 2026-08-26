@@ -51,7 +51,7 @@ class SmsDeliveryEventTests(unittest.TestCase):
             "id": 12345,
             "event_timestamp": now_ms,
             "message_status": "delivered",
-            "message_delivery_result": "success",
+            "message_delivery_result": "accepted",
         })
 
         self.assertEqual(result["status"], "success")
@@ -70,7 +70,7 @@ class SmsDeliveryEventTests(unittest.TestCase):
             self.assertEqual(row["from_number"], "+14155550100")
             self.assertEqual(row["to_number"], "+14155550200")
             self.assertEqual(row["message_status"], "delivered")
-            self.assertEqual(row["delivery_result"], "success")
+            self.assertEqual(row["delivery_result"], "accepted")
             self.assertEqual(row["delivery_event_timestamp"], now_ms)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0], 1)
@@ -91,7 +91,7 @@ class SmsDeliveryEventTests(unittest.TestCase):
             "id": 12345,
             "event_timestamp": now_ms,
             "message_status": "delivered",
-            "message_delivery_result": "success",
+            "message_delivery_result": "accepted",
         }
         first = handle_sms_webhook(receipt)
         duplicate = handle_sms_webhook(receipt)
@@ -110,7 +110,7 @@ class SmsDeliveryEventTests(unittest.TestCase):
             "id": 12345,
             "event_timestamp": now_ms,
             "message_status": "delivered",
-            "message_delivery_result": "success",
+            "message_delivery_result": "accepted",
         }
         self.assertTrue(handle_sms_webhook(receipt)["updated"])
         same_time_conflict = handle_sms_webhook({
@@ -130,13 +130,17 @@ class SmsDeliveryEventTests(unittest.TestCase):
                 "SELECT message_status, delivery_result, delivery_event_timestamp "
                 "FROM messages WHERE dialpad_id = 12345"
             ).fetchone()
-            self.assertEqual(tuple(row), ("delivered", "success", now_ms))
+            self.assertEqual(tuple(row), ("delivered", "accepted", now_ms))
         finally:
             conn.close()
 
     def test_unallowlisted_status_result_pairs_fail_closed(self) -> None:
         self.assertEqual(
             sms_sqlite.classify_delivery_status("pending", "mystery")["outcome"],
+            "delivery_unknown",
+        )
+        self.assertEqual(
+            sms_sqlite.classify_delivery_status("delivered", "success")["outcome"],
             "delivery_unknown",
         )
         self.assertEqual(
@@ -184,7 +188,7 @@ class SmsDeliveryEventTests(unittest.TestCase):
             "id": 12345,
             "event_timestamp": now_ms + 1_000,
             "message_status": "delivered",
-            "message_delivery_result": "success",
+            "message_delivery_result": "accepted",
         })
 
         self.assertEqual(failed["outcome"], "undelivered")
@@ -213,6 +217,10 @@ class SmsDeliveryEventTests(unittest.TestCase):
         self.assertEqual(unknown_id["status"], "not_found")
         self.assertEqual(future["status"], "error")
         self.assertEqual(classify_sms_webhook_event({"id": 12345, "message_status": "delivered"}), "delivery_status")
+        self.assertEqual(
+            classify_sms_webhook_event({"id": 12345, "event_timestamp": now_ms}),
+            "delivery_status",
+        )
         self.assertEqual(
             classify_sms_webhook_event({
                 "id": 12345,
@@ -260,7 +268,7 @@ class SmsDeliveryEventTests(unittest.TestCase):
             "id": 12345,
             "event_timestamp": now_ms,
             "message_status": "delivered",
-            "message_delivery_result": "success",
+            "message_delivery_result": "accepted",
         }
         raw = json.dumps(payload).encode("utf-8")
         handler = object.__new__(webhook_server.DialpadWebhookHandler)
@@ -293,7 +301,7 @@ class SmsDeliveryEventTests(unittest.TestCase):
             "id": 12345,
             "event_timestamp": now_ms,
             "message_status": "delivered",
-            "message_delivery_result": "success",
+            "message_delivery_result": "accepted",
         }
         raw = json.dumps(payload).encode("utf-8")
         handler = object.__new__(webhook_server.DialpadWebhookHandler)

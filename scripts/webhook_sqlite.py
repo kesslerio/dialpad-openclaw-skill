@@ -12,7 +12,15 @@ from pathlib import Path
 skill_dir = Path(__file__).parent
 sys.path.insert(0, str(skill_dir))
 
-from sms_sqlite import init_db, store_message, get_all_threads, get_unread, mark_as_read
+from sms_sqlite import (
+    init_db,
+    normalize_provider_id,
+    store_message,
+    update_message_delivery,
+    get_all_threads,
+    get_unread,
+    mark_as_read,
+)
 
 try:
     from sms_security_filter import redact_preview as _security_redact_preview
@@ -27,11 +35,110 @@ def redact_preview(text, **kwargs):
     return text
 
 
-def handle_sms_webhook(data: dict) -> dict:
+def _first_nonempty(value):
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if item is not None and str(item).strip():
+                return item
+        return None
+    if value is not None and str(value).strip():
+        return value
+    return None
+
+
+def _has_message_text(data: dict) -> bool:
+    return bool(_first_nonempty(data.get("text")) or _first_nonempty(data.get("text_content")))
+
+
+def _has_full_message_shape(data: dict) -> bool:
+    direction = str(data.get("direction", "")).strip().lower()
+    return (
+        direction in {"inbound", "outbound"}
+        and _first_nonempty(data.get("from_number")) is not None
+        and _first_nonempty(data.get("to_number")) is not None
+        and _has_message_text(data)
+    )
+
+
+def _has_delivery_signal(data: dict) -> bool:
+    return (
+        "message_status" in data
+        or "status" in data
+        or "message_delivery_result" in data
+        or "delivery_result" in data
+        or "event_timestamp" in data
+    )
+
+
+def classify_sms_webhook_event(data: dict) -> str:
+    """Classify before storage/fan-out so sparse receipts cannot become messages."""
+    if not isinstance(data, dict):
+        return "rejected"
+    if _has_full_message_shape(data):
+        return "full_message"
+    if _has_delivery_signal(data):
+        # A non-empty body makes this a claimed message event, not a sparse
+        # receipt. If participants/direction are incomplete, fail closed
+        # instead of allowing a hybrid payload into either path.
+        if _has_message_text(data):
+            return "rejected"
+        if normalize_provider_id(data.get("id") or data.get("message_id")):
+            return "delivery_status"
+        return "rejected"
+    return "full_message"
+
+
+def handle_sms_webhook(data: dict, *, event_type: str | None = None) -> dict:
     """
     Handle incoming SMS webhook from Dialpad
     Stores message in SQLite with FTS5 indexing
     """
+    event_type = event_type or classify_sms_webhook_event(data)
+    if event_type == "delivery_status":
+        conn = None
+        try:
+            conn = init_db()
+            receipt = update_message_delivery(conn, data)
+            if receipt.get("status") == "success":
+                return {
+                    **receipt,
+                    "status": "success",
+                    "stored": True,
+                    "event_type": "delivery_status",
+                }
+            if receipt.get("status") == "not_found":
+                return {
+                    **receipt,
+                    "stored": False,
+                    "event_type": "delivery_status",
+                }
+            return {
+                **receipt,
+                "stored": False,
+                "event_type": "delivery_status",
+                "error": receipt.get("reason", "receipt_rejected"),
+            }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "stored": False,
+                "event_type": "delivery_status",
+                "error": str(exc),
+            }
+        finally:
+            if conn is not None:
+                conn.close()
+
+    # Keep the historical /store compatibility path for payloads without any
+    # delivery fields, while rejecting malformed status-bearing hybrids.
+    if event_type == "rejected":
+        return {
+            "status": "error",
+            "stored": False,
+            "event_type": "rejected",
+            "error": "invalid_sms_event_shape",
+        }
+
     conn = init_db()
     try:
         msg = store_message(conn, data, is_new=True)

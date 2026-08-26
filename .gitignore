@@ -33,6 +33,7 @@ ENV/
 
 # Local agent scratch space
 .context/
+.worktrees/
 
 # Environment variables (secrets)
 .env

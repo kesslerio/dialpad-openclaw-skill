@@ -63,7 +63,7 @@ skill_dir = Path(__file__).parent
 sys.path.insert(0, str(skill_dir))
 
 # Import existing SQLite storage handler
-from webhook_sqlite import handle_sms_webhook
+from webhook_sqlite import classify_sms_webhook_event, handle_sms_webhook
 import draft_model
 try:
     from sms_sqlite import init_db as init_sms_history_db
@@ -5695,8 +5695,24 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Invalid JSON")
             return
 
+        event_type = classify_sms_webhook_event(data)
+        if event_type == "delivery_status":
+            # /store is the legacy plugin endpoint and is not authenticated as
+            # a Dialpad webhook. Receipt mutation must stay on the authenticated
+            # /webhook/dialpad path.
+            self.send_json_response(
+                403,
+                {
+                    "status": "error",
+                    "stored": False,
+                    "event_type": "delivery_status",
+                    "error": "delivery_status_requires_authenticated_webhook",
+                },
+            )
+            return
+
         try:
-            result = handle_sms_webhook(data)
+            result = handle_sms_webhook(data, event_type=event_type)
             stored = result.get("stored", False)
 
             self.send_response(200 if stored else 500)
@@ -5732,6 +5748,44 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as e:
             print(f"❌ Invalid JSON payload: {e}")
             self.send_error(400, "Invalid JSON")
+            return
+
+        event_type = classify_sms_webhook_event(data)
+        if event_type == "rejected":
+            self.send_json_response(
+                422,
+                {
+                    "status": "error",
+                    "stored": False,
+                    "event_type": "rejected",
+                    "error": "invalid_sms_event_shape",
+                },
+            )
+            return
+        if event_type == "delivery_status":
+            # Sparse status events update only the existing message row. They
+            # intentionally bypass inbound dedupe, ACK-first fan-out, drafts,
+            # hooks, and Telegram so a receipt cannot look like a new SMS.
+            result = handle_sms_webhook(data, event_type=event_type)
+            result_status = result.get("status")
+            if result_status == "success":
+                self.send_json_response(200, result)
+            elif result_status == "not_found":
+                self.send_json_response(404, result)
+            elif result_status in {"conflict", "error"} and result.get("reason") in {
+                "missing_provider_id",
+                "invalid_event_timestamp",
+                "future_event_timestamp",
+                "event_timestamp_out_of_window",
+                "unknown_delivery_status",
+                "contradictory_terminal_status",
+                "terminal_downgrade",
+                "terminal_outcome_changed",
+                "same_timestamp_changed_status",
+            }:
+                self.send_json_response(422, result)
+            else:
+                self.send_json_response(500, result)
             return
 
         timestamp = datetime.now().isoformat()

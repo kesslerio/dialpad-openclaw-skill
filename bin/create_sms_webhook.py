@@ -92,6 +92,7 @@ def handle_create(args: argparse.Namespace) -> dict[str, object]:
     payload = {
         "endpoint_id": webhook_id,
         "direction": direction,
+        "status": True,
     }
     if event_types:
         payload["event_types"] = event_types

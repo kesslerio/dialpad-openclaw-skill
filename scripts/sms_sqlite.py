@@ -5,6 +5,7 @@ Single-file database with full-text search capabilities
 """
 
 import json
+import math
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -43,6 +44,111 @@ DB_PATH = resolve_db_path()
 LEGACY_THREADS_DIR = Path("/home/art/niemand/logs/sms_threads")
 LEGACY_LOG = Path("/home/art/niemand/logs/dialpad_sms.jsonl")
 
+DELIVERY_EVENT_MAX_FUTURE_MS = 5 * 60 * 1000
+DELIVERY_EVENT_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000
+DELIVERY_FAILURE_RESULTS = frozenset({
+    "invalid_destination",
+    "invalid_source",
+    "no_route",
+    "not_supported",
+    "rejected",
+    "rejected_spam",
+    "internal_error",
+    "time_out",
+})
+DELIVERY_PENDING_STATUSES = frozenset({
+    "pending",
+    "queued",
+    "accepted",
+    "sent",
+    "processing",
+    "in_progress",
+})
+DELIVERY_TERMINAL_SUCCESS_RESULTS = frozenset({"accepted"})
+DELIVERY_PENDING_RESULTS = frozenset({"pending", "queued", "accepted", "sent"})
+
+
+def normalize_provider_id(value: Any) -> str | None:
+    """Return a canonical decimal provider identifier without guessing."""
+    if value is None or isinstance(value, (bool, dict, list, tuple)):
+        return None
+    value = str(value).strip()
+    return value if value.isascii() and value.isdigit() else None
+
+
+def parse_provider_event_timestamp(value: Any) -> int | None:
+    """Normalize Dialpad millisecond/second or ISO timestamps to milliseconds."""
+    if value is None or isinstance(value, bool):
+        return None
+    timestamp: int | None = None
+    if isinstance(value, (int, float)):
+        if not math.isfinite(float(value)) or not float(value).is_integer():
+            return None
+        timestamp = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            timestamp = int(text)
+        else:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp = int(parsed.timestamp() * 1000)
+    if timestamp is None or timestamp <= 0:
+        return None
+    # Dialpad uses milliseconds; accepting epoch seconds keeps the parser
+    # compatible with hand-authored/replayed fixtures without changing storage.
+    if timestamp < 100_000_000_000:
+        timestamp *= 1000
+    return timestamp
+
+
+def _status_token(value: Any) -> str:
+    if value is None or isinstance(value, (dict, list, tuple)):
+        return ""
+    return str(value).strip().lower()
+
+
+def classify_delivery_status(message_status: Any, delivery_result: Any) -> dict[str, Any]:
+    """Map provider vocabulary to the shared receipt contract.
+
+    Unknown values and contradictory terminal pairs stay unknown/conflicted;
+    callers must not turn them into delivery success.
+    """
+    status = _status_token(message_status)
+    result = _status_token(delivery_result)
+
+    if status in {"delivered"}:
+        if result in DELIVERY_FAILURE_RESULTS:
+            return {"outcome": "delivery_unknown", "terminal": True, "conflict": True}
+        if not result or result in DELIVERY_TERMINAL_SUCCESS_RESULTS:
+            return {"outcome": "delivered", "terminal": True, "conflict": False}
+        return {"outcome": "delivery_unknown", "terminal": False, "conflict": False}
+
+    if status in {"failed", "undelivered"}:
+        if result in DELIVERY_TERMINAL_SUCCESS_RESULTS:
+            return {"outcome": "delivery_unknown", "terminal": True, "conflict": True}
+        if not result or result in DELIVERY_FAILURE_RESULTS:
+            return {"outcome": "undelivered", "terminal": True, "conflict": False}
+        return {"outcome": "delivery_unknown", "terminal": False, "conflict": False}
+
+    if result in DELIVERY_FAILURE_RESULTS:
+        return {"outcome": "undelivered", "terminal": True, "conflict": False}
+
+    if status in DELIVERY_PENDING_STATUSES:
+        if not result or result in DELIVERY_PENDING_RESULTS:
+            return {"outcome": "pending", "terminal": False, "conflict": False}
+        return {"outcome": "delivery_unknown", "terminal": False, "conflict": False}
+    if not status and result in DELIVERY_PENDING_RESULTS:
+        return {"outcome": "pending", "terminal": False, "conflict": False}
+
+    return {"outcome": "delivery_unknown", "terminal": False, "conflict": False}
+
 
 def init_db() -> sqlite3.Connection:
     """Initialize the database with schema"""
@@ -71,10 +177,17 @@ def init_db() -> sqlite3.Connection:
             mms BOOLEAN DEFAULT 0,
             mms_url TEXT,
             timestamp INTEGER,
+            delivery_event_timestamp INTEGER,
             received_at TEXT DEFAULT CURRENT_TIMESTAMP,
             read BOOLEAN DEFAULT 0
         )
     """)
+
+    # Existing production databases predate delivery receipts. This additive
+    # migration is intentionally local and preserves every existing row.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    if "delivery_event_timestamp" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN delivery_event_timestamp INTEGER")
     
     # Contacts summary table (denormalized for fast lookups)
     conn.execute("""
@@ -115,8 +228,13 @@ def init_db() -> sqlite3.Connection:
         END
     """)
     
+    trigger_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_au'"
+    ).fetchone()
+    if trigger_sql and "AFTER UPDATE OF text, contact_name" not in trigger_sql[0]:
+        conn.execute("DROP TRIGGER messages_au")
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF text, contact_name ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, text, contact_name)
             VALUES ('delete', old.id, old.text, old.contact_name);
             INSERT INTO messages_fts(rowid, text, contact_name)
@@ -155,12 +273,13 @@ def normalize_message(data: dict) -> dict:
         "direction": direction,
         "from_number": our_number if direction == "outbound" else other_number,
         "to_number": other_number if direction == "outbound" else our_number,
-        "text": data.get("text", ""),
-        "message_status": data.get("message_status"),
-        "delivery_result": data.get("message_delivery_result"),
+        "text": data.get("text") or data.get("text_content", ""),
+        "message_status": data.get("message_status") or data.get("status"),
+        "delivery_result": data.get("message_delivery_result") or data.get("delivery_result"),
         "mms": data.get("mms", False),
         "mms_url": data.get("mms_url"),
         "timestamp": data.get("created_date"),
+        "delivery_event_timestamp": parse_provider_event_timestamp(data.get("event_timestamp")),
     }
 
 
@@ -171,12 +290,14 @@ def store_message(conn: sqlite3.Connection, data: dict, is_new: bool = True) -> 
     cursor = conn.execute(
         """INSERT OR REPLACE INTO messages 
            (dialpad_id, contact_number, contact_name, direction, from_number, to_number,
-            text, message_status, delivery_result, mms, mms_url, timestamp, read)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            text, message_status, delivery_result, mms, mms_url, timestamp,
+            delivery_event_timestamp, read)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (msg["dialpad_id"], msg["contact_number"], msg["contact_name"], msg["direction"],
          msg["from_number"], msg["to_number"], msg["text"], msg["message_status"],
          msg["delivery_result"], msg["mms"], msg["mms_url"], msg["timestamp"],
+         msg["delivery_event_timestamp"],
          0 if (is_new and msg["direction"] == "inbound") else 1)
     )
     
@@ -186,6 +307,79 @@ def store_message(conn: sqlite3.Connection, data: dict, is_new: bool = True) -> 
     conn.commit()
     msg["id"] = cursor.lastrowid
     return msg
+
+
+def update_message_delivery(
+    conn: sqlite3.Connection,
+    data: dict,
+    *,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    """Apply one sparse receipt to an existing row, keyed only by provider ID."""
+    provider_id = normalize_provider_id(data.get("id") or data.get("message_id"))
+    if provider_id is None:
+        return {"status": "error", "updated": False, "reason": "missing_provider_id"}
+
+    event_timestamp = parse_provider_event_timestamp(data.get("event_timestamp"))
+    if event_timestamp is None:
+        return {"status": "error", "updated": False, "reason": "invalid_event_timestamp"}
+    now = int(now_ms if now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
+    if event_timestamp > now + DELIVERY_EVENT_MAX_FUTURE_MS:
+        return {"status": "error", "updated": False, "reason": "future_event_timestamp"}
+    if event_timestamp < now - DELIVERY_EVENT_MAX_AGE_MS:
+        return {"status": "error", "updated": False, "reason": "event_timestamp_out_of_window"}
+
+    message_status = data.get("message_status") or data.get("status")
+    delivery_result = data.get("message_delivery_result") or data.get("delivery_result")
+    classification = classify_delivery_status(message_status, delivery_result)
+    base = {
+        "provider_id": provider_id,
+        "event_timestamp": event_timestamp,
+        "outcome": classification["outcome"],
+        "updated": False,
+    }
+    if classification["conflict"]:
+        return {**base, "status": "conflict", "reason": "contradictory_terminal_status"}
+    if classification["outcome"] == "delivery_unknown":
+        return {**base, "status": "error", "reason": "unknown_delivery_status"}
+
+    row = conn.execute(
+        "SELECT dialpad_id, message_status, delivery_result, delivery_event_timestamp "
+        "FROM messages WHERE dialpad_id = ?",
+        (provider_id,),
+    ).fetchone()
+    if row is None:
+        return {**base, "status": "not_found", "reason": "provider_id_not_found"}
+
+    existing_timestamp = parse_provider_event_timestamp(row["delivery_event_timestamp"])
+    existing = classify_delivery_status(row["message_status"], row["delivery_result"])
+    if existing["terminal"] and not classification["terminal"]:
+        return {**base, "status": "conflict", "reason": "terminal_downgrade"}
+    if existing["terminal"] and classification["terminal"] and existing["outcome"] != classification["outcome"]:
+        return {**base, "status": "conflict", "reason": "terminal_outcome_changed"}
+    if existing_timestamp is not None:
+        if event_timestamp < existing_timestamp:
+            return {**base, "status": "success", "reason": "stale"}
+        if event_timestamp == existing_timestamp:
+            if (
+                _status_token(row["message_status"]) == _status_token(message_status)
+                and _status_token(row["delivery_result"]) == _status_token(delivery_result)
+            ):
+                return {**base, "status": "success", "reason": "duplicate"}
+            return {**base, "status": "conflict", "reason": "same_timestamp_changed_status"}
+
+    conn.execute(
+        "UPDATE messages SET message_status = ?, delivery_result = ?, "
+        "delivery_event_timestamp = ? WHERE dialpad_id = ?",
+        (message_status, delivery_result, event_timestamp, provider_id),
+    )
+    conn.commit()
+    return {
+        **base,
+        "status": "success",
+        "reason": "updated",
+        "updated": True,
+    }
 
 
 def _update_contact_summary(conn: sqlite3.Connection, phone_number: str):

@@ -123,6 +123,14 @@ export DIALPAD_TELEGRAM_APPROVAL_BUTTONS_ENABLED="0"
 export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 ```
 
+The same secret authenticates SMS delivery-status events. The webhook accepts
+authenticated sparse status payloads, updates the existing `sms.db` row by
+Dialpad message ID, and does not create an inbound notification, draft, or
+OpenClaw hook or enter inbound dedupe. Receipt updates require a provider
+`event_timestamp`; only an empty or `accepted` result can complete a
+`delivered` status. Unknown, stale, or contradictory status data is rejected
+or held without overwriting message text or participants.
+
 When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are only forwarded to OpenClaw when the matching event flag is explicitly enabled. Leave `OPENCLAW_HOOKS_SMS_ENABLED=0` and `OPENCLAW_HOOKS_CALL_ENABLED=0` for notification-only mode.
 When `DIALPAD_MERGED_DRAFT_FLOW=1`, the webhook sends no immediate Telegram card for eligible inbound SMS or missed calls.
 It waits for `/internal/draft-callback` from the agent, then falls back to the deterministic draft after `DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS`.
@@ -158,9 +166,15 @@ bin/create_sms_webhook.py create --url "https://your-server.com/webhook/dialpad"
 bin/create_sms_webhook.py list
 ```
 
+`create` provisions the existing webhook plus a status-enabled SMS event
+subscription (`status: true`) for the selected direction. Verify the returned
+subscription before enabling downstream receipt reconciliation. The command
+creates provider configuration only; it does not send an SMS.
+
 Notes:
 
 - `/webhook/dialpad` handles SMS storage plus optional OpenClaw/Telegram fan-out
+- `/store` remains the legacy full-message plugin path; it rejects sparse delivery-status mutation because it is not the authenticated Dialpad webhook
 - `/webhook/telegram` handles Telegram inline approval button callbacks; it requires `X-Telegram-Bot-Api-Secret-Token` and the configured Telegram chat id
 - `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, compact `inboundContext` briefs, plus optional OpenClaw hook forwarding
 - `/webhook/dialpad-voicemail` sends Telegram alerts and can create first-contact sales-line SMS approval drafts, but does not send SMS directly

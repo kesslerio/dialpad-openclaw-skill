@@ -84,6 +84,18 @@ def test_openclaw_docs_require_sms_approval_drafts_not_autonomous_send():
     assert "autonomous sms send is not supported" in integration
 
 
+def test_openclaw_docs_describe_sms_delivery_status_events():
+    readme = (ROOT / "README.md").read_text().lower()
+    skill = (ROOT / "SKILL.md").read_text().lower()
+
+    for document in (readme, skill):
+        assert "status: true" in document
+        assert "delivery-status" in document
+        assert "event_timestamp" in document
+        assert "sms.db" in document
+        assert "inbound dedupe" in document
+
+
 def test_openclaw_docs_require_single_operator_notification_ownership():
     readme = (ROOT / "README.md").read_text().lower()
     skill = (ROOT / "SKILL.md").read_text().lower()

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-01
+
+- fix(webhook): verify and decode Dialpad JWT-encoded event bodies. When the Dialpad webhook has a signature secret configured, events arrive as HS256 JWTs with the event JSON inside the payload; `scripts/webhook_server.py` now verifies the signature against `DIALPAD_WEBHOOK_SECRET` and decodes the payload for the SMS, call, and voicemail handlers instead of rejecting every event with 401.
+- fix(webhook): reject JWTs whose header JSON is not an object (both Bearer and JWT-encoded-event paths) instead of raising an unhandled `AttributeError`.
+- test(webhook): cover the JWT-encoded event body auth/decode paths — valid signed bodies, tampered signatures, `alg` confusion, non-object JWT headers, and plain-JSON fallback.
+- docs(webhook): document JWT-encoded event handling and correct the example hook agent to `romeo-work`.
+
 ## 2026-03-25
 
 - feat(list_calls): add `bin/list_calls.py` as the supported agent-facing recent-call wrapper with table and JSON envelope output.

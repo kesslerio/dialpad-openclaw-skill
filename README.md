@@ -87,7 +87,11 @@ bin/update_contact.py --id "contact_123" --job-title "Director"
 ## Webhooks to OpenClaw
 
 ```bash
-# Optional webhook auth validation
+# Optional webhook auth validation. When a secret is configured on the Dialpad
+# webhook, Dialpad delivers JWT-encoded events (HS256, event JSON inside the
+# JWT payload); the webhook server verifies the signature against this secret
+# and decodes the payload automatically. Plain-JSON events are only accepted
+# when no secret is configured.
 export DIALPAD_WEBHOOK_SECRET="your-dialpad-webhook-secret"
 
 # OpenClaw hook destination
@@ -96,7 +100,7 @@ export OPENCLAW_HOOKS_TOKEN="your-openclaw-hooks-token"
 export OPENCLAW_HOOKS_PATH="/hooks/agent"
 export OPENCLAW_HOOKS_NAME="Dialpad SMS"
 export OPENCLAW_HOOKS_CALL_NAME="Dialpad Missed Call"
-export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
+export OPENCLAW_HOOKS_AGENT_ID="romeo-work"
 
 # Optional hook delivery routing (wired in scripts/webhook_server.py):
 # channel for hook delivery (e.g. "telegram") and its target; OPENCLAW_HOOKS_TO

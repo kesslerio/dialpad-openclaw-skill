@@ -1431,7 +1431,9 @@ def verify_bearer_jwt(headers, secret):
 def verify_webhook_auth(headers, raw_body, secret):
     """
     Validate inbound webhook auth when a secret is configured.
-    Accepts either Dialpad HMAC signature headers or Bearer HS256 JWT.
+    Accepts Dialpad HMAC signature headers, a Bearer HS256 JWT, or a
+    JWT-encoded event body (Dialpad signs the whole event as the body when the
+    webhook has a signature secret configured).
     """
     if not secret:
         return True, "disabled"
@@ -1439,7 +1441,55 @@ def verify_webhook_auth(headers, raw_body, secret):
         return True, "hmac"
     if verify_bearer_jwt(headers, secret):
         return True, "jwt"
+    if _jwt_event_body_is_valid(raw_body, secret):
+        return True, "jwt-event"
     return False, "missing_or_invalid_signature_or_jwt"
+
+
+_JWT_BODY_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
+
+
+def _jwt_event_body_is_valid(raw_body, secret):
+    """True when raw_body is an HS256 JWT signed with secret (Dialpad JWT-encoded event)."""
+    if not raw_body or not secret:
+        return False
+    body_text = raw_body.decode("utf-8", errors="replace").strip()
+    if not _JWT_BODY_RE.fullmatch(body_text):
+        return False
+    header_b64, payload_b64, signature_b64 = body_text.split(".")
+    try:
+        header_obj = json.loads(_b64url_decode(header_b64).decode("utf-8"))
+        signature_bytes = _b64url_decode(signature_b64)
+    except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
+        return False
+    if header_obj.get("alg") != "HS256":
+        return False
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        f"{header_b64}.{payload_b64}".encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return hmac.compare_digest(signature_bytes, expected)
+
+
+def decode_dialpad_event_body(raw_body, secret):
+    """
+    Parse an inbound Dialpad event body into (data, encoding_source).
+
+    Dialpad sends JWT-encoded events (event JSON inside the HS256-signed JWT
+    payload) when the webhook has a signature secret configured, and plain
+    JSON when it does not. The JWT signature must verify against `secret`
+    before the payload is trusted. Raises ValueError on signature failure and
+    json.JSONDecodeError on malformed payloads.
+    """
+    if raw_body:
+        body_text = raw_body.decode("utf-8", errors="replace").strip()
+        if _JWT_BODY_RE.fullmatch(body_text):
+            if not _jwt_event_body_is_valid(raw_body, secret):
+                raise ValueError("jwt event signature verification failed")
+            payload = _b64url_decode(body_text.split(".")[1]).decode("utf-8")
+            return json.loads(payload), "jwt-event"
+    return (json.loads(raw_body.decode("utf-8")) if raw_body else {}), "json"
 
 
 def _first_value(value):
@@ -5744,9 +5794,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         )
 
         try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError as e:
-            print(f"❌ Invalid JSON payload: {e}")
+            data, event_encoding = decode_dialpad_event_body(raw_body, WEBHOOK_SECRET)
+            log_line(f"📥 /webhook/dialpad event encoding={event_encoding}")
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"❌ Invalid event payload: {e}")
             self.send_error(400, "Invalid JSON")
             return
 
@@ -6198,9 +6249,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         body = raw_body.decode("utf-8")
 
         try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError as e:
-            print(f"❌ Invalid JSON payload on /webhook/dialpad-call: {e}")
+            data, _event_encoding = decode_dialpad_event_body(raw_body, WEBHOOK_SECRET)
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"❌ Invalid event payload on /webhook/dialpad-call: {e}")
             self.send_error(400, "Invalid JSON")
             return
 
@@ -6596,9 +6647,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         body = raw_body.decode("utf-8")
 
         try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError as e:
-            print(f"❌ Invalid JSON payload on /webhook/dialpad-voicemail: {e}")
+            data, _event_encoding = decode_dialpad_event_body(raw_body, WEBHOOK_SECRET)
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"❌ Invalid event payload on /webhook/dialpad-voicemail: {e}")
             self.send_error(400, "Invalid JSON")
             return
 

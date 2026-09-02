@@ -1421,7 +1421,7 @@ def verify_bearer_jwt(headers, secret):
     except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
         return False
 
-    if header_obj.get("alg") != "HS256":
+    if not isinstance(header_obj, dict) or header_obj.get("alg") != "HS256":
         return False
 
     expected = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
@@ -1462,7 +1462,7 @@ def _jwt_event_body_is_valid(raw_body, secret):
         signature_bytes = _b64url_decode(signature_b64)
     except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
         return False
-    if header_obj.get("alg") != "HS256":
+    if not isinstance(header_obj, dict) or header_obj.get("alg") != "HS256":
         return False
     expected = hmac.new(
         secret.encode("utf-8"),
@@ -5787,7 +5787,6 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             self.send_error(401, "Unauthorized")
             return
 
-        body = raw_body.decode("utf-8")
         log_line(
             f"📥 /webhook/dialpad hit bytes={len(raw_body)} auth={auth_source} "
             f"ua={_get_header(self.headers, 'User-Agent') or 'unknown'}"
@@ -6246,8 +6245,6 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             self.send_error(401, "Unauthorized")
             return
 
-        body = raw_body.decode("utf-8")
-
         try:
             data, _event_encoding = decode_dialpad_event_body(raw_body, WEBHOOK_SECRET)
         except (ValueError, json.JSONDecodeError) as e:
@@ -6643,8 +6640,6 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             log_line("❌ Unauthorized webhook request on /webhook/dialpad-voicemail")
             self.send_error(401, "Unauthorized")
             return
-
-        body = raw_body.decode("utf-8")
 
         try:
             data, _event_encoding = decode_dialpad_event_body(raw_body, WEBHOOK_SECRET)

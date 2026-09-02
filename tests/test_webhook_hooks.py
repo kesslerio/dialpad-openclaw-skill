@@ -16,6 +16,7 @@ from webhook_server import (
     build_missed_call_dedupe_key,
     build_openclaw_hook_payload,
     claim_missed_call_notification,
+    decode_dialpad_event_body,
     format_hook_message,
     normalize_call_hook_payload,
     normalize_sms_payload,
@@ -95,6 +96,76 @@ def test_verify_webhook_auth_accepts_hmac_or_jwt():
     )
     assert ok_jwt is True
     assert source_jwt == "jwt"
+
+
+def _make_jwt_with_header(secret, header, payload):
+    header_b64 = _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    sig = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header_b64}.{payload_b64}.{_b64url(sig)}"
+
+
+def test_verify_webhook_auth_accepts_jwt_encoded_event_body():
+    secret = "event-secret"
+    body = _make_hs256_jwt(
+        secret, {"direction": "inbound", "text": "hello"}
+    ).encode("utf-8")
+    ok, source = verify_webhook_auth({}, body, secret)
+    assert ok is True
+    assert source == "jwt-event"
+    data, encoding = decode_dialpad_event_body(body, secret)
+    assert data == {"direction": "inbound", "text": "hello"}
+    assert encoding == "jwt-event"
+
+
+def test_verify_webhook_auth_rejects_tampered_jwt_event_body():
+    secret = "event-secret"
+    body = _make_hs256_jwt(secret, {"direction": "inbound"}).encode("utf-8")
+    header_b64, payload_b64, sig_b64 = body.decode("ascii").split(".")
+    tampered = f"{header_b64}.{payload_b64}.{'A' * len(sig_b64)}".encode("ascii")
+    ok, source = verify_webhook_auth({}, tampered, secret)
+    assert ok is False
+    assert source == "missing_or_invalid_signature_or_jwt"
+    raised = False
+    try:
+        decode_dialpad_event_body(tampered, secret)
+    except ValueError:
+        raised = True
+    assert raised is True
+
+
+def test_verify_webhook_auth_rejects_non_hs256_jwt_event_bodies():
+    secret = "event-secret"
+    for header in ({"alg": "none"}, {"alg": "HS512"}):
+        token = _make_jwt_with_header(secret, header, {"a": 1})
+        ok, _source = verify_webhook_auth({}, token.encode("ascii"), secret)
+        assert ok is False
+
+
+def test_verify_webhook_auth_rejects_non_object_jwt_event_header():
+    secret = "event-secret"
+    header_b64 = _b64url(b"[]")
+    payload_b64 = _b64url(json.dumps({"a": 1}).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    sig = _b64url(hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest())
+    body = f"{header_b64}.{payload_b64}.{sig}".encode("ascii")
+    ok, _source = verify_webhook_auth({}, body, secret)
+    assert ok is False
+    token = f"{header_b64}.{payload_b64}.{sig}"
+    assert verify_bearer_jwt({"Authorization": f"Bearer {token}"}, secret) is False
+
+
+def test_decode_dialpad_event_body_falls_back_to_plain_json():
+    data, encoding = decode_dialpad_event_body(b'{"direction":"inbound"}', "event-secret")
+    assert data == {"direction": "inbound"}
+    assert encoding == "json"
+    data, encoding = decode_dialpad_event_body(b"", "event-secret")
+    assert data == {}
+    assert encoding == "json"
+    ok, source = verify_webhook_auth({}, b'{"a":1}', None)
+    assert ok is True
+    assert source == "disabled"
 
 
 def test_build_hook_session_key_fallback_order():

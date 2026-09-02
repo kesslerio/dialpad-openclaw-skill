@@ -90,8 +90,9 @@ bin/update_contact.py --id "contact_123" --job-title "Director"
 # Optional webhook auth validation. When a secret is configured on the Dialpad
 # webhook, Dialpad delivers JWT-encoded events (HS256, event JSON inside the
 # JWT payload); the webhook server verifies the signature against this secret
-# and decodes the payload automatically. Plain-JSON events are only accepted
-# when no secret is configured.
+# and decodes the payload automatically. When a secret is configured,
+# unauthenticated plain-JSON events are rejected; plain JSON is still accepted
+# with a valid HMAC signature header or Bearer JWT.
 export DIALPAD_WEBHOOK_SECRET="your-dialpad-webhook-secret"
 
 # OpenClaw hook destination

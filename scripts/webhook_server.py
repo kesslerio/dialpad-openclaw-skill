@@ -5267,7 +5267,8 @@ def format_hook_message(normalized_event, line_display=None, callback_url=None,
             "Draft guidance: Write a specific, warm plain-text SMS reply from the context above. "
             "Use the contact identity, deal stage, booked-demo details, and recent thread when present; "
             "match the sender's tone; keep it to one or two short sentences; no markdown or links unless "
-            "the customer asked for one."
+            "the customer asked for one. Only provide customer-facing ShapeScale sales text; never include code, "
+            "programming syntax, tool references, plugin detection, or internal logs."
         )
         lines.append("Reply-Draft Callback: When you have a draft reply ready, call the submit_draft tool with:")
         lines.append(f'- jobId: "{callback_job_id}"')
@@ -5448,7 +5449,7 @@ def _record_merged_flow_path(path):
                     f"({streak}); callback pipe may be dead. Check submit_draft tool exposure, "
                     "plugin callbackUrl, and webhook callback URL reachability."
                 )
-        elif path == "callback_lost":
+        elif path in {"callback_lost", "callback_unsafe_rejected"}:
             _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
 
 
@@ -6647,11 +6648,20 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             self.send_json_response(200, {"status": "lost", "reason": "timer already fired"})
             return
 
-        # Callback won — render the rich card with the agent's draft
+        # Callback won — validate safety and render the rich card
         created_at_ms = claimed.get("created_at_ms") or _now_ms()
         elapsed_ms = max(0, _now_ms() - int(created_at_ms))
         event = claimed.get("event") if isinstance(claimed, dict) else {}
         draft_id = event.get("auto_reply_draft_id") if isinstance(event, dict) else None
+
+        if not draft_model.is_customer_safe_draft(draft, max_chars=DIALPAD_DRAFT_CALLBACK_MAX_CHARS):
+            fallback_draft = claimed.get("fallback_draft") or ""
+            _render_merged_card(job_id, fallback_draft, claimed, path="callback_unsafe_rejected", elapsed_ms=elapsed_ms)
+            print(f"⚠️ [merged-flow] job_id={job_id} path=callback_unsafe_rejected "
+                  f"draft rejected due to unsafe/cross-context content: {draft[:80]!r} {_merged_flow_counter_suffix()}")
+            self.send_json_response(200, {"status": "rejected", "reason": "unsafe_draft", "jobId": job_id})
+            return
+
         callback_reply_policy = classify_sms_reply_policy(draft)
         if _persist_callback_draft_text(draft_id, draft, reply_policy=callback_reply_policy):
             if isinstance(event, dict):

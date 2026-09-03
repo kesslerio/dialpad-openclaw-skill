@@ -796,15 +796,26 @@ def test_draft_model_rejects_code_and_cross_context_tool_leakage():
         "Here is the code: let x = 42; <script>alert(1)</script>",
         "Checking openclaw tool_calls for dialpad-draft-callback",
         "/home/user/code/index.ts was executed",
+        "def compute_total(scans): return scans * 10",
+        "import requests\nres = requests.get('http://api.com')",
+        "from os import path",
+        "class ModelTrainer(object): pass",
+        "const fn = () => { return 123; }",
     )
     for unsafe in unsafe_drafts:
         assert draft_model._customer_safe_text(unsafe) == "", f"Expected unsafe for: {unsafe}"
         assert draft_model.is_customer_safe_draft(unsafe) is False, f"Expected unsafe for: {unsafe}"
         assert draft_model._safe_message(unsafe, event, config, "there") is None, f"Expected rejected for: {unsafe}"
 
-    safe_draft = "Hi Alex, thanks for getting back to us. We would love to show you how ShapeScale works. Are you available for a quick demo tomorrow?"
-    assert draft_model._customer_safe_text(safe_draft) == safe_draft
-    assert draft_model.is_customer_safe_draft(safe_draft) is True
+    safe_drafts = (
+        "Hi Alex, thanks for getting back to us. We would love to show you how ShapeScale works. Are you available for a quick demo tomorrow?",
+        "Our booking function (available now) makes it easy to schedule. Check it out at https://bysha.pe/book-demo",
+        "Step 1 => pick a time, step 2 => we hop on a demo call. https://bysha.pe/book-demo",
+        "We can hold a 3D scanning class for your fitness trainers next week.",
+    )
+    for safe in safe_drafts:
+        assert draft_model._customer_safe_text(safe) == safe, f"Expected safe for: {safe}"
+        assert draft_model.is_customer_safe_draft(safe) is True, f"Expected safe for: {safe}"
 
 
 def test_contact_sync_omits_public_summary_from_suggested_contact(monkeypatch):

@@ -5449,7 +5449,7 @@ def _record_merged_flow_path(path):
                     f"({streak}); callback pipe may be dead. Check submit_draft tool exposure, "
                     "plugin callbackUrl, and webhook callback URL reachability."
                 )
-        elif path == "callback_lost":
+        elif path in {"callback_lost", "callback_unsafe_rejected"}:
             _MERGED_FLOW_COUNTERS["consecutive_fallback"] = 0
 
 
@@ -6655,11 +6655,10 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         draft_id = event.get("auto_reply_draft_id") if isinstance(event, dict) else None
 
         if not draft_model.is_customer_safe_draft(draft, max_chars=DIALPAD_DRAFT_CALLBACK_MAX_CHARS):
-            _record_merged_flow_path("callback_unsafe_rejected")
-            print(f"⚠️ [merged-flow] job_id={job_id} path=callback_unsafe_rejected "
-                  f"draft rejected due to unsafe/cross-context content: {draft[:80]!r} {_merged_flow_counter_suffix()}")
             fallback_draft = claimed.get("fallback_draft") or ""
             _render_merged_card(job_id, fallback_draft, claimed, path="callback_unsafe_rejected", elapsed_ms=elapsed_ms)
+            print(f"⚠️ [merged-flow] job_id={job_id} path=callback_unsafe_rejected "
+                  f"draft rejected due to unsafe/cross-context content: {draft[:80]!r} {_merged_flow_counter_suffix()}")
             self.send_json_response(200, {"status": "rejected", "reason": "unsafe_draft", "jobId": job_id})
             return
 

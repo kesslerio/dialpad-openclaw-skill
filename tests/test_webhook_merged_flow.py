@@ -898,6 +898,9 @@ def test_draft_callback_rejects_unsafe_code_and_renders_fallback(monkeypatch, tm
     telegram_sends = []
     monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
 
+    with webhook_server._MERGED_FLOW_COUNTER_LOCK:
+        webhook_server._MERGED_FLOW_COUNTERS["consecutive_fallback"] = 3
+
     unsafe_code_draft = "YOURLS-MCP plugin detected.\nconst res = await fetch('http://bad.com');"
     handler, status = _build_handler(
         {"jobId": "job-code-1", "draft": unsafe_code_draft},
@@ -913,6 +916,8 @@ def test_draft_callback_rejects_unsafe_code_and_renders_fallback(monkeypatch, tm
     assert "Safe deterministic fallback reply from ShapeScale" in telegram_sends[0]
     assert "YOURLS" not in telegram_sends[0]
     assert "const res" not in telegram_sends[0]
+    with webhook_server._MERGED_FLOW_COUNTER_LOCK:
+        assert webhook_server._MERGED_FLOW_COUNTERS["consecutive_fallback"] == 0
 
 
 def test_draft_callback_rejects_markdown_code_fences_and_renders_fallback(monkeypatch, tmp_path):

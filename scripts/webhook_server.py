@@ -288,12 +288,30 @@ SENSITIVE_KEYWORD_PATTERNS = (
 CODE_TOKEN_PATTERN = re.compile(r"\b(?:\d[\s-]?){4,8}\b")
 CALLS_ENDPOINT = "https://dialpad.com/api/v2/call"
 
-OPT_OUT_PATTERNS = (
-    re.compile(r"^\s*(stop|stopall|unsubscribe|cancel|end|quit)\s*[.!]?\s*$", re.IGNORECASE),
-    re.compile(r"\bstop\s+(texting|messaging|calling|contacting|reaching out|sending)\b", re.IGNORECASE),
-    re.compile(r"\b(unsubscribe|remove me|do not contact|don't contact)\b", re.IGNORECASE),
-    re.compile(r"\b(do not|don't|please don't)\s+bother me\b", re.IGNORECASE),
+STANDALONE_OPT_OUT_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(stop|stopall|unsubscribe|cancel|end|quit)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+DIRECT_OPT_OUT_PATTERNS = (
+    re.compile(r"\bstop\s+(?:texting|messaging|calling|contacting|reaching out|sending)\b", re.IGNORECASE),
+    re.compile(r"\b(?:please\s+)?(?:unsubscribe\s+me|remove\s+me|take\s+me\s+off(?:\s+your\s+list)?|opt\s+me\s+out)\b", re.IGNORECASE),
+    re.compile(r"\b(?:do not|don't|please don't)\s+(?:contact|text|message|call|reach out to)\s+(?:me|us)\b", re.IGNORECASE),
+    re.compile(r"\b(?:do not|don't|please don't)\s+bother me\b", re.IGNORECASE),
     re.compile(r"\bleave me alone\b", re.IGNORECASE),
+    re.compile(r"\b(?:do not|don't|stop)\s+(?:send|sending)\s+(?:me\s+)?(?:any\s+)?(?:more\s+)?(?:messages|texts|sms|emails)\b", re.IGNORECASE),
+)
+
+COMPLIANCE_BOILERPLATE_PATTERNS = (
+    re.compile(r"\b(?:reply|text|send)\s+(?:stop|stopall|unsubscribe|cancel|end|quit)\s+(?:to\s+)?(?:unsubscribe|stop|opt[\s-]*out|cancel|end)\b", re.IGNORECASE),
+    re.compile(r"\bto\s+(?:unsubscribe|opt[\s-]*out|stop receiving messages)[,\s]+(?:reply|text|send)\s+(?:stop|stopall|unsubscribe|cancel|end|quit)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reply|text|send)\s+stop\s+to\s+(?:unsubscribe|opt[\s-]*out|cancel|stop)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reply|text|send)\s+stop\s+(?:to\s+)?(?:opt[\s-]*out|unsubscribe|cancel)\b", re.IGNORECASE),
+)
+
+OPT_OUT_PATTERNS = (
+    STANDALONE_OPT_OUT_PATTERN,
+    *DIRECT_OPT_OUT_PATTERNS,
 )
 
 RISKY_REPLY_PATTERNS = (
@@ -846,15 +864,29 @@ def is_sensitive_message(text="", sender="", contact_number=""):
 def classify_sms_reply_policy(text):
     """Classify inbound text for deterministic SMS reply safety."""
     body = str(text or "")
-    for pattern in OPT_OUT_PATTERNS:
-        if pattern.search(body):
+    if STANDALONE_OPT_OUT_PATTERN.search(body):
+        return {
+            "state": "blocked_opt_out",
+            "reason_code": "filtered_opt_out",
+            "risk_reason": "explicit opt-out language",
+        }
+
+    # Strip instructional compliance boilerplate from multi-sentence / auto-reply text
+    # before evaluating direct opt-out phrases so "Reply STOP to unsubscribe" is not treated
+    # as an opt-out request from the sender.
+    eval_text = body
+    for boilerplate in COMPLIANCE_BOILERPLATE_PATTERNS:
+        eval_text = boilerplate.sub(" ", eval_text)
+
+    for pattern in DIRECT_OPT_OUT_PATTERNS:
+        if pattern.search(eval_text):
             return {
                 "state": "blocked_opt_out",
                 "reason_code": "filtered_opt_out",
                 "risk_reason": "explicit opt-out language",
             }
     for pattern in RISKY_REPLY_PATTERNS:
-        if pattern.search(body):
+        if pattern.search(eval_text):
             return {
                 "state": "risky",
                 "reason_code": "risky_confirmation_required",

@@ -289,24 +289,26 @@ CODE_TOKEN_PATTERN = re.compile(r"\b(?:\d[\s-]?){4,8}\b")
 CALLS_ENDPOINT = "https://dialpad.com/api/v2/call"
 
 STANDALONE_OPT_OUT_PATTERN = re.compile(
-    r"^\s*(?:please\s+)?(stop|stopall|unsubscribe|cancel|end|quit)\s*[.!]?\s*$",
+    r"^\s*[\"']?(?:please\s+)?(stop\s*all|stop|unsubscribe|cancel|end|quit|opt[\s-]*out)(?:\s+please)?[\"']?\s*[.!?,;:'\"\\s]*$",
     re.IGNORECASE,
 )
 
 DIRECT_OPT_OUT_PATTERNS = (
     re.compile(r"\bstop\s+(?:texting|messaging|calling|contacting|reaching out|sending)\b", re.IGNORECASE),
-    re.compile(r"\b(?:please\s+)?(?:unsubscribe\s+me|remove\s+me|take\s+me\s+off(?:\s+your\s+list)?|opt\s+me\s+out)\b", re.IGNORECASE),
-    re.compile(r"\b(?:do not|don't|please don't)\s+(?:contact|text|message|call|reach out to)\s+(?:me|us)\b", re.IGNORECASE),
+    re.compile(r"\b(?:please\s+)?(?:unsubscribe(?:\s+me)?|remove\s+me|take\s+me\s+off(?:\s+your\s+list)?|opt\s+me\s+out|opt[\s-]*out)\b", re.IGNORECASE),
+    re.compile(r"\b(?:do not|don't|please don't)\s+(?:contact|text|message|call|reach out to)(?:\s+(?:me|us))?\b", re.IGNORECASE),
     re.compile(r"\b(?:do not|don't|please don't)\s+bother me\b", re.IGNORECASE),
     re.compile(r"\bleave me alone\b", re.IGNORECASE),
     re.compile(r"\b(?:do not|don't|stop)\s+(?:send|sending)\s+(?:me\s+)?(?:any\s+)?(?:more\s+)?(?:messages|texts|sms|emails)\b", re.IGNORECASE),
+    re.compile(r"\bunsubscribe\b", re.IGNORECASE),
+    re.compile(r"\bopt[\s-]*out\b", re.IGNORECASE),
 )
 
 COMPLIANCE_BOILERPLATE_PATTERNS = (
-    re.compile(r"\b(?:reply|text|send)\s+(?:stop|stopall|unsubscribe|cancel|end|quit)\s+(?:to\s+)?(?:unsubscribe|stop|opt[\s-]*out|cancel|end)\b", re.IGNORECASE),
-    re.compile(r"\bto\s+(?:unsubscribe|opt[\s-]*out|stop receiving messages)[,\s]+(?:reply|text|send)\s+(?:stop|stopall|unsubscribe|cancel|end|quit)\b", re.IGNORECASE),
-    re.compile(r"\b(?:reply|text|send)\s+stop\s+to\s+(?:unsubscribe|opt[\s-]*out|cancel|stop)\b", re.IGNORECASE),
-    re.compile(r"\b(?:reply|text|send)\s+stop\s+(?:to\s+)?(?:opt[\s-]*out|unsubscribe|cancel)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reply|text|send)\s+(?:stop\s*all|stop|unsubscribe|cancel|end|quit)\s+(?:to\s+)?(?:unsubscribe|stop|opt[\s-]*out|cancel|end|stop receiving messages)(?!\s+(?:me|us)\b)\b", re.IGNORECASE),
+    re.compile(r"\bto\s+(?:unsubscribe|opt[\s-]*out|stop receiving messages)[,\s]+(?:reply|text|send)\s+(?:stop\s*all|stop|unsubscribe|cancel|end|quit)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reply|text|send)\s+stop\s+to\s+(?:unsubscribe|opt[\s-]*out|cancel|stop)(?!\s+(?:me|us)\b)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reply|text|send)\s+stop\s+(?:to\s+)?(?:opt[\s-]*out|unsubscribe|cancel)(?!\s+(?:me|us)\b)\b", re.IGNORECASE),
 )
 
 OPT_OUT_PATTERNS = (

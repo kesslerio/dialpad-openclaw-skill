@@ -2151,7 +2151,30 @@ class OpenClawHookErrorLoggingTests(unittest.TestCase):
 
 class ClassifySmsReplyPolicyTests(unittest.TestCase):
     def test_standalone_opt_out_keywords(self):
-        for keyword in ("STOP", "stop", "stop.", "STOPALL", "unsubscribe", "UNSUBSCRIBE", "cancel", "Cancel.", "end", "quit"):
+        for keyword in (
+            "STOP",
+            "stop",
+            "stop.",
+            "stop!",
+            "stop?",
+            "stop,",
+            "STOP!!",
+            '"STOP"',
+            "'stop'",
+            "stop please",
+            "please stop",
+            "STOP ALL",
+            "STOPALL",
+            "unsubscribe",
+            "UNSUBSCRIBE",
+            "cancel",
+            "Cancel.",
+            "end",
+            "quit",
+            "opt out",
+            "opt-out",
+            "please opt out",
+        ):
             policy = webhook_server.classify_sms_reply_policy(keyword)
             self.assertEqual(policy["state"], "blocked_opt_out", f"Failed for keyword: {keyword}")
             self.assertEqual(policy["reason_code"], "filtered_opt_out")
@@ -2163,13 +2186,22 @@ class ClassifySmsReplyPolicyTests(unittest.TestCase):
             "please stop calling",
             "Please unsubscribe me",
             "unsubscribe me from your list",
+            "unsubscribe please",
+            "I want to unsubscribe",
+            "Please unsubscribe",
+            "unsubscribe now",
+            "yes, unsubscribe",
             "remove me",
             "take me off your list",
             "do not contact me",
             "don't contact me",
+            "do not contact",
+            "please don't contact",
             "please don't bother me",
             "leave me alone",
             "do not send me any more messages",
+            "opt out of this",
+            "Text STOP to unsubscribe me from everything.",
         ):
             policy = webhook_server.classify_sms_reply_policy(phrase)
             self.assertEqual(policy["state"], "blocked_opt_out", f"Failed for phrase: {phrase}")

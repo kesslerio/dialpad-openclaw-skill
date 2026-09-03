@@ -26,8 +26,29 @@ UNSAFE_OUTPUT_PATTERNS = tuple(
         r"\bTitle:",
         r"@@\s+-\d",
         r"/home/",
+        r"/var/",
+        r"/tmp/",
         r"\.md\b",
         r"\.json\b",
+        r"\.js\b",
+        r"\.ts\b",
+        r"\.py\b",
+        r"```",
+        r"\b(?:const|let|var)\s+\w+\s*=",
+        r"\bfunction\s*\w*\s*\(",
+        r"=>",
+        r"console\.(?:log|error|warn|debug|info)",
+        r"<script\b",
+        r"</script>",
+        r"\b(?:yourls|yourls-mcp)\b",
+        r"\bmcp\b",
+        r"\bplugin[-_ ]detection\b",
+        r"\bsubmit_draft\b",
+        r"\bdialpad-draft-callback\b",
+        r"\bopenclaw\b",
+        r"\btool_calls?\b",
+        r"\bprocess\.env\b",
+        r"\bdocument\.(?:querySelector|getElementById|createElement)\b",
     )
 )
 UNSUPPORTED_SCHEDULE_CLAIM_RE = re.compile(
@@ -40,7 +61,10 @@ RAW_COMMS_CLAIM_RE = re.compile(
     r"\b(?:i|we)\s+(?:read|saw|found)\s+(?:your\s+)?(?:email|gmail|sms|text)\b",
     re.IGNORECASE,
 )
-INTERNAL_SOURCE_NAME_RE = re.compile(r"\b(?:attio|crm|gmail|qmd|provenance)\b", re.IGNORECASE)
+INTERNAL_SOURCE_NAME_RE = re.compile(
+    r"\b(?:attio|crm|gmail|qmd|provenance|yourls|yourls-mcp|mcp|plugin[-_ ]detection|openclaw)\b",
+    re.IGNORECASE,
+)
 LOW_CONF_PERSONAL_GREETING_RE = re.compile(r"^\s*(?:hi|hello|hey)\s+(?!there\b)[^,!.]{2,40}[,!.]?", re.IGNORECASE)
 PUBLIC_LOOKUP_CLAIM_RE = re.compile(
     r"\b(?:looked you up|found you online|found your business|saw your business|your business|your company|your organization|your role)\b",
@@ -196,6 +220,25 @@ def _approved_url_only(text, config):
             continue
         if clean_lower.startswith(f"{approved_lower}?"):
             continue
+        return False
+    return True
+
+
+def is_customer_safe_draft(text, max_chars=320, approved_booking_url="https://bysha.pe/book-demo"):
+    """Validate that draft text is safe for customer outbound SMS."""
+    if not isinstance(text, str):
+        return False
+    clean = " ".join(text.split())
+    if not clean or len(clean) > max_chars:
+        return False
+    if not _customer_safe_text(clean):
+        return False
+    config = DraftModelConfig(max_chars=max_chars, approved_booking_url=approved_booking_url)
+    if not _approved_url_only(clean, config):
+        return False
+    if RAW_COMMS_CLAIM_RE.search(clean):
+        return False
+    if INTERNAL_SOURCE_NAME_RE.search(clean):
         return False
     return True
 

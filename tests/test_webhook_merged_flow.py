@@ -876,3 +876,76 @@ def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, t
             "fallback": 2,
             "consecutive_fallback": 0,
         }
+
+
+def test_draft_callback_rejects_unsafe_code_and_renders_fallback(monkeypatch, tmp_path):
+    db_path = tmp_path / "pending.db"
+    webhook_server.insert_pending_draft(
+        "job-code-1",
+        {
+            "event_type": "sms",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "How much for 50 users?",
+            "auto_reply_draft_id": "smsdraft_code_1",
+            "reply_policy": {"state": "eligible"},
+        },
+        "Safe deterministic fallback reply from ShapeScale",
+        "expected-tok",
+        db_path=db_path,
+    )
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
+    telegram_sends = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
+
+    unsafe_code_draft = "YOURLS-MCP plugin detected.\nconst res = await fetch('http://bad.com');"
+    handler, status = _build_handler(
+        {"jobId": "job-code-1", "draft": unsafe_code_draft},
+        headers={"X-Callback-Token": "expected-tok"},
+    )
+    handler.handle_draft_callback()
+
+    assert status["code"] == 200
+    response_body = json.loads(handler.wfile.getvalue().decode())
+    assert response_body["status"] == "rejected"
+    assert response_body["reason"] == "unsafe_draft"
+    assert len(telegram_sends) == 1
+    assert "Safe deterministic fallback reply from ShapeScale" in telegram_sends[0]
+    assert "YOURLS" not in telegram_sends[0]
+    assert "const res" not in telegram_sends[0]
+
+
+def test_draft_callback_rejects_markdown_code_fences_and_renders_fallback(monkeypatch, tmp_path):
+    db_path = tmp_path / "pending.db"
+    webhook_server.insert_pending_draft(
+        "job-fence-1",
+        {
+            "event_type": "sms",
+            "sender_number": "+14155550123",
+            "recipient_number": "+14155201316",
+            "text": "We have 100 clients a month.",
+            "auto_reply_draft_id": "smsdraft_fence_1",
+            "reply_policy": {"state": "eligible"},
+        },
+        "Hi Alex, thanks for the info. Let's set up a demo.",
+        "expected-tok-2",
+        db_path=db_path,
+    )
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: db_path)
+    telegram_sends = []
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
+
+    unsafe_fence_draft = "```javascript\nconsole.log('client volume');\n```"
+    handler, status = _build_handler(
+        {"jobId": "job-fence-1", "draft": unsafe_fence_draft},
+        headers={"X-Callback-Token": "expected-tok-2"},
+    )
+    handler.handle_draft_callback()
+
+    assert status["code"] == 200
+    response_body = json.loads(handler.wfile.getvalue().decode())
+    assert response_body["status"] == "rejected"
+    assert len(telegram_sends) == 1
+    assert "Hi Alex, thanks for the info" in telegram_sends[0]
+    assert "```" not in telegram_sends[0]
+

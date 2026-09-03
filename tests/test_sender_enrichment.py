@@ -784,6 +784,29 @@ def test_draft_model_rejects_low_confidence_business_claims():
     ) is None
 
 
+def test_draft_model_rejects_code_and_cross_context_tool_leakage():
+    event = _unknown_sales_event()
+    config = draft_model.DraftModelConfig()
+
+    unsafe_drafts = (
+        "YOURLS-MCP plugin detected. Loading configuration...",
+        "const response = await fetch('https://example.com');",
+        "```javascript\nconsole.log('test');\n```",
+        "function handleCallback() { return true; }",
+        "Here is the code: let x = 42; <script>alert(1)</script>",
+        "Checking openclaw tool_calls for dialpad-draft-callback",
+        "/home/user/code/index.ts was executed",
+    )
+    for unsafe in unsafe_drafts:
+        assert draft_model._customer_safe_text(unsafe) == "", f"Expected unsafe for: {unsafe}"
+        assert draft_model.is_customer_safe_draft(unsafe) is False, f"Expected unsafe for: {unsafe}"
+        assert draft_model._safe_message(unsafe, event, config, "there") is None, f"Expected rejected for: {unsafe}"
+
+    safe_draft = "Hi Alex, thanks for getting back to us. We would love to show you how ShapeScale works. Are you available for a quick demo tomorrow?"
+    assert draft_model._customer_safe_text(safe_draft) == safe_draft
+    assert draft_model.is_customer_safe_draft(safe_draft) is True
+
+
 def test_contact_sync_omits_public_summary_from_suggested_contact(monkeypatch):
     event = _unknown_sales_event()
     event["caller_intelligence"] = {

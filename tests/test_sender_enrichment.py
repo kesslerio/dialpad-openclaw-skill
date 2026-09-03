@@ -3682,6 +3682,54 @@ def test_stop_by_phrase_does_not_create_permanent_opt_out(monkeypatch, tmp_path)
     assert opted_out is False
 
 
+def test_closed_office_autoresponder_with_boilerplate_does_not_opt_out(monkeypatch, tmp_path):
+    hook_calls = []
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: tmp_path / "dedupe.db")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
+    monkeypatch.setattr(
+        webhook_server,
+        "handle_sms_webhook",
+        lambda _data: {"stored": True, "message": {"contact_name": "Unknown"}},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_contact_enrichment",
+        lambda _number: {
+            "contact_name": None,
+            "status": "not_found",
+            "degraded": False,
+            "degraded_reason": None,
+        },
+    )
+    monkeypatch.setattr(webhook_server, "DIALPAD_SMS_TELEGRAM_NOTIFY", False)
+    monkeypatch.setattr(webhook_server, "send_to_telegram", lambda _text: True)
+    monkeypatch.setattr(
+        webhook_server,
+        "send_sms_to_openclaw_hooks",
+        lambda normalized_sms, line_display=None: hook_calls.append(normalized_sms) or (True, "http_200"),
+    )
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Thank you for reaching out to ACME Clinic. Our office is closed until Monday 8am. Reply STOP to unsubscribe.",
+    }
+    handler, status = _build_handler(payload)
+    webhook_server.DialpadWebhookHandler.handle_webhook(handler)
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
+    finally:
+        conn.close()
+    assert status["code"] == 200
+    # Closed-office autoresponders with boilerplate must not trigger opt-out persistence or blocking
+    assert hook_calls
+    assert opted_out is False
+
+
 def test_second_inbound_without_conversation_id_invalidates_previous_draft(monkeypatch, tmp_path):
     monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
     monkeypatch.setattr(webhook_server, "_sms_dedupe_db_path", lambda: tmp_path / "dedupe.db")

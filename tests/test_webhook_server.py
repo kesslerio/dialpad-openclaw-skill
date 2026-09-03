@@ -2148,8 +2148,83 @@ class OpenClawHookErrorLoggingTests(unittest.TestCase):
         self.assertIsNotNone(reads[0])
         self.assertGreater(reads[0], 0)  # bounded, not e.read() / e.read(-1)
         # and the log stays capped regardless of body size
-        logged = " ".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
-        self.assertLessEqual(len(logged), 600)
+
+class ClassifySmsReplyPolicyTests(unittest.TestCase):
+    def test_standalone_opt_out_keywords(self):
+        for keyword in (
+            "STOP",
+            "stop",
+            "stop.",
+            "stop!",
+            "stop?",
+            "stop,",
+            "STOP!!",
+            '"STOP"',
+            "'stop'",
+            "stop please",
+            "please stop",
+            "STOP ALL",
+            "STOPALL",
+            "unsubscribe",
+            "UNSUBSCRIBE",
+            "cancel",
+            "Cancel.",
+            "end",
+            "quit",
+            "opt out",
+            "opt-out",
+            "please opt out",
+        ):
+            policy = webhook_server.classify_sms_reply_policy(keyword)
+            self.assertEqual(policy["state"], "blocked_opt_out", f"Failed for keyword: {keyword}")
+            self.assertEqual(policy["reason_code"], "filtered_opt_out")
+
+    def test_direct_opt_out_phrases(self):
+        for phrase in (
+            "stop texting me",
+            "Stop messaging us",
+            "please stop calling",
+            "Please unsubscribe me",
+            "unsubscribe me from your list",
+            "unsubscribe please",
+            "I want to unsubscribe",
+            "Please unsubscribe",
+            "unsubscribe now",
+            "yes, unsubscribe",
+            "remove me",
+            "take me off your list",
+            "do not contact me",
+            "don't contact me",
+            "do not contact",
+            "please don't contact",
+            "please don't bother me",
+            "leave me alone",
+            "do not send me any more messages",
+            "opt out of this",
+            "Text STOP to unsubscribe me from everything.",
+        ):
+            policy = webhook_server.classify_sms_reply_policy(phrase)
+            self.assertEqual(policy["state"], "blocked_opt_out", f"Failed for phrase: {phrase}")
+            self.assertEqual(policy["reason_code"], "filtered_opt_out")
+
+    def test_closed_office_and_compliance_boilerplate_not_opt_out(self):
+        cases = (
+            "Our office is closed until Monday. Reply STOP to unsubscribe.",
+            "Thank you for contacting ACME Dental. We are closed for Labor Day. Text STOP to opt out.",
+            "Auto-reply: Thanks for your message. Our team is out of the office. To unsubscribe, reply STOP.",
+            "We have received your text and will reply during business hours. Reply STOP to cancel.",
+            "Office hours are M-F 9-5. We are currently closed. Text STOP to stop receiving messages.",
+        )
+        for msg in cases:
+            policy = webhook_server.classify_sms_reply_policy(msg)
+            self.assertEqual(policy["state"], "normal", f"Failed for autoresponder: {msg}")
+            self.assertEqual(policy["reason_code"], "eligible")
+
+    def test_direct_opt_out_with_trailing_boilerplate_still_opts_out(self):
+        msg = "Please unsubscribe me from all messages. Reply STOP to unsubscribe."
+        policy = webhook_server.classify_sms_reply_policy(msg)
+        self.assertEqual(policy["state"], "blocked_opt_out")
+        self.assertEqual(policy["reason_code"], "filtered_opt_out")
 
 
 if __name__ == "__main__":

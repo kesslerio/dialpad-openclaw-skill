@@ -544,6 +544,18 @@ def test_claim_missed_call_notification_burst_deduplication(tmp_path):
     assert second["duplicate"] is True
     assert second["status"] == "burst_duplicate"
 
+    # Dialpad retries leg 2 after burst window expires (65 seconds later).
+    # Its primary key should have been claimed in leg 2, so retry is duplicate (not claimed).
+    leg2_retry = claim_missed_call_notification(
+        leg2_dedupe,
+        burst_key=burst_key,
+        db_path=db_path,
+        now_ms=base_ts + 80000,
+    )
+    assert leg2_retry["claimed"] is False
+    assert leg2_retry["duplicate"] is True
+    assert leg2_retry["status"] == "duplicate"
+
 
 def test_claim_missed_call_notification_burst_window_expiry(tmp_path):
     db_path = tmp_path / "approvals.db"

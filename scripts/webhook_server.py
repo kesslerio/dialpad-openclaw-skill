@@ -1732,45 +1732,53 @@ def claim_missed_call_notification(dedupe_key, *, burst_key=None, db_path=None, 
         conn = _init_missed_call_dedupe_db(db_path=db_path)
         try:
             # 1. Burst key deduplication: suppress rapid multi-leg arrivals for same caller+line (< 60s)
+            is_burst_duplicate = False
             if b_key:
-                cur = conn.execute(
-                    f"SELECT first_seen_at_ms, last_seen_at_ms, duplicate_count FROM {MISSED_CALL_DEDUPE_TABLE} WHERE dedupe_key = ?",
-                    (b_key,),
+                # Atomically attempt to claim this burst window
+                cursor = conn.execute(
+                    f"INSERT OR IGNORE INTO {MISSED_CALL_DEDUPE_TABLE} (dedupe_key, first_seen_at_ms, last_seen_at_ms, duplicate_count) VALUES (?, ?, ?, 0)",
+                    (b_key, timestamp_ms, timestamp_ms),
                 )
-                row = cur.fetchone()
-                if row:
-                    first_seen, last_seen, count = row
-                    if timestamp_ms - first_seen < MISSED_CALL_BURST_WINDOW_MS:
-                        conn.execute(
-                            f"UPDATE {MISSED_CALL_DEDUPE_TABLE} SET last_seen_at_ms = ?, duplicate_count = ? WHERE dedupe_key = ?",
-                            (timestamp_ms, count + 1, b_key),
-                        )
-                        conn.commit()
-                        return {
-                            "claimed": False,
-                            "duplicate": True,
-                            "key": key,
-                            "burst_key": b_key,
-                            "status": "burst_duplicate",
-                        }
-                    else:
-                        # Burst window expired; reset window for new call burst
-                        conn.execute(
-                            f"UPDATE {MISSED_CALL_DEDUPE_TABLE} SET first_seen_at_ms = ?, last_seen_at_ms = ?, duplicate_count = 0 WHERE dedupe_key = ?",
-                            (timestamp_ms, timestamp_ms, b_key),
-                        )
-                else:
-                    conn.execute(
-                        f"INSERT INTO {MISSED_CALL_DEDUPE_TABLE} (dedupe_key, first_seen_at_ms, last_seen_at_ms, duplicate_count) VALUES (?, ?, ?, 0)",
-                        (b_key, timestamp_ms, timestamp_ms),
+                if cursor.rowcount == 0:
+                    # Row already existed; check if within burst window
+                    cur = conn.execute(
+                        f"SELECT first_seen_at_ms, duplicate_count FROM {MISSED_CALL_DEDUPE_TABLE} WHERE dedupe_key = ?",
+                        (b_key,),
                     )
+                    row = cur.fetchone()
+                    if row:
+                        first_seen, count = row
+                        if timestamp_ms - first_seen < MISSED_CALL_BURST_WINDOW_MS:
+                            # Inside active burst window; record burst suppression but do not claim
+                            conn.execute(
+                                f"UPDATE {MISSED_CALL_DEDUPE_TABLE} SET last_seen_at_ms = ?, duplicate_count = ? WHERE dedupe_key = ?",
+                                (timestamp_ms, count + 1, b_key),
+                            )
+                            is_burst_duplicate = True
+                        else:
+                            # Window expired: start new burst window
+                            conn.execute(
+                                f"UPDATE {MISSED_CALL_DEDUPE_TABLE} SET first_seen_at_ms = ?, last_seen_at_ms = ?, duplicate_count = 0 WHERE dedupe_key = ?",
+                                (timestamp_ms, timestamp_ms, b_key),
+                            )
 
-            claimed = _claim_dedupe_row(
+            # 2. Claim primary dedupe key to ensure retry idempotency across window boundaries
+            claimed_primary = _claim_dedupe_row(
                 conn, MISSED_CALL_DEDUPE_TABLE, MISSED_CALL_DEDUPE_RETENTION_MS, key, timestamp_ms
             )
+
+            if is_burst_duplicate:
+                return {
+                    "claimed": False,
+                    "duplicate": True,
+                    "key": key,
+                    "burst_key": b_key,
+                    "status": "burst_duplicate",
+                }
         finally:
             conn.close()
-        if claimed:
+
+        if claimed_primary:
             return {"claimed": True, "duplicate": False, "key": key, "burst_key": b_key, "status": "claimed"}
         return {"claimed": False, "duplicate": True, "key": key, "burst_key": b_key, "status": "duplicate"}
     except Exception as exc:  # noqa: BLE001 - webhook notifications should fail open.

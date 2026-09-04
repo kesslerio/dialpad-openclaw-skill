@@ -51,6 +51,7 @@ import sqlite3
 import subprocess
 import threading
 import secrets
+import socket
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -128,6 +129,7 @@ OPENCLAW_HOOKS_TO = os.environ.get("OPENCLAW_HOOKS_TO", "")
 OPENCLAW_HOOKS_AGENT_ID = os.environ.get("OPENCLAW_HOOKS_AGENT_ID", "")
 OPENCLAW_HOOKS_SMS_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_SMS_ENABLED"), False)
 OPENCLAW_HOOKS_CALL_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_CALL_ENABLED"), False)
+OPENCLAW_HOOKS_CLIENT_IP = os.environ.get("OPENCLAW_HOOKS_CLIENT_IP", "")
 DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY = parse_bool_env(
     os.environ.get("DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY"),
     False,
@@ -217,6 +219,7 @@ CALL_CONTEXT_FIELDS = {
 }
 MISSED_CALL_DEDUPE_TABLE = "missed_call_webhook_events"
 MISSED_CALL_DEDUPE_FALLBACK_BUCKET_MS = 60 * 1000
+MISSED_CALL_BURST_WINDOW_MS = 60 * 1000
 MISSED_CALL_DEDUPE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 SMS_DEDUPE_TABLE = "sms_webhook_events"
@@ -1633,6 +1636,16 @@ def build_missed_call_dedupe_key(data, resolved_context):
     return f"missed-call:fingerprint:{sender_number or 'unknown'}:{recipient_number or 'unknown'}:{bucket}:{payload_fingerprint}"
 
 
+def build_missed_call_burst_key(data, resolved_context):
+    """Build a sliding burst deduplication key for caller+line legs of a missed call."""
+    resolved_context = resolved_context or {}
+    sender_number = normalize_phone_number(resolved_context.get("from_number"))
+    recipient_number = normalize_phone_number(resolved_context.get("to_number"))
+    if sender_number and recipient_number and sender_number != "Unknown":
+        return f"missed-call:burst:{sender_number}:{recipient_number}"
+    return None
+
+
 def _apply_sqlite_concurrency_pragmas(conn):
     """Make a connection safe for concurrent webhook threads sharing sms_approvals.db.
 
@@ -1707,27 +1720,70 @@ def _init_missed_call_dedupe_db(db_path=None):
     return conn
 
 
-def claim_missed_call_notification(dedupe_key, *, db_path=None, now_ms=None):
+def claim_missed_call_notification(dedupe_key, *, burst_key=None, db_path=None, now_ms=None):
     """Atomically claim a missed-call notification key, failing open if storage is unavailable."""
     key = _clean_identifier(dedupe_key)
+    b_key = _clean_identifier(burst_key)
     if not key:
-        return {"claimed": True, "duplicate": False, "key": None, "status": "key_missing"}
+        return {"claimed": True, "duplicate": False, "key": None, "burst_key": b_key, "status": "key_missing"}
 
     timestamp_ms = _now_ms() if now_ms is None else now_ms
     try:
         conn = _init_missed_call_dedupe_db(db_path=db_path)
         try:
-            claimed = _claim_dedupe_row(
+            # 1. Burst key deduplication: suppress rapid multi-leg arrivals for same caller+line (< 60s)
+            is_burst_duplicate = False
+            if b_key:
+                # Atomically attempt to claim this burst window
+                cursor = conn.execute(
+                    f"INSERT OR IGNORE INTO {MISSED_CALL_DEDUPE_TABLE} (dedupe_key, first_seen_at_ms, last_seen_at_ms, duplicate_count) VALUES (?, ?, ?, 0)",
+                    (b_key, timestamp_ms, timestamp_ms),
+                )
+                if cursor.rowcount == 0:
+                    # Row already existed; check if within burst window
+                    cur = conn.execute(
+                        f"SELECT first_seen_at_ms, duplicate_count FROM {MISSED_CALL_DEDUPE_TABLE} WHERE dedupe_key = ?",
+                        (b_key,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        first_seen, count = row
+                        if timestamp_ms - first_seen < MISSED_CALL_BURST_WINDOW_MS:
+                            # Inside active burst window; record burst suppression but do not claim
+                            conn.execute(
+                                f"UPDATE {MISSED_CALL_DEDUPE_TABLE} SET last_seen_at_ms = ?, duplicate_count = ? WHERE dedupe_key = ?",
+                                (timestamp_ms, count + 1, b_key),
+                            )
+                            is_burst_duplicate = True
+                        else:
+                            # Window expired: start new burst window
+                            conn.execute(
+                                f"UPDATE {MISSED_CALL_DEDUPE_TABLE} SET first_seen_at_ms = ?, last_seen_at_ms = ?, duplicate_count = 0 WHERE dedupe_key = ?",
+                                (timestamp_ms, timestamp_ms, b_key),
+                            )
+
+            # 2. Claim primary dedupe key to ensure retry idempotency across window boundaries
+            claimed_primary = _claim_dedupe_row(
                 conn, MISSED_CALL_DEDUPE_TABLE, MISSED_CALL_DEDUPE_RETENTION_MS, key, timestamp_ms
             )
+
+            if is_burst_duplicate:
+                return {
+                    "claimed": False,
+                    "duplicate": True,
+                    "key": key,
+                    "burst_key": b_key,
+                    "status": "burst_duplicate",
+                }
         finally:
             conn.close()
-        if claimed:
-            return {"claimed": True, "duplicate": False, "key": key, "status": "claimed"}
-        return {"claimed": False, "duplicate": True, "key": key, "status": "duplicate"}
+
+        if claimed_primary:
+            return {"claimed": True, "duplicate": False, "key": key, "burst_key": b_key, "status": "claimed"}
+        return {"claimed": False, "duplicate": True, "key": key, "burst_key": b_key, "status": "duplicate"}
     except Exception as exc:  # noqa: BLE001 - webhook notifications should fail open.
         print(f"⚠️  Missed-call dedupe unavailable ({type(exc).__name__})")
-        return {"claimed": True, "duplicate": False, "key": key, "status": "dedupe_unavailable"}
+        return {"claimed": True, "duplicate": False, "key": key, "burst_key": b_key, "status": "dedupe_unavailable"}
 
 
 def _sms_dedupe_db_path():
@@ -2460,15 +2516,24 @@ def _extract_call_history_row(call):
     }
 
 
-def _fetch_recent_calls_around(event_ts_ms, window_ms=30 * 60 * 1000, limit=25):
+def _fetch_recent_calls_around(event_ts_ms, window_ms=30 * 60 * 1000, limit=25, now_ms=None):
     if not DIALPAD_API_KEY or event_ts_ms is None:
         return []
 
+    current_ms = _now_ms() if now_ms is None else now_ms
+    started_after = max(0, event_ts_ms - window_ms)
+    # Dialpad API rejects future timestamps with HTTP 400 "Timestamp range cannot be in the future."
+    started_before = min(current_ms, event_ts_ms + window_ms)
+    if started_after >= started_before:
+        started_after = max(0, started_before - window_ms)
+
     params = {
-        "started_after": str(max(0, event_ts_ms - window_ms)),
-        "started_before": str(event_ts_ms + window_ms),
-        "limit": str(limit),
+        "started_after": str(started_after),
+        "started_before": str(started_before),
     }
+    if limit is not None and limit <= 100:
+        params["limit"] = str(limit)
+
     url = f"{CALLS_ENDPOINT}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(
         url,
@@ -5367,6 +5432,25 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
     return payload
 
 
+def _resolve_openclaw_client_ip():
+    """Resolve client IP address for OpenClaw gateway proxy client attribution."""
+    configured = _clean_identifier(os.environ.get("OPENCLAW_HOOKS_CLIENT_IP") or OPENCLAW_HOOKS_CLIENT_IP)
+    if configured:
+        return configured
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("192.168.4.1", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+        finally:
+            s.close()
+    except Exception:
+        pass
+    return "10.0.0.1"
+
+
 def send_to_openclaw_hooks(normalized_event, line_display=None):
     """
     Forward a normalized event payload to OpenClaw hooks.
@@ -5390,13 +5474,15 @@ def send_to_openclaw_hooks(normalized_event, line_display=None):
 
     url = get_openclaw_hooks_url()
     data = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENCLAW_HOOKS_TOKEN}",
+        "X-Forwarded-For": _resolve_openclaw_client_ip(),
+    }
     req = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENCLAW_HOOKS_TOKEN}",
-        },
+        headers=headers,
     )
 
     try:
@@ -6323,8 +6409,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 data.get("start_time") or
                 data.get("timestamp")
             )
+            burst_key = build_missed_call_burst_key(data, resolved)
             missed_call_dedupe_key = build_missed_call_dedupe_key(data, resolved)
-            dedupe_claim = claim_missed_call_notification(missed_call_dedupe_key)
+            dedupe_claim = claim_missed_call_notification(missed_call_dedupe_key, burst_key=burst_key)
             duplicate = bool(dedupe_claim.get("duplicate"))
             missed_call_dedupe_status = dedupe_claim.get("status")
             if duplicate:
@@ -6355,28 +6442,35 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001 - process once even if the client disconnected mid-ACK.
                 print("⚠️  Missed-call ACK write failed (client disconnect); processing anyway")
 
-            resolved = resolve_missed_call_context(data)
-            from_num = resolved["from_number"]
-            to_num = resolved["to_number"]
-            call_ts = resolved["event_ts_ms"] or call_ts
-            canonical_dedupe_key = build_missed_call_dedupe_key(data, resolved)
-            if canonical_dedupe_key != missed_call_dedupe_key:
-                canonical_claim = claim_missed_call_notification(canonical_dedupe_key)
-                duplicate = bool(canonical_claim.get("duplicate"))
-                missed_call_dedupe_key = canonical_dedupe_key
-                missed_call_dedupe_status = canonical_claim.get("status")
-                if duplicate:
-                    print(f"[{datetime.now().isoformat()}]")
-                    print(f"   📞 MISSED CALL duplicate suppressed after backfill: {from_num} -> {resolved['line_display'] or get_line_name(to_num) or 'Unknown'}")
-                    print(f"   🧷 Dedupe: {missed_call_dedupe_key} ({missed_call_dedupe_status})")
-                    call_id = data.get("call_id") or data.get("id")
-                    entry_point_call_id = data.get("entry_point_call_id")
-                    if call_id:
-                        print(f"   📞 Call ID: {call_id}")
-                    if entry_point_call_id:
-                        print(f"   📞 Entry point call ID: {entry_point_call_id}")
-                    print()
-                    return
+            if (
+                resolved.get("caller_resolution_path") == "unresolved"
+                or resolved.get("line_resolution_path") == "unresolved"
+            ):
+                resolved = resolve_missed_call_context(data)
+                from_num = resolved["from_number"]
+                to_num = resolved["to_number"]
+                call_ts = resolved["event_ts_ms"] or call_ts
+                canonical_dedupe_key = build_missed_call_dedupe_key(data, resolved)
+                if canonical_dedupe_key != missed_call_dedupe_key:
+                    canonical_burst_key = build_missed_call_burst_key(data, resolved)
+                    canonical_claim = claim_missed_call_notification(
+                        canonical_dedupe_key, burst_key=canonical_burst_key
+                    )
+                    duplicate = bool(canonical_claim.get("duplicate"))
+                    missed_call_dedupe_key = canonical_dedupe_key
+                    missed_call_dedupe_status = canonical_claim.get("status")
+                    if duplicate:
+                        print(f"[{datetime.now().isoformat()}]")
+                        print(f"   📞 MISSED CALL duplicate suppressed after backfill: {from_num} -> {resolved['line_display'] or get_line_name(to_num) or 'Unknown'}")
+                        print(f"   🧷 Dedupe: {missed_call_dedupe_key} ({missed_call_dedupe_status})")
+                        call_id = data.get("call_id") or data.get("id")
+                        entry_point_call_id = data.get("entry_point_call_id")
+                        if call_id:
+                            print(f"   📞 Call ID: {call_id}")
+                        if entry_point_call_id:
+                            print(f"   📞 Entry point call ID: {entry_point_call_id}")
+                        print()
+                        return
 
             sender_enrichment = (
                 lookup_contact_enrichment(from_num) if from_num != "Unknown" else {

@@ -13,6 +13,7 @@ import webhook_server
 from webhook_server import (
     build_inbound_context,
     build_hook_session_key,
+    build_missed_call_burst_key,
     build_missed_call_dedupe_key,
     build_openclaw_hook_payload,
     claim_missed_call_notification,
@@ -498,6 +499,102 @@ def test_claim_missed_call_notification_marks_duplicate(tmp_path):
     assert first["duplicate"] is False
     assert second["claimed"] is False
     assert second["duplicate"] is True
+
+
+def test_build_missed_call_burst_key():
+    data = {"from_number": "+1 (415) 555-0123", "to_number": "+1 (415) 520-1316"}
+    resolved = {"from_number": "+14155550123", "to_number": "+14155201316"}
+    assert build_missed_call_burst_key(data, resolved) == "missed-call:burst:4155550123:4155201316"
+
+    # Digits extraction normalizes formatting
+    resolved_formatted = {"from_number": "+1-415-555-0123", "to_number": "(415) 520-1316"}
+    assert build_missed_call_burst_key({}, resolved_formatted) == "missed-call:burst:4155550123:4155201316"
+
+    # Missing or unknown numbers return None
+    assert build_missed_call_burst_key({}, {"from_number": "Unknown", "to_number": "+14155201316"}) is None
+    assert build_missed_call_burst_key({}, {"from_number": "+14155550123", "to_number": ""}) is None
+
+
+def test_claim_missed_call_notification_burst_deduplication(tmp_path):
+    db_path = tmp_path / "approvals.db"
+    base_ts = 1760000000000
+
+    burst_key = "missed-call:burst:4155550123:4155201316"
+    leg1_dedupe = "missed-call:root:call-leg-1"
+    leg2_dedupe = "missed-call:root:call-leg-2"
+
+    first = claim_missed_call_notification(
+        leg1_dedupe,
+        burst_key=burst_key,
+        db_path=db_path,
+        now_ms=base_ts,
+    )
+    assert first["claimed"] is True
+    assert first["duplicate"] is False
+    assert first["status"] == "claimed"
+
+    # Leg 2 arrives 15 seconds later with distinct call ID
+    second = claim_missed_call_notification(
+        leg2_dedupe,
+        burst_key=burst_key,
+        db_path=db_path,
+        now_ms=base_ts + 15000,
+    )
+    assert second["claimed"] is False
+    assert second["duplicate"] is True
+    assert second["status"] == "burst_duplicate"
+
+
+def test_claim_missed_call_notification_burst_window_expiry(tmp_path):
+    db_path = tmp_path / "approvals.db"
+    base_ts = 1760000000000
+    burst_key = "missed-call:burst:4155550123:4155201316"
+
+    first = claim_missed_call_notification(
+        "missed-call:root:call-1",
+        burst_key=burst_key,
+        db_path=db_path,
+        now_ms=base_ts,
+    )
+    assert first["claimed"] is True
+    assert first["duplicate"] is False
+
+    # Leg 2 arrives 65 seconds later (> 60s window) -> new call is admitted
+    later = claim_missed_call_notification(
+        "missed-call:root:call-2",
+        burst_key=burst_key,
+        db_path=db_path,
+        now_ms=base_ts + 65000,
+    )
+    assert later["claimed"] is True
+    assert later["duplicate"] is False
+    assert later["status"] == "claimed"
+
+
+def test_claim_missed_call_notification_distinct_lines_not_suppressed(tmp_path):
+    db_path = tmp_path / "approvals.db"
+    base_ts = 1760000000000
+
+    burst_line1 = "missed-call:burst:4155550123:4155201316"
+    burst_line2 = "missed-call:burst:4155550123:4155209999"
+
+    first = claim_missed_call_notification(
+        "missed-call:root:call-line1",
+        burst_key=burst_line1,
+        db_path=db_path,
+        now_ms=base_ts,
+    )
+    second = claim_missed_call_notification(
+        "missed-call:root:call-line2",
+        burst_key=burst_line2,
+        db_path=db_path,
+        now_ms=base_ts + 5000,
+    )
+
+    assert first["claimed"] is True
+    assert first["duplicate"] is False
+    assert second["claimed"] is True
+    assert second["duplicate"] is False
 
 
 def test_normalize_call_payload_and_format_hook_message():

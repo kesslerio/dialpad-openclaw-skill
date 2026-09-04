@@ -2149,6 +2149,52 @@ class OpenClawHookErrorLoggingTests(unittest.TestCase):
         self.assertGreater(reads[0], 0)  # bounded, not e.read() / e.read(-1)
         # and the log stays capped regardless of body size
 
+    def test_send_to_openclaw_hooks_includes_forwarded_for_header(self):
+        recorded_request = []
+
+        def capture_request(request, timeout=10):
+            recorded_request.append(request)
+            return io.BytesIO(b'{"ok":true}')
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_SMS_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "tok"), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CLIENT_IP", "192.168.4.51"), \
+                patch.object(urllib.request, "urlopen", side_effect=capture_request):
+            ok, status = webhook_server.send_to_openclaw_hooks(
+                {"event_type": "sms", "text": "hi", "sender_number": "+14155550000"}
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(status, "http_200")
+        self.assertEqual(len(recorded_request), 1)
+        req = recorded_request[0]
+        self.assertEqual(req.get_header("X-forwarded-for"), "192.168.4.51")
+        self.assertEqual(req.get_header("Authorization"), "Bearer tok")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+
+    def test_send_to_openclaw_hooks_resolves_fallback_client_ip(self):
+        recorded_request = []
+
+        def capture_request(request, timeout=10):
+            recorded_request.append(request)
+            return io.BytesIO(b'{"ok":true}')
+
+        with patch.object(webhook_server, "OPENCLAW_HOOKS_SMS_ENABLED", True), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "tok"), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_CLIENT_IP", ""), \
+                patch.object(webhook_server, "_resolve_openclaw_client_ip", return_value="10.0.0.1"), \
+                patch.object(urllib.request, "urlopen", side_effect=capture_request):
+            ok, status = webhook_server.send_to_openclaw_hooks(
+                {"event_type": "sms", "text": "hi", "sender_number": "+14155550000"}
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(status, "http_200")
+        self.assertEqual(len(recorded_request), 1)
+        req = recorded_request[0]
+        self.assertEqual(req.get_header("X-forwarded-for"), "10.0.0.1")
+
+
 class ClassifySmsReplyPolicyTests(unittest.TestCase):
     def test_standalone_opt_out_keywords(self):
         for keyword in (
@@ -2227,5 +2273,66 @@ class ClassifySmsReplyPolicyTests(unittest.TestCase):
         self.assertEqual(policy["reason_code"], "filtered_opt_out")
 
 
+class MissedCallHistoryFetchTests(unittest.TestCase):
+    def test_fetch_recent_calls_around_caps_future_timestamp(self):
+        captured_urls = []
+
+        def capture_urlopen(req, timeout=5):
+            captured_urls.append(req.full_url)
+            return io.BytesIO(b'{"items": []}')
+
+        now_ms = 1760000000000
+        # Event timestamp is recent (e.g. now - 5 seconds)
+        event_ts_ms = now_ms - 5000
+
+        with patch.object(webhook_server, "DIALPAD_API_KEY", "fake-key"), \
+                patch.object(urllib.request, "urlopen", side_effect=capture_urlopen):
+            calls = webhook_server._fetch_recent_calls_around(
+                event_ts_ms,
+                window_ms=30 * 60 * 1000,
+                limit=25,
+                now_ms=now_ms,
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(len(captured_urls), 1)
+        parsed = urllib.parse.urlparse(captured_urls[0])
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        self.assertIn("started_before", qs)
+        self.assertIn("started_after", qs)
+        started_before = int(qs["started_before"][0])
+        # Crucial check: started_before must NOT exceed now_ms (prevents Dialpad API 400 error)
+        self.assertLessEqual(started_before, now_ms)
+        self.assertEqual(started_before, now_ms)
+
+    def test_handle_call_webhook_skips_history_fetch_when_already_resolved(self):
+        fetch_called = []
+
+        def mock_fetch(event_ts_ms, **kwargs):
+            fetch_called.append(event_ts_ms)
+            return []
+
+        payload_resolved = {
+            "from_number": "+14155550123",
+            "to_number": "+14155201316",
+            "date_started": 1760000000000,
+        }
+        # When caller and line are present, resolve_missed_call_context MUST NOT call history fetcher
+        res = webhook_server.resolve_missed_call_context(payload_resolved, history_fetcher=mock_fetch)
+        self.assertEqual(fetch_called, [])
+        self.assertEqual(res["caller_resolution_path"], "payload_direct")
+        self.assertEqual(res["line_resolution_path"], "payload_direct")
+
+        # When caller or line is missing, history fetcher is invoked
+        payload_unresolved = {
+            "date_started": 1760000000000,
+        }
+        res_unresolved = webhook_server.resolve_missed_call_context(payload_unresolved, history_fetcher=mock_fetch)
+        self.assertEqual(fetch_called, [1760000000000])
+        self.assertEqual(res_unresolved["caller_resolution_path"], "unresolved")
+
+
 if __name__ == "__main__":
     unittest.main()
+

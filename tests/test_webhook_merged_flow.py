@@ -446,6 +446,9 @@ def test_merged_missed_call_without_approval_draft_sends_immediate_card(monkeypa
     )
     monkeypatch.setattr(webhook_server, "log_auto_send_shadow", lambda _event: None)
     monkeypatch.setattr(webhook_server, "resolve_telegram_route", lambda *_args: ("chat-1", 42))
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_CHANNEL", "telegram")
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_TO", "telegram:group:chat-1:topic:42")
+    monkeypatch.setattr(webhook_server, "TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setattr(webhook_server, "insert_pending_draft", lambda *args, **_kwargs: pending_calls.append(args) or True)
     monkeypatch.setattr(webhook_server, "send_to_telegram", lambda text, **_kwargs: telegram_sends.append(text) or True)
     monkeypatch.setattr(

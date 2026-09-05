@@ -262,10 +262,18 @@ def test_hook_payload_includes_optional_agent_channel_and_to(monkeypatch):
     assert payload["channel"] == "telegram"
     assert payload["to"] == "-5102073225"
     assert payload["agentId"] == "niemand-work"
-    assert payload["sessionKey"] == "hook:dialpad:sms:conv-123"
+    assert "sessionKey" not in payload
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:sms:conv-123"
+    assert payload["routing"]["eventType"] == "sms"
+    assert payload["routing"]["conversationId"] == "conv-123"
     assert payload["firstContact"]["needsDraftReply"] is True
     assert payload["firstContact"]["identityState"] == "not_found"
     assert payload["autoReply"]["sent"] is True
+
+    # Legacy opt-in includes sessionKey
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_INCLUDE_SESSION_KEY", True)
+    legacy_payload = build_openclaw_hook_payload(normalized, line_display="Support")
+    assert legacy_payload["sessionKey"] == "hook:dialpad:sms:conv-123"
 
 
 def test_hook_payload_suppresses_same_target_visible_delivery(monkeypatch):
@@ -681,11 +689,19 @@ def test_call_hook_payload_uses_shared_envelope(monkeypatch):
     payload = build_openclaw_hook_payload(normalized, line_display="Support")
     assert payload["name"] == "Dialpad Missed Call"
     assert payload["deliver"] is True
-    assert payload["sessionKey"] == "hook:dialpad:call:call-123"
+    assert "sessionKey" not in payload
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:call:call-123"
+    assert payload["routing"]["eventType"] == "missed_call"
+    assert payload["routing"]["callId"] == "call-123"
     assert "📞 Dialpad Missed Call" in payload["message"]
     assert payload["firstContact"]["identityState"] == "resolved"
     assert payload["firstContact"]["keepBrief"] is True
     assert payload["autoReply"]["eligible"] is False
+
+    # Legacy opt-in includes sessionKey
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_INCLUDE_SESSION_KEY", True)
+    legacy_payload = build_openclaw_hook_payload(normalized, line_display="Support")
+    assert legacy_payload["sessionKey"] == "hook:dialpad:call:call-123"
 
 
 def test_hook_payload_includes_inbound_context_for_known_recent_contact():
@@ -818,3 +834,132 @@ def test_recent_sms_context_does_not_self_match_without_event_identity(monkeypat
     monkeypatch.setattr(webhook_server, "init_sms_history_db", _fail_if_called)
 
     assert webhook_server.lookup_recent_sms_context("+14322083277") is None
+
+
+def test_hook_payload_routing_and_derived_session_key_policy(monkeypatch):
+    # Verify default: sessionKey is NOT in payload, routing metadata IS in payload
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_INCLUDE_SESSION_KEY", False)
+
+    # 1. SMS with conversation_id
+    sms_conv = {
+        "event_type": "sms",
+        "conversation_id": "conv-xyz",
+        "sender_number": "+1 (415) 555-0123",
+        "recipient_number": "+1-415-555-9876",
+        "message_id": "msg-123",
+        "timestamp": 1760000000000,
+    }
+    payload = build_openclaw_hook_payload(sms_conv)
+    assert "sessionKey" not in payload
+    assert payload["routing"]["eventType"] == "sms"
+    assert payload["routing"]["conversationId"] == "conv-xyz"
+    assert payload["routing"]["callId"] is None
+    assert payload["routing"]["senderNumber"] == "4155550123"
+    assert payload["routing"]["recipientNumber"] == "4155559876"
+    assert payload["routing"]["timestamp"] == 1760000000000
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:sms:conv-xyz"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(sms_conv)
+
+    # 2. SMS without conversation_id, with sender & recipient
+    sms_numbers = {
+        "event_type": "sms",
+        "sender_number": "+1 (415) 555-0123",
+        "recipient_number": "+1-415-555-9876",
+    }
+    payload = build_openclaw_hook_payload(sms_numbers)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:sms:4155550123:4155559876"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(sms_numbers)
+
+    # 3. SMS with message_id fallback
+    sms_msg_id = {
+        "event_type": "sms",
+        "message_id": "msg-only",
+    }
+    payload = build_openclaw_hook_payload(sms_msg_id)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:sms:msg-only"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(sms_msg_id)
+
+    # 4. SMS with sender fallback
+    sms_sender = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+    }
+    payload = build_openclaw_hook_payload(sms_sender)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:sms:4155550123"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(sms_sender)
+
+    # 5. SMS unknown fallback
+    sms_unknown = {"event_type": "sms"}
+    payload = build_openclaw_hook_payload(sms_unknown)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:sms:unknown"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(sms_unknown)
+
+    # 6. Call with call_id
+    call_id = {
+        "event_type": "missed_call",
+        "call_id": "call-leg-1",
+        "sender_number": "+14155550123",
+        "timestamp": 1760000000000,
+    }
+    payload = build_openclaw_hook_payload(call_id)
+    assert "sessionKey" not in payload
+    assert payload["routing"]["eventType"] == "missed_call"
+    assert payload["routing"]["callId"] == "call-leg-1"
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:call:call-leg-1"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(call_id)
+
+    # 7. Call with sender & timestamp
+    call_sender_ts = {
+        "event_type": "missed_call",
+        "sender_number": "+1 (415) 555-0123",
+        "timestamp": 1760000000000,
+    }
+    payload = build_openclaw_hook_payload(call_sender_ts)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:call:4155550123:1760000000000"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(call_sender_ts)
+
+    # 8. Call with timestamp only
+    call_ts = {
+        "event_type": "missed_call",
+        "timestamp": 1760000000000,
+    }
+    payload = build_openclaw_hook_payload(call_ts)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:call:1760000000000"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(call_ts)
+
+    # 9. Call with sender only
+    call_sender = {
+        "event_type": "missed_call",
+        "sender_number": "+14155550123",
+    }
+    payload = build_openclaw_hook_payload(call_sender)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:call:4155550123"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(call_sender)
+
+    # 10. Call unknown
+    call_unknown = {"event_type": "missed_call"}
+    payload = build_openclaw_hook_payload(call_unknown)
+    assert payload["routing"]["derivedSessionKey"] == "hook:dialpad:call:unknown"
+    assert payload["routing"]["derivedSessionKey"] == build_hook_session_key(call_unknown)
+
+    # 11. Legacy opt-in toggle verification
+    monkeypatch.setattr(webhook_server, "OPENCLAW_HOOKS_INCLUDE_SESSION_KEY", True)
+    legacy_payload = build_openclaw_hook_payload(sms_conv)
+    assert legacy_payload["sessionKey"] == "hook:dialpad:sms:conv-xyz"
+    assert legacy_payload["sessionKey"] == legacy_payload["routing"]["derivedSessionKey"]
+
+
+def test_javascript_hook_transform_parity():
+    import shutil
+    import subprocess
+    import pytest
+
+    runtime = shutil.which("bun") or shutil.which("node")
+    if not runtime:
+        pytest.skip("Neither bun nor node is installed")
+
+    test_file = ROOT / "tests" / "test_dialpad_hook_transform.test.mjs"
+    res = subprocess.run([runtime, str(test_file)], capture_output=True, text=True)
+    assert res.returncode == 0, f"JS transform test failed:\nstdout: {res.stdout}\nstderr: {res.stderr}"
+
+

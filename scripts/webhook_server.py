@@ -35,6 +35,7 @@ Environment Variables:
 - OPENCLAW_HOOKS_AGENT_ID (optional)
 - OPENCLAW_HOOKS_SMS_ENABLED (default: disabled)
 - OPENCLAW_HOOKS_CALL_ENABLED (default: disabled)
+- OPENCLAW_HOOKS_INCLUDE_SESSION_KEY (default: disabled; set to 1 for legacy request-supplied sessionKey)
 """
 
 import json
@@ -130,6 +131,10 @@ OPENCLAW_HOOKS_AGENT_ID = os.environ.get("OPENCLAW_HOOKS_AGENT_ID", "")
 OPENCLAW_HOOKS_SMS_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_SMS_ENABLED"), False)
 OPENCLAW_HOOKS_CALL_ENABLED = parse_bool_env(os.environ.get("OPENCLAW_HOOKS_CALL_ENABLED"), False)
 OPENCLAW_HOOKS_CLIENT_IP = os.environ.get("OPENCLAW_HOOKS_CLIENT_IP", "")
+OPENCLAW_HOOKS_INCLUDE_SESSION_KEY = parse_bool_env(
+    os.environ.get("OPENCLAW_HOOKS_INCLUDE_SESSION_KEY"),
+    False,
+)
 DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY = parse_bool_env(
     os.environ.get("DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY"),
     False,
@@ -5443,6 +5448,17 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
     callback_token = normalized_event.get("callback_token")
     merged_flow_active = bool(callback_url and callback_job_id)
 
+    routing = {
+        "eventType": "missed_call" if _is_missed_call_event(normalized_event) else "sms",
+        "conversationId": normalized_event.get("conversation_id"),
+        "messageId": normalized_event.get("message_id"),
+        "callId": normalized_event.get("call_id"),
+        "senderNumber": normalize_phone_number(normalized_event.get("sender_number")),
+        "recipientNumber": normalize_phone_number(normalized_event.get("recipient_number")),
+        "timestamp": normalized_event.get("timestamp"),
+        "derivedSessionKey": build_hook_session_key(normalized_event),
+    }
+
     payload = {
         "message": format_hook_message(
             normalized_event,
@@ -5452,10 +5468,13 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
             callback_token=callback_token,
         ),
         "name": hook_name,
-        "sessionKey": build_hook_session_key(normalized_event),
+        "routing": routing,
         "deliver": False if merged_flow_active else bool(notification_delivery.get("deliver", True)),
         "operatorNotification": notification_delivery,
     }
+
+    if OPENCLAW_HOOKS_INCLUDE_SESSION_KEY:
+        payload["sessionKey"] = build_hook_session_key(normalized_event)
 
     target_to = notification_delivery.get("target")
     if target_to is None:
@@ -7033,6 +7052,7 @@ def main():
     print(f"  - OpenClaw Hooks To: {OPENCLAW_HOOKS_TO or '(unset)'}")
     print(f"  - OpenClaw SMS Hooks Enabled: {'✓' if OPENCLAW_HOOKS_SMS_ENABLED else '✗'}")
     print(f"  - OpenClaw Call Hooks Enabled: {'✓' if OPENCLAW_HOOKS_CALL_ENABLED else '✗'}")
+    print(f"  - OpenClaw Hooks Include Session Key: {'✓ (legacy request-supplied)' if OPENCLAW_HOOKS_INCLUDE_SESSION_KEY else '✗ (server-derived routing)'}")
     print(f"  - Priority Route To: {DIALPAD_PRIORITY_ROUTE_TO or '(unset)'}")
     if PRIORITY_ROUTE_PHONES:
         print(f"  - Priority Route Phones: {', '.join(sorted(PRIORITY_ROUTE_PHONES))}")

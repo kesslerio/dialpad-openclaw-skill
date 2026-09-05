@@ -72,6 +72,11 @@ try:
 except Exception:
     init_sms_history_db = None
 try:
+    from call_sqlite import init_db as init_call_history_db, store_call as record_stored_call
+except Exception:
+    init_call_history_db = None
+    record_stored_call = None
+try:
     from send_sms import send_sms as dialpad_send_sms
 except Exception:
     dialpad_send_sms = None
@@ -6465,6 +6470,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             print(f"❌ Invalid event payload on /webhook/dialpad-call: {e}")
             self.send_error(400, "Invalid JSON")
             return
+
+        if record_stored_call:
+            try:
+                record_stored_call(data)
+            except Exception as e:
+                print(f"⚠️  Failed to store call record in calls.db: {e}")
 
         direction = data.get("call_direction", data.get("direction", "unknown"))
         call_missed = data.get("call_missed", False)

@@ -40,8 +40,9 @@ The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints. It is the
 - `--dry-run` shows resolved sender and the exact message payload without sending.
 - After explicit current-turn operator approval, agents may use `bin/send_sms.py` for direct SMS sends. When resolving a shown approval draft, pass `--resolve-draft-id`, `--approval-actor-id`, and optionally `--approval-actor-username`; the wrapper validates the stored draft before calling Dialpad and records `approval_source=agent_direct_send` with `approval_actor_trust=agent_asserted`. Risky drafts still require the existing two-step approval state before `--confirm-risk` can send.
 - `bin/send_group_intro.py` performs a mirrored fallback (`mode: mirrored_fallback`) by sending two separate one-to-one SMS messages because the wrapper does not guarantee a true group thread.
-- `bin/list_calls.py` provides agent-safe recent call history with `--hours` or `--today`, optional missed-call filtering, and `--json` for a machine-readable envelope. JSON summaries include `contact_phone` when Dialpad exposes the caller number.
-- `bin/get_call_transcript.py` retrieves transcript text for one Dialpad call through the supported agent wrapper surface. It uses `GET /api/v2/transcripts/{call_id}` for transcript text and `GET /api/v2/transcripts/{call_id}/url` for the optional Dialpad web review URL; singular `/api/v2/transcript/{id}` is not a supported transcript endpoint. It returns explicit unavailable results when Dialpad has no transcript instead of treating missing transcript text as a successful transcript.
+- `bin/list_calls.py` provides agent-safe recent call history with `--hours` or `--today`, optional missed-call filtering, `--local` for reading from the local calls SQLite store, and `--json` for a machine-readable envelope. JSON summaries include `contact_phone` when Dialpad exposes the caller number.
+- `bin/get_call_transcript.py` retrieves transcript text for one Dialpad call through the supported agent wrapper surface. It supports `--local` to read transcripts from local SQLite storage without live API credentials. When queried against the live API, it uses `GET /api/v2/transcripts/{call_id}` for transcript text and `GET /api/v2/transcripts/{call_id}/url` for the optional Dialpad web review URL; singular `/api/v2/transcript/{id}` is not a supported transcript endpoint. It returns explicit unavailable results when Dialpad has no transcript instead of treating missing transcript text as a successful transcript.
+- `bin/list_call_history.py` provides read-only local Dialpad call history and transcripts for downstream offline harvesting (e.g., standup daily harvest). Supports `--phone`, `--direction`, `--min-duration`, `--transcript-only`, `--since`, and `--json`. Set `DIALPAD_CALLS_DB` to override the local SQLite path, defaulting to `/home/art/niemand/logs/calls.db`.
 - `bin/list_sms_thread.py` provides read-only local SMS history for one phone number. Use it before claiming that a missed-call contact has no visible SMS response. Set `DIALPAD_SMS_DB` to override the local SQLite path, for example `/home/art/niemand/logs/sms.db` in AlphaClaw runtimes.
 - `bin/sync_sms_export.py` imports Dialpad Stats `texts` export metadata into local SQLite. It is the completeness path for direct Dialpad UI sends and skips existing message IDs to avoid replacing webhook-captured message text.
 - `firstContact` includes an explicit `identityState` and raw lookup status so downstream agents can keep weak matches draft-only instead of mutating a contact record too early.
@@ -53,7 +54,11 @@ printf '%s' 'The premium hardshell travel case is $499.' | bin/send_sms.py --to 
 bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
 bin/list_calls.py --today --limit 20
 bin/list_calls.py --hours 6 --missed --json
+bin/list_calls.py --today --local --json
+bin/list_call_history.py --phone "+14155550111" --json
+bin/list_call_history.py --min-duration 30 --transcript-only --json
 bin/get_call_transcript.py --call-id "call_123" --json
+bin/get_call_transcript.py --call-id "call_123" --local --json
 bin/get_call_transcript.py --last --with "+14155550111" --json
 bin/list_sms_thread.py --phone "+14155550111" --json
 bin/sync_sms_export.py --start-date 2026-05-13 --end-date 2026-05-13 --json

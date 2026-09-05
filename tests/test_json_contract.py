@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import create_contact
 import create_sms_webhook
 import export_sms
+import list_call_history
 import list_sms_thread
 import lookup_contact
 import make_call
@@ -732,6 +733,78 @@ class JsonContractTests(unittest.TestCase):
         self.assertIn("Failed to read local SMS history database", parsed["error"]["message"])
         self.assertNotIn("Traceback", out)
         self.assertNotIn("Traceback", err)
+
+    def test_list_call_history_json_success_envelope(self):
+        calls = [
+            {
+                "call_id": "call-1",
+                "direction": "inbound",
+                "contact_number": "4155550123",
+                "contact_name": "Jane Doe",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1770000000000,
+                "date_ended": 1770000060000,
+                "duration": 60,
+                "call_state": "completed",
+                "transcript_present": True,
+                "transcript_text": "Sample transcript text",
+                "transcript_url": "https://dialpad.com/review/call-1",
+            }
+        ]
+        with patch("list_call_history.list_stored_calls", return_value=calls):
+            code, out, err = self._run(
+                list_call_history,
+                ["bin/list_call_history.py", "--phone", "+14155550123", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "list_call_history.list")
+        self.assertEqual(parsed["data"]["count"], 1)
+        self.assertEqual(parsed["data"]["calls"][0]["call_id"], "call-1")
+        self.assertTrue(parsed["data"]["calls"][0]["transcript_present"])
+
+    def test_list_call_history_empty_is_success(self):
+        with patch("list_call_history.list_stored_calls", return_value=[]):
+            code, out, err = self._run(
+                list_call_history,
+                ["bin/list_call_history.py", "--direction", "outbound", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "list_call_history.list")
+        self.assertEqual(parsed["data"]["count"], 0)
+        self.assertEqual(parsed["data"]["calls"], [])
+
+    def test_list_call_history_argparse_failure_is_json_envelope(self):
+        code, out, err = self._run(
+            list_call_history,
+            ["bin/list_call_history.py", "--limit", "0", "--json"],
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "list_call_history.list")
+        self.assertEqual(parsed["error"]["code"], "invalid_argument")
+
+    def test_list_call_history_db_failure_is_json_envelope(self):
+        with patch("list_call_history.list_stored_calls", side_effect=sqlite3.OperationalError("database locked")):
+            code, out, err = self._run(
+                list_call_history,
+                ["bin/list_call_history.py", "--phone", "+14155550123", "--json"],
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_error(parsed, "list_call_history.list")
+        self.assertEqual(parsed["error"]["code"], "internal_error")
+        self.assertFalse(parsed["error"]["retryable"])
+        self.assertIn("Failed to read local call history database", parsed["error"]["message"])
 
     def test_list_sms_thread_counts_full_thread_not_only_returned_slice(self):
         conn = sqlite3.connect(":memory:")

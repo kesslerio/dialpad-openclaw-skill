@@ -20,11 +20,14 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+BIN_DIR = ROOT / "bin"
 GENERATED_DIALPAD = ROOT / "generated" / "dialpad"
 SCRIPTS_DIR = ROOT / "scripts"
 
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
 if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+    sys.path.append(str(SCRIPTS_DIR))
 
 import sms_receipts  # noqa: E402 - needs SCRIPTS_DIR on sys.path; module-top import so a broken deploy fails before any send, never after one
 

@@ -19,7 +19,9 @@ from _dialpad_compat import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+SCRIPTS_DIR = str(ROOT / "scripts")
+if SCRIPTS_DIR not in sys.path:
+    sys.path.append(SCRIPTS_DIR)
 
 from sms_approval import ACTION_APPROVE, ACTION_CONFIRM_RISK, approve_draft, init_db
 

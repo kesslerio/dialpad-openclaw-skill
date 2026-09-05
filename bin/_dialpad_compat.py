@@ -198,8 +198,24 @@ def _env_with_auth() -> dict[str, str]:
 
 
 
+def _find_uv() -> str | None:
+    found = shutil.which("uv")
+    if found:
+        return found
+    candidates = [
+        Path.home() / ".cargo" / "bin" / "uv",
+        Path.home() / ".local" / "bin" / "uv",
+        Path("/usr/local/bin/uv"),
+        Path("/opt/homebrew/bin/uv"),
+    ]
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
 def _generated_command(args: list[str]) -> list[str]:
-    uv_bin = shutil.which("uv")
+    uv_bin = _find_uv()
     if uv_bin:
         return [
             uv_bin,
@@ -232,7 +248,7 @@ def run_generated(args: list[str], capture_output: bool = False) -> subprocess.C
             capture_output=capture_output,
         )
     except OSError as exc:
-        raise WrapperError(f"Failed to execute generated CLI: {exc}") from exc
+        raise WrapperError(f"Failed to execute generated CLI: {exc}", code="missing_generated_cli", retryable=False) from exc
 
 
 
@@ -270,9 +286,20 @@ def take_receipt_meta() -> dict[str, object] | None:
     return None
 
 
-def _append_sms_receipt(args: list[str], result: Any) -> None:
+def append_sms_send_receipt(
+    payload: dict[str, object],
+    result: Any,
+    source: str | None = None,
+) -> None:
     global _RECEIPT_STATUS
+    _RECEIPT_STATUS = sms_receipts.append_receipt(
+        request_payload=payload,
+        send_result=result,
+        source=source or _RECEIPT_SOURCE or "direct_sms_fallback",
+    )
 
+
+def _append_sms_receipt(args: list[str], result: Any) -> None:
     if not _is_sms_send_command(args):
         return
 
@@ -280,10 +307,19 @@ def _append_sms_receipt(args: list[str], result: Any) -> None:
     if payload is None:
         return
 
-    _RECEIPT_STATUS = sms_receipts.append_receipt(
-        request_payload=payload,
-        send_result=result,
+    append_sms_send_receipt(
+        payload=payload,
+        result=result,
         source=_RECEIPT_SOURCE or "generated_sms_send",
+    )
+
+
+def is_missing_dependency_error(text: str) -> bool:
+    lowered = (text or "").lower()
+    return (
+        "modulenotfounderror" in lowered
+        or "no module named" in lowered
+        or ("importerror" in lowered and any(pkg in lowered for pkg in ("click", "requests", "rich")))
     )
 
 
@@ -292,6 +328,12 @@ def run_generated_json(args: list[str]) -> Any:
     proc = run_generated(cmd, capture_output=True)
     if proc.returncode != 0:
         message = proc.stderr.strip() or proc.stdout.strip() or "generated command failed"
+        if is_missing_dependency_error(message):
+            raise WrapperError(
+                f"Generated CLI runtime dependencies missing: {message}",
+                code="missing_generated_cli",
+                retryable=False,
+            )
         raise WrapperError(message, code="upstream_error", retryable=True)
 
     try:
@@ -366,7 +408,12 @@ def emit_error(
 
 def classify_wrapper_error(message: str) -> tuple[str, bool]:
     lowered = message.lower()
-    if "generated cli not found" in lowered:
+    if (
+        "generated cli not found" in lowered
+        or "dependencies missing" in lowered
+        or "modulenotfounderror" in lowered
+        or "no module named" in lowered
+    ):
         return "missing_generated_cli", False
     if "api key environment variable not set" in lowered:
         return "auth_missing", False

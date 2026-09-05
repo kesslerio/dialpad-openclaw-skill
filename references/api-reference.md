@@ -72,6 +72,13 @@ Representative invocation shapes:
 dialpad call call.transfer_call --id "12345" --to "+14155551234"
 dialpad users users.get --id "5765607478525952"
 dialpad stats stats.create --stat-type "calls" --export-type "stats" --days-ago-start 7 --days-ago-end 0
+
+# Known-good explicit SMS send shape:
+dialpad --output json sms sms.send --from-number "+14155201316" --to-numbers "+14155551234" --text "Hello" --infer-country-code false
+
+# Note on users command discovery:
+# The generated CLI does not provide `users list`. Probing `users list` is invalid.
+# Discover available operations via `generated/dialpad users --help` or fetch user details with `users.get`.
 ```
 
 Wrapper-specific behavior worth knowing (not in `--help`):

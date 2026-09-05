@@ -7,12 +7,15 @@ import argparse
 import json
 import re
 import sys
+import importlib.util
 from pathlib import Path
 
 from _dialpad_compat import (
     COMMAND_IDS,
     WrapperArgumentParser,
+    append_sms_send_receipt,
     emit_success,
+    generated_cli_available,
     handle_wrapper_exception,
     print_wrapper_error,
     require_generated_cli,
@@ -29,6 +32,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import sms_approval
 from outbound_destination_policy import normalize_supported_outbound_destinations
+
+_DIRECT_SEND_SMS_SPEC = importlib.util.spec_from_file_location(
+    "scripts_direct_send_sms",
+    ROOT / "scripts" / "send_sms.py",
+)
+assert _DIRECT_SEND_SMS_SPEC is not None and _DIRECT_SEND_SMS_SPEC.loader is not None
+_direct_send_sms_module = importlib.util.module_from_spec(_DIRECT_SEND_SMS_SPEC)
+_DIRECT_SEND_SMS_SPEC.loader.exec_module(_direct_send_sms_module)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -399,11 +410,32 @@ def main() -> int:
 
         require_api_key()
         approval_preflight = preflight_approval_audit(args, sender_number=sender_number, message_text=message_text, claim=True)
+        result = None
         try:
             result = run_generated_json(["sms", "send", "--data", json.dumps(payload)])
         except WrapperError as err:
-            fail_claimed_approval_audit(args, err)
-            raise
+            if err.code == "missing_generated_cli":
+                try:
+                    print(
+                        f"Notice: Generated CLI failed with dependency error ({err}); using direct Dialpad API send fallback.",
+                        file=sys.stderr,
+                    )
+                    result = _direct_send_sms_module.send_sms(
+                        to_numbers=args.to,
+                        message=message_text,
+                        from_number=sender_number,
+                        infer_country_code=args.infer_country_code,
+                    )
+                    append_sms_send_receipt(payload, result, source="direct_sms_fallback")
+                except Exception as direct_err:
+                    fail_claimed_approval_audit(args, direct_err)
+                    if isinstance(direct_err, WrapperError):
+                        raise
+                    raise WrapperError(f"Direct SMS send failed: {direct_err}", code="upstream_error", retryable=True) from direct_err
+            else:
+                fail_claimed_approval_audit(args, err)
+                raise
+
         receipt_meta = take_receipt_meta()
         approval_audit = record_approval_audit(args, result)
         annotated_result = attach_approval_audit(result, approval_audit)

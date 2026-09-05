@@ -1,3 +1,18 @@
+"""Wrapper JSON contract test suite.
+
+This suite enforces the canonical JSON CLI contract across all wrappers in `bin/`:
+- Top-level schema: `ok` (bool), `command` (str), `data` (dict/list), `meta` (dict).
+- Error envelope schema: `ok: False`, `error: {"code": ..., "message": ..., "details": ...}`.
+- Exit code standards: 0 for success, 1 for runtime/business logic errors, 2 for validation/usage errors.
+
+Maintenance Boundary:
+- `tests/test_json_contract.py`: Standard envelope validation, exit codes, and high-level failure classes.
+- `tests/test_wrapper_missing_generated_cli.py`: Fallback behavior when generated CLI binaries are absent.
+- `tests/test_*_behavior.py` or `tests/test_<wrapper>.py`: Domain-specific business logic and mocks.
+
+When adding a new wrapper to `bin/`, register its success and error envelope tests here.
+"""
+
 from __future__ import annotations
 
 import importlib.util

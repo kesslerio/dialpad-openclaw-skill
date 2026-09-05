@@ -1,0 +1,1932 @@
+"""Tests for inbound draft generation: proactive replies, knowledge, calendar, CRM, and model rewrites."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import webhook_server
+import draft_model
+import sms_sqlite
+from inbound_driver import _FakeCompletedProcess, _FakeResponse
+
+def test_not_eligible_inbound_stales_pending_draft(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_RICH_SMS_DRAFTS_ENABLED", False)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    inbound_driver.set_contact_lookup(
+        contact_name="Jane Doe",
+        first_name="Jane",
+        last_name="Doe",
+        company="Example Co",
+        job_title="Owner",
+        status="resolved",
+    )
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        pending = webhook_server.sms_approval.create_draft(
+            conn,
+            thread_key="hook:dialpad:sms:14155550123:14155201316",
+            customer_number="+14155550123",
+            sender_number="+14155201316",
+            draft_text="Old draft must stale when contact is now known.",
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "I already spoke with someone.",
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    assert capture.ack_code == 200
+
+    conn = webhook_server.sms_approval.init_db()
+    try:
+        stale_draft = webhook_server.sms_approval.get_draft(conn, pending["draft_id"])
+    finally:
+        conn.close()
+    assert stale_draft["status"] == webhook_server.sms_approval.STATUS_STALE
+    assert stale_draft["invalidated_reason"] == "new_inbound_not_eligible"
+    assert capture.hook_calls, "operator card should still be forwarded"
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    assert normalized_sms["auto_reply"]["draftId"] is None
+    assert normalized_sms["auto_reply"]["status"] == "not_eligible"
+
+
+def test_inbound_sales_sms_creates_approval_draft_on_first_contact(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Do you have the same type of machine?",
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    assert capture.ack_code == 200
+    assert capture.sms_calls == []
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    auto_reply = normalized_sms["auto_reply"]
+    assert normalized_sms["first_contact"]["identityState"] == "not_found"
+    assert auto_reply["sent"] is False
+    assert auto_reply["draftCreated"] is True
+    assert auto_reply["status"] == "draft_created"
+    assert auto_reply["draftId"]
+    assert "SMS approval draft" in capture.telegram_messages[0]
+    assert "not sent" in capture.telegram_messages[0]
+    assert auto_reply["draftId"] in capture.telegram_messages[0].replace(r"\_", "_")
+    assert "bin/approve_sms_draft.py" in capture.telegram_messages[0]
+    assert "--approval-token" in capture.telegram_messages[0]
+
+
+def test_inbound_sales_sms_creates_generic_draft_for_payload_contact(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_RICH_SMS_DRAFTS_ENABLED", False)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+
+    payload = {
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "Can I know the difference between the consumer and business version?",
+        "contact": {"name": "Payload Person"},
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    auto_reply = normalized_sms["auto_reply"]
+    assert capture.ack_code == 200
+    assert capture.sms_calls == []
+    assert normalized_sms["first_contact"]["identityState"] == "payload_contact"
+    assert normalized_sms["first_contact"]["knownContact"] is False
+    assert inbound_context["identityConfidence"] == "low"
+    assert inbound_context["contextDraftAllowed"] is False
+    assert inbound_context["genericDraftAllowed"] is True
+    assert inbound_context["draftMode"] == "deterministic_fallback"
+    assert "exact_phone_match" not in inbound_context["evidence"]
+    assert auto_reply["draftCreated"] is True
+    assert auto_reply["status"] == "draft_created"
+    assert auto_reply["draftId"]
+    assert auto_reply["message"].startswith("Hi there,")
+    assert "Payload Person" not in auto_reply["message"]
+    assert "SMS approval draft" in capture.telegram_messages[0]
+    assert "approval draft created (generic fallback)" in capture.telegram_messages[0]
+
+
+def test_recent_thread_link_issue_creates_rich_approval_draft(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 2001,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "You can grab a time here: bysha.pe/book-demo",
+                "created_date": now_ms - 5 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 2003,
+                "direction": "inbound",
+                "from_number": "+15109125052",
+                "to_number": ["+14155201316"],
+                "text": "I tried https://customer.example.test/wrong",
+                "created_date": now_ms - 2 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "id": 2002,
+        "direction": "inbound",
+        "from_number": "+15109125052",
+        "to_number": ["+14155201316"],
+        "text": "The link doesn't work",
+        "created_date": now_ms,
+        "contact": {"name": "Gabriela Valle"},
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    auto_reply = normalized_sms["auto_reply"]
+    assert capture.ack_code == 200
+    assert capture.sms_calls == []
+    assert inbound_context["identityConfidence"] == "low"
+    assert inbound_context["recency"]["state"] == "fresh"
+    assert "local_sms_history" in inbound_context["evidence"]
+    assert inbound_context["genericDraftAllowed"] is False
+    assert inbound_context["richDraftAllowed"] is True
+    assert inbound_context["richDraftBasis"] == "recent_thread_link"
+    assert inbound_context["richDraftCategory"] == "link_issue"
+    assert inbound_context["draftMode"] == "knowledge_backed"
+    assert auto_reply["draftCreated"] is True
+    assert auto_reply["status"] == "draft_created"
+    assert auto_reply["draftId"]
+    assert auto_reply["richReply"]["basis"] == "recent_thread_link"
+    assert "bysha.pe/book-demo" in auto_reply["message"]
+    assert "customer.example.test" not in auto_reply["message"]
+    assert "SMS approval draft" in capture.telegram_messages[0]
+    assert "approval draft created" in capture.telegram_messages[0]
+    assert "ShapeScale knowledge" in capture.telegram_messages[0]
+    assert "bysha" in capture.telegram_messages[0]
+    assert "thanks for reaching ShapeScale for Business Sales" not in capture.telegram_messages[0]
+
+
+def test_recent_sms_thread_context_excludes_current_message(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 3001,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "You can grab a time here: bysha.pe/book-demo",
+                "created_date": now_ms - 5 * 60 * 1000,
+            },
+            is_new=False,
+        )
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 3002,
+                "direction": "inbound",
+                "from_number": "+15109125052",
+                "to_number": ["+14155201316"],
+                "text": "The link doesn't work",
+                "created_date": now_ms,
+            },
+            is_new=True,
+        )
+    finally:
+        conn.close()
+
+    thread = webhook_server.lookup_recent_sms_thread(
+        "+15109125052",
+        current_dialpad_id=3002,
+        current_timestamp_ms=now_ms,
+    )
+
+    assert len(thread) == 1
+    assert thread[0]["direction"] == "outbound"
+    assert "bysha.pe/book-demo" in thread[0]["text"]
+    assert "doesn't work" not in thread[0]["text"]
+
+def test_recent_sms_thread_context_filters_stale_and_wrong_line_links(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 3101,
+                "direction": "outbound",
+                "from_number": "+14159917155",
+                "to_number": ["+15109125052"],
+                "text": "Old support link: https://support.example.test/wrong",
+                "created_date": now_ms - 5 * 60 * 1000,
+            },
+            is_new=False,
+        )
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 3102,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "Stale sales link: https://stale.example.test/book",
+                "created_date": now_ms - 20 * 24 * 60 * 60 * 1000,
+            },
+            is_new=False,
+        )
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 3103,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "Fresh sales link: bysha.pe/book-demo",
+                "created_date": now_ms - 5 * 60 * 1000,
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    thread = webhook_server.lookup_recent_sms_thread(
+        "+15109125052",
+        current_dialpad_id=3104,
+        current_timestamp_ms=now_ms,
+        current_line_number="+14155201316",
+    )
+
+    thread_text = " ".join(item["text"] for item in thread)
+    assert "bysha.pe/book-demo" in thread_text
+    assert "support.example.test" not in thread_text
+    assert "stale.example.test" not in thread_text
+
+def test_product_question_uses_shapescale_knowledge_for_rich_draft(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_shapescale_knowledge",
+        lambda query: {
+            "usable": True,
+            "status": "ok",
+            "text": "ShapeScale for Business supports client scans, a client results view, and practice workflows.",
+        },
+    )
+
+    payload = {
+        "id": 4001,
+        "direction": "inbound",
+        "from_number": "+14155550123",
+        "to_number": ["+14155201316"],
+        "text": "How does the business scanner work?",
+        "contact": {"name": "Payload Person"},
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    auto_reply = normalized_sms["auto_reply"]
+    message = auto_reply["message"]
+    assert capture.ack_code == 200
+    assert capture.sms_calls == []
+    assert inbound_context["draftMode"] == "knowledge_backed"
+    assert inbound_context["richDraftBasis"] == "shapescale_knowledge"
+    assert inbound_context["richDraftCategory"] == "product"
+    assert auto_reply["draftCreated"] is True
+    assert auto_reply["status"] == "draft_created"
+    assert "client scans" in message
+    assert "[" not in message
+    assert "ShapeScale knowledge" in capture.telegram_messages[0]
+
+
+def test_product_question_falls_back_when_knowledge_unavailable(monkeypatch, tmp_path):
+    approval_db = tmp_path / "approvals.db"
+    monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_shapescale_knowledge",
+        lambda query: {"usable": False, "status": "empty", "text": ""},
+    )
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155201316",
+        "text": "How does the business scanner work?",
+        "first_contact": {
+            "knownContact": False,
+            "needsDraftReply": True,
+            "lookup": {"status": "not_found", "degraded": False},
+        },
+    }
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "knowledge_empty"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is True
+    assert webhook_server.build_proactive_reply_message(normalized_event).startswith("Hi there, thanks for reaching")
+
+def test_knowledge_lookup_extracts_answer_body_from_qmd_get(monkeypatch):
+    # qmd search returns the matching doc's title/source snippet (NOT the answer);
+    # qmd get returns the full doc whose body holds the actual answer.
+    search_output = """qmd://shapescale-knowledge/support/help-articles/693708-pricing-home.md:1 #237f44
+Title: What is the pricing for ShapeScale for Home?
+Context: Curated ShapeScale knowledge base.
+Score:  78%
+
+@@ -1,3 @@
+# What is the pricing for ShapeScale for Home?
+"""
+    get_output = """Folder Context: Curated ShapeScale knowledge base.
+---
+
+# What is the pricing for ShapeScale for Home?
+
+Source: https://shapescalehelpcenter.gorgias.help/pricing-home-693708?isEmbedded=true
+Article ID: 693708
+Category: Pricing & Shipping
+Last updated: 2026-02-03T10:32:07.289Z
+
+---
+
+ShapeScale's home device is priced at $1,799 upfront for the hardware, plus an app subscription that only starts billing once you receive your unit.
+"""
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(args)
+        stdout = search_output if args[1] == "search" else get_output
+        return _FakeCompletedProcess(stdout=stdout, returncode=0)
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_QMD_COMMAND", "qmd")
+    monkeypatch.setattr(webhook_server.subprocess, "run", _fake_run)
+
+    result = webhook_server.lookup_shapescale_knowledge("how much does ShapeScale cost")
+
+    assert result["usable"] is True
+    assert result["status"] == "ok"
+    # The answer body is returned, not the title/source/metadata.
+    assert "$1,799" in result["text"]
+    assert "What is the pricing" not in result["text"]
+    assert "qmd://" not in result["text"]
+    assert "Source:" not in result["text"]
+    assert "Score:" not in result["text"]
+    # get was called with the search hit's ref, keeping :line (to fetch the matched
+    # section of long docs) and dropping the #hash.
+    assert calls[0][1] == "search"
+    assert calls[1][1] == "get"
+    assert calls[1][2] == "qmd://shapescale-knowledge/support/help-articles/693708-pricing-home.md:1"
+
+def test_qmd_command_returns_timeout_when_deadline_already_passed():
+    # The shared deadline means a second call after the budget is spent fails fast
+    # instead of starting a fresh full-timeout subprocess (no 2x worst-case hold).
+    import time as _time
+    out, status = webhook_server._run_qmd_command("qmd", ["search", "x"], _time.monotonic() - 1)
+    assert (out, status) == ("", "timeout")
+
+def test_knowledge_lookup_no_match_when_search_returns_no_hit(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_QMD_COMMAND", "qmd")
+    monkeypatch.setattr(
+        webhook_server.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(stdout="No results found.", returncode=0),
+    )
+    result = webhook_server.lookup_shapescale_knowledge("how much does ShapeScale cost")
+    assert result["usable"] is False
+    assert result["status"] == "no_match"
+
+def test_qmd_answer_body_strips_preamble_and_top_hit_ref_keeps_line():
+    # The matched :line is kept (so qmd get fetches the right section); only #hash drops.
+    assert webhook_server._qmd_top_hit_ref(
+        "qmd://shapescale-knowledge/a/b.md:42 #deadbe\nTitle: x"
+    ) == "qmd://shapescale-knowledge/a/b.md:42"
+    assert webhook_server._qmd_top_hit_ref("Title: nothing here") is None
+    # Paths with spaces (Notion/training exports) must survive — strip only the hash.
+    assert webhook_server._qmd_top_hit_ref(
+        "qmd://shapescale-knowledge/online training/intro to scan.md:7 #abc123"
+    ) == "qmd://shapescale-knowledge/online training/intro to scan.md:7"
+    body = webhook_server._qmd_answer_body(
+        "Folder Context: ctx\n---\n# Heading\nSource: https://x\nArticle ID: 1\n---\nThe real answer is 42."
+    )
+    assert body == "The real answer is 42."
+
+def test_qmd_answer_body_keeps_labeled_answer_lines():
+    # A labeled answer line (label is NOT a known metadata key) must survive; only
+    # recognized metadata keys are dropped.
+    doc = "Source: https://x\n---\nPricing: $1,799 upfront for the hardware.\nNote: billing starts after delivery."
+    body = webhook_server._qmd_answer_body(doc)
+    assert "Pricing: $1,799 upfront for the hardware." in body
+    assert "Note: billing starts after delivery." in body
+
+def test_qmd_answer_body_strips_notion_metadata_block():
+    # Notion exports use different metadata keys than Gorgias help articles; the
+    # generic leading-block strip must drop them all, not just a fixed denylist.
+    notion = (
+        "Source course: Online Training\n"
+        "Source page ID: 312746d6-e6c2\n"
+        "Source URL: https://www.notion.so/Online-Training-312746d6\n"
+        "Created: 2026-02-25T00:28:00.000Z\n"
+        "\n"
+        "ShapeScale is accurate down to 1/20th of an inch."
+    )
+    assert webhook_server._qmd_answer_body(notion) == "ShapeScale is accurate down to 1/20th of an inch."
+
+def test_qmd_answer_body_strips_trailing_and_lowercase_metadata():
+    # Metadata that re-appears AFTER the first prose line (transcluded/footer) or
+    # uses lowercase keys must not leak internal URLs / record IDs into the draft.
+    doc = (
+        "---\n# Title\nSource: https://help.example/foo\n---\n"
+        "The first prose line is fine.\n"
+        "source: https://internal.shapescale.io/admin/leads\n"
+        "Article ID: 8675309\n"
+        "Last updated: 2026-06-19\n"
+    )
+    body = webhook_server._qmd_answer_body(doc)
+    assert body == "The first prose line is fine."
+    assert "internal.shapescale.io" not in body
+    assert "8675309" not in body
+
+def test_qmd_answer_body_strips_image_embeds_and_urls():
+    # Verified production-shape leak: Gorgias bodies carry ![](attachment.png) image
+    # embeds, <https://...> angle URLs, and bare URLs that must not reach the SMS.
+    doc = (
+        "---\n# Title\n---\n"
+        "See the difference ![](https://attachments.gorgias.help/abc/photo.png) here.\n"
+        "More at <https://business.shapescale.com/demo> or https://shapescale.com/x.\n"
+    )
+    body = webhook_server._qmd_answer_body(doc)
+    assert "http" not in body
+    assert "gorgias.help" not in body
+    assert "See the difference" in body and "here." in body
+
+def test_knowledge_query_is_deterministic_and_dedupes_anchor():
+    # Equal-length ties must resolve the same way every call (no hash-seed drift),
+    # and the anchor's own words must not be duplicated into the query.
+    q1 = webhook_server._knowledge_query_for_category("product", "refund cancel policy return delays")
+    q2 = webhook_server._knowledge_query_for_category("product", "refund cancel policy return delays")
+    assert q1 == q2
+    booking = webhook_server._knowledge_query_for_category("booking", "how do I book a demo")
+    assert booking.split().count("book") == 1
+    assert booking.split().count("demo") == 1
+
+def test_knowledge_query_extracts_salient_keywords_for_and_search():
+    # qmd search is AND-based, so the query must be a few high-signal content words,
+    # not the full sentence (which matches nothing). Stopwords + brand are dropped.
+    # `cost`/`price` are kept (not stopwords) because they discriminate pricing docs
+    # from availability docs that merely mention "pricing" in their heading.
+    assert webhook_server._knowledge_query_for_category(
+        "pricing", "how much does ShapeScale for home cost"
+    ) == "pricing cost home"
+    q = webhook_server._knowledge_query_for_category("product", "how does the business scanner work")
+    assert set(q.split()) == {"business", "scanner"}
+    # No anchor + no salient keywords -> empty query so the lookup fails closed
+    # (rather than searching the brand alone and matching an arbitrary doc).
+    assert webhook_server._knowledge_query_for_category("product", "how does it work") == ""
+    # An anchored category keeps the discriminating keyword ("cost") so the query
+    # doesn't collapse to the bare anchor and surface the wrong doc.
+    assert webhook_server._knowledge_query_for_category("pricing", "how much does it cost") == "pricing cost"
+
+def test_cad_how_much_question_classifies_as_pricing():
+    text = "Personal use\nHow\nMuch is it in CAD dollars?"
+
+    assert webhook_server.classify_rich_sms_question(text) == "pricing"
+    assert webhook_server._knowledge_query_for_category("pricing", text) == "pricing cost"
+
+def test_how_much_near_matches_do_not_force_pricing():
+    assert webhook_server._is_pricing_question("how much effort to pay attention") is False
+    assert webhook_server._is_pricing_question("how much time does it take") is False
+    assert webhook_server._is_pricing_question("how much data can it scan") is False
+    assert webhook_server.classify_rich_sms_question("how much data can it scan") == "product"
+
+def test_knowledge_query_keeps_cost_keyword_for_pricing_question():
+    # Regression: "I want to know cost please" used to collapse to just "pricing"
+    # because cost/want/know/please were all stopwords. The bare "pricing" query
+    # surfaced the Home availability doc (whose body starts with a May 2024
+    # "not available for new orders" disclaimer) instead of pricing details.
+    # `cost` must survive stopword stripping so the AND query discriminates.
+    assert webhook_server._knowledge_query_for_category("pricing", "I want to know cost please") == "pricing cost"
+
+def test_cad_pricing_question_uses_knowledge_before_crm(monkeypatch):
+    queries = []
+    crm_calls = []
+    monkeypatch.setattr(webhook_server, "lookup_recent_sms_thread", lambda *_args, **_kwargs: [])
+
+    def _knowledge(query):
+        queries.append(query)
+        return {
+            "usable": True,
+            "status": "ok",
+            "text": "ShapeScale pricing is quoted in USD. For CAD, we can confirm the current converted amount before you purchase.",
+        }
+
+    def _crm_context(*_args, **_kwargs):
+        crm_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Prima Soins Maison",
+            "stage": "Qualifying Sequence",
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_shapescale_knowledge", _knowledge)
+    monkeypatch.setattr(webhook_server, "lookup_sales_crm_context", _crm_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(
+        {
+            "event_type": "sms",
+            "sender_number": "+15148179929",
+            "recipient_number": "+14155201316",
+            "text": "Personal use\nHow\nMuch is it in CAD dollars?",
+            "inbound_context": {
+                "identityConfidence": "high",
+                "contextDraftAllowed": True,
+            },
+        }
+    )
+
+    assert queries == ["pricing cost"]
+    assert crm_calls == []
+    assert rich_reply["usable"] is True
+    assert rich_reply["basis"] == "shapescale_knowledge"
+    assert rich_reply["category"] == "pricing"
+    assert "follow up shortly" not in rich_reply["message"]
+
+def test_pricing_question_with_unavailable_knowledge_does_not_use_generic_crm_fallback(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "lookup_recent_sms_thread", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_shapescale_knowledge",
+        lambda _query: {"usable": False, "status": "timeout", "text": ""},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Prima Soins Maison",
+            "stage": "Qualifying Sequence",
+        },
+    )
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15148179929",
+        "recipient_number": "+14155201316",
+        "text": "Personal use\nHow\nMuch is it in CAD dollars?",
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "lookup": {"status": "exact_match", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+    assert normalized_event["rich_reply"]["category"] == "pricing"
+    assert normalized_event["rich_reply"]["status"] == "knowledge_timeout"
+
+def test_compose_knowledge_sms_skips_availability_disclaimer_at_lead_for_pricing():
+    # Regression: the Home pricing doc's first paragraph is a May 2024 availability
+    # disclaimer ("not available for new orders or preorders"), not pricing. The
+    # 240-char truncation captured only the disclaimer. A doc whose prose LEADS
+    # with an availability disclaimer must fail closed for pricing questions
+    # rather than ship the wrong answer. Scoped to pricing — availability IS
+    # the correct answer for product questions like "do you still sell Home?".
+    disclaimer = (
+        "As of May 2024, ShapeScale for Home is not available for new orders or preorders. "
+        "Our focus is currently set on fulfilling existing preorders. "
+        "We recommend joining our waitlist on our website to stay updated on availability."
+    )
+    assert webhook_server._compose_knowledge_sms("pricing", disclaimer) is None
+
+def test_compose_knowledge_sms_keeps_availability_answer_for_product_category():
+    # Availability IS the correct answer for product questions like "do you still
+    # sell the consumer version?" — the disclaimer guard is scoped to pricing only.
+    disclaimer = (
+        "As of May 2024, ShapeScale for Home is not available for new orders or preorders. "
+        "We recommend joining our waitlist to stay updated on availability."
+    )
+    assert webhook_server._compose_knowledge_sms("product", disclaimer) is not None
+
+def test_compose_knowledge_sms_keeps_pricing_details_without_disclaimer():
+    # A clean pricing answer with no availability disclaimer must still compose.
+    pricing_answer = "ShapeScale for Business is $9,990 to purchase or $299/month on a 12-month lease."
+    composed = webhook_server._compose_knowledge_sms("pricing", pricing_answer)
+    assert composed is not None
+    assert "9,990" in composed
+
+def test_compose_knowledge_sms_keeps_pricing_when_disclaimer_is_not_lead():
+    # A doc that has pricing facts FIRST and mentions availability LATER must
+    # still compose — the regex is anchored to the lead, not the full body.
+    pricing_then_disclaimer = (
+        "ShapeScale for Business is $9,990 to purchase or $299/month on a 12-month lease. "
+        "ShapeScale for Home is currently on waitlist."
+    )
+    composed = webhook_server._compose_knowledge_sms("pricing", pricing_then_disclaimer)
+    assert composed is not None
+    assert "9,990" in composed
+
+def test_failed_rich_lookup_is_cached_for_generic_fallback(monkeypatch):
+    calls = []
+
+    def _lookup(_query):
+        calls.append(_query)
+        return {"usable": False, "status": "timeout", "text": ""}
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "lookup_shapescale_knowledge", _lookup)
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155201316",
+        "text": "How does the business scanner work?",
+        "first_contact": {
+            "knownContact": False,
+            "needsDraftReply": True,
+            "lookup": {"status": "not_found", "degraded": False},
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is True
+    assert normalized_event["rich_reply"]["status"] == "knowledge_timeout"
+    assert webhook_server.build_proactive_reply_message(normalized_event).startswith("Hi there, thanks for reaching")
+    assert len(calls) == 1
+
+def test_known_sales_sms_creates_crm_aware_approval_draft(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    inbound_driver.set_contact_lookup(
+        contact_name="Gabriela Valle (Evolve from within medspa)",
+        first_name="Gabriela",
+        last_name="Valle",
+        company="Evolve from within medspa",
+        job_title=None,
+        status="resolved",
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Evolve from within medspa",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Scheduled",
+            "owner": "Martin",
+            "summary": "Demo Scheduled with Evolve from within medspa",
+        },
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: {"usable": False, "status": "not_applicable"},
+    )
+
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 5001,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "Looking forward to our ShapeScale demo.",
+                "created_date": now_ms - 60 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "id": 5002,
+        "direction": "inbound",
+        "from_number": "+15109125052",
+        "to_number": ["+14155201316"],
+        "text": "Thanks, sounds good",
+        "created_date": now_ms,
+        "contact": {"name": "Gabriela Valle"},
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    auto_reply = normalized_sms["auto_reply"]
+    message = auto_reply["message"]
+    assert capture.ack_code == 200
+    assert capture.sms_calls == []
+    assert inbound_context["draftMode"] == "crm_aware"
+    assert inbound_context["richDraftBasis"] == "attio_crm"
+    assert inbound_context["richDraftCategory"] == "crm_context"
+    assert auto_reply["draftCreated"] is True
+    assert auto_reply["status"] == "draft_created"
+    assert auto_reply["draftId"]
+    assert auto_reply["richReply"]["basis"] == "attio_crm"
+    assert auto_reply["richReply"]["crmContext"]["company"] == "Evolve from within medspa"
+    assert "raw" not in json.dumps(auto_reply["richReply"]).lower()
+    assert "Evolve from within medspa" in message
+    assert "recent ShapeScale conversation" not in message
+    assert "CRM-aware" in capture.telegram_messages[0]
+    assert "SMS approval draft" in capture.telegram_messages[0]
+
+
+def test_running_late_sms_creates_meeting_aware_approval_draft(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    inbound_driver.set_contact_lookup(
+        contact_name="Gabriela Valle (Evolve from within medspa)",
+        first_name="Gabriela",
+        last_name="Valle",
+        company="Evolve from within medspa",
+        job_title=None,
+        status="resolved",
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Evolve from within medspa",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Scheduled",
+            "owner": "Martin",
+            "summary": "Demo Scheduled with Evolve from within medspa",
+        },
+    )
+    calendar_calls = []
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar",
+            "summary": "ShapeScale Demo - Evolve from within medspa",
+            "startsInMinutes": 0,
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 5101,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "See you on the demo shortly.",
+                "created_date": now_ms - 20 * 60 * 1000,
+                "contact": {"name": "Gabriela Valle"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "id": 5102,
+        "direction": "inbound",
+        "from_number": "+15109125052",
+        "to_number": ["+14155201316"],
+        "text": "I'm running 5 min late",
+        "created_date": now_ms,
+        "contact": {"name": "Gabriela Valle"},
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    auto_reply = normalized_sms["auto_reply"]
+    message = auto_reply["message"]
+    assert capture.ack_code == 200
+    assert capture.sms_calls == []
+    assert calendar_calls
+    assert inbound_context["draftMode"] == "meeting_aware"
+    assert inbound_context["richDraftBasis"] == "calendar_meeting"
+    assert inbound_context["richDraftCategory"] == "meeting_logistics"
+    assert auto_reply["status"] == "draft_created"
+    assert auto_reply["richReply"]["basis"] == "calendar_meeting"
+    assert auto_reply["richReply"]["calendarContext"]["summary"] == "ShapeScale Demo - Evolve from within medspa"
+    assert "no worries" in message.lower()
+    assert "thanks for letting me know" in message.lower()
+    assert "recent ShapeScale conversation" not in message
+    assert "meeting-aware" in capture.telegram_messages[0]
+
+
+def test_availability_sms_uses_calendar_aware_reply_for_demo_prospect(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Natalie Lindo",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Embody Wellness Retreat",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with Embody Wellness Retreat",
+        },
+    }
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "intent": "availability",
+            "summary": "Candidate windows: Alex 2:30 PM UTC-3:00 PM UTC; Lilla 4:00 PM UTC-4:30 PM UTC",
+            "candidateWindows": [
+                {"calendar": "Alex", "start": "2026-06-23T14:30:00Z", "end": "2026-06-23T15:00:00Z"},
+                {"calendar": "Lilla", "start": "2026-06-23T16:00:00Z", "end": "2026-06-23T16:30:00Z"},
+            ],
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert calendar_calls
+    assert rich_reply["usable"] is True
+    assert rich_reply["basis"] == "calendar_availability"
+    assert rich_reply["category"] == "scheduling_availability"
+    assert rich_reply["calendarContext"]["candidateWindows"]
+    assert "Candidate windows" in rich_reply["message"]
+    assert "demo conversation" not in rich_reply["message"]
+
+def test_availability_sms_without_calendar_match_does_not_create_crm_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Natalie Lindo",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Embody Wellness Retreat",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with Embody Wellness Retreat",
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: {"usable": False, "status": "not_found"},
+    )
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_not_found"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+    assert normalized_event["calendar_context"]["status"] == "not_found"
+    assert "richDraftBasis" not in normalized_event["inbound_context"]
+
+def test_non_scheduling_anything_question_does_not_trigger_availability():
+    assert webhook_server.scheduling_availability_intent("Do you have anything on pricing?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything to send me?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything this morning?") is False
+    assert webhook_server.scheduling_availability_intent("Do you have anything this week?") is False
+
+def test_availability_sms_without_crm_context_does_not_create_generic_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Natalie Lindo",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {"usable": False, "status": "not_configured"},
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: pytest.fail("calendar lookup requires usable CRM demo context"),
+    )
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "crm_not_configured"
+    assert rich_reply["category"] == "scheduling_availability"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+
+def test_low_confidence_availability_sms_does_not_create_customer_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": False,
+            "needsDraftReply": True,
+            "contactName": None,
+            "lookup": {"status": "not_found", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "low",
+            "contextDraftAllowed": False,
+            "genericDraftAllowed": True,
+            "recency": {"state": "unknown"},
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Embody Wellness Retreat",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with Embody Wellness Retreat",
+        },
+    }
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "intent": "availability",
+            "summary": "Candidate windows: Alex 2:30 PM UTC-3:00 PM UTC",
+            "candidateWindows": [
+                {"calendar": "Alex", "start": "2026-06-23T14:30:00Z", "end": "2026-06-23T15:00:00Z"},
+            ],
+        }
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert calendar_calls
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_identity_unverified"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+
+def test_calendar_context_sanitizes_candidate_windows(monkeypatch):
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+    }
+    crm_context = {
+        "usable": True,
+        "status": "ok",
+        "basis": "attio",
+        "company": "Embody Wellness Retreat",
+        "deal": "ShapeScale demo",
+        "stage": "Demo Request",
+        "summary": "Demo Request",
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_context_command",
+        lambda *_args: {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "intent": "availability",
+            "summary": "Candidate windows: Team 2:30 PM UTC-3:00 PM UTC",
+            "candidateWindows": [
+                {
+                    "calendar": "Team",
+                    "start": "2026-06-23T14:30:00Z",
+                    "end": "2026-06-23T15:00:00Z",
+                    "label": "Team 2:30 PM UTC-3:00 PM UTC",
+                    "raw": {"calendar_id": "secret"},
+                },
+                {"calendar": {"raw": "bad"}, "start": "2026-06-23T16:00:00Z", "end": "2026-06-23T16:30:00Z"},
+            ],
+        },
+    )
+
+    calendar_context = webhook_server.lookup_sales_calendar_context(normalized_event, crm_context=crm_context)
+
+    assert calendar_context["candidateWindows"] == [
+        {
+            "calendar": "Team",
+            "start": "2026-06-23T14:30:00Z",
+            "end": "2026-06-23T15:00:00Z",
+            "label": "Team 2:30 PM UTC-3:00 PM UTC",
+        },
+        {
+            "start": "2026-06-23T16:00:00Z",
+            "end": "2026-06-23T16:30:00Z",
+        },
+    ]
+    assert "secret" not in json.dumps(calendar_context).lower()
+
+def test_high_confidence_non_demo_availability_sms_does_not_lookup_calendar(monkeypatch):
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "Do you have anything today?",
+        "timestamp": 1760000000000,
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "Example Customer",
+            "deal": "Support conversation",
+            "stage": "Customer",
+            "summary": "Customer support conversation",
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_calendar_context",
+        lambda *_args, **_kwargs: calendar_calls.append(_args) or {"usable": True, "status": "ok"},
+    )
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(normalized_event)
+
+    assert calendar_calls == []
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_not_applicable"
+
+def test_meeting_logistics_without_calendar_match_falls_back_safely(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    calendar_calls = []
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "text": "I'm running 5 min late",
+        "timestamp": 1760000000000,
+        "first_contact": {
+            "knownContact": True,
+            "needsDraftReply": True,
+            "contactName": "Gabriela Valle",
+            "lookup": {"status": "resolved", "degraded": False},
+        },
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+            "recency": {"state": "fresh", "source": "local_sms_history"},
+        },
+    }
+    monkeypatch.setattr(
+        webhook_server,
+        "lookup_sales_crm_context",
+        lambda *_args, **_kwargs: {"usable": True, "status": "ok", "basis": "attio", "company": "Evolve"},
+    )
+
+    def _calendar_context(*_args, **_kwargs):
+        calendar_calls.append(_args)
+        return {"usable": False, "status": "not_found"}
+
+    monkeypatch.setattr(webhook_server, "lookup_sales_calendar_context", _calendar_context)
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert calendar_calls
+    assert rich_reply["usable"] is False
+    assert rich_reply["status"] == "calendar_not_found"
+    assert webhook_server.should_send_proactive_reply(normalized_event) is True
+    assert "recent ShapeScale conversation" in webhook_server.build_proactive_reply_message(normalized_event)
+
+def test_model_draft_uses_compact_tool_facts_for_crm_reply(monkeypatch):
+    captured = {}
+
+    def _draft_model(args, **kwargs):
+        captured["args"] = args
+        captured["facts"] = json.loads(kwargs["input"])
+        return _FakeCompletedProcess(
+            stdout=json.dumps(
+                {
+                    "message": (
+                        "Hi Dr. Chris, sorry I missed your call. I saw your ShapeScale demo request "
+                        "for White House Chiropractic and booking may not have gone through. You can "
+                        "grab a time here: https://bysha.pe/book-demo."
+                    )
+                }
+            )
+        )
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(webhook_server.draft_model.subprocess, "run", _draft_model)
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "line_display": "Sales",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "email": "drchris@example.test",
+            "summary": "Demo Request with White House Chiropractic",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+            "summary": "No scheduled demo found",
+        },
+        "comms_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "prior_comms",
+            "summary": "SMS: 2 outbound, 0 inbound; booking link sent 2x; latest Jun 22",
+            "smsStatus": "usable",
+            "gmailStatus": "not_found",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(
+        normalized_event,
+        sender_enrichment={"first_name": "Dr. Chris"},
+    )
+
+    assert captured["args"] == ["/usr/bin/fake-draft-model"]
+    facts = captured["facts"]
+    assert facts["fallbackMessage"].startswith("Hi Dr. Chris, sorry we missed your call")
+    assert facts["sources"]["crm"]["company"] == "White House Chiropractic"
+    assert facts["sources"]["calendar"]["status"] == "not_found"
+    assert facts["sources"]["comms"]["summary"].startswith("SMS: 2 outbound")
+    assert facts["candidate"]["basis"] == "attio_crm"
+    assert "secret-crm-record" not in json.dumps(facts).lower()
+    assert rich_reply["basis"] == "model_attio_crm"
+    assert rich_reply["modelDraft"]["status"] == "ok"
+    assert rich_reply["modelDraft"]["fallbackBasis"] == "attio_crm"
+    assert rich_reply["message"].startswith("Hi Dr. Chris, sorry I missed your call")
+
+def test_model_draft_fails_closed_on_unsafe_output(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Dr. Chris, I saw your Gmail and your demo is scheduled for tomorrow."})
+        ),
+    )
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(
+        normalized_event,
+        sender_enrichment={"first_name": "Dr. Chris"},
+    )
+
+    assert rich_reply["basis"] == "attio_crm"
+    assert rich_reply["modelDraft"]["status"] == "unsafe_output"
+    assert "booking may not have gone through" in rich_reply["message"]
+    assert "Gmail" not in rich_reply["message"]
+    assert "scheduled for tomorrow" not in rich_reply["message"]
+
+def test_model_draft_omits_low_confidence_crm_facts(monkeypatch):
+    captured = {}
+
+    def _draft_model(_args, **kwargs):
+        captured["facts"] = json.loads(kwargs["input"])
+        return _FakeCompletedProcess(stdout=json.dumps({"message": "Hi there, sorry we missed your call. We'll follow up shortly."}))
+
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(webhook_server.draft_model.subprocess, "run", _draft_model)
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {
+            "identityConfidence": "medium",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+            "summary": "Demo Request with White House Chiropractic",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(normalized_event)
+
+    assert captured["facts"]["event"]["identityConfidence"] == "medium"
+    assert captured["facts"]["sources"]["crm"] == {}
+    assert "White House Chiropractic" not in json.dumps(captured["facts"])
+    assert rich_reply["basis"] == "model_attio_crm"
+    assert rich_reply["message"].startswith("Hi there")
+
+def test_model_draft_rejects_internal_tool_names(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Dr. Chris, based on Attio and CRM, booking may not have gone through."})
+        ),
+    )
+
+    normalized_event = {
+        "event_type": "missed_call",
+        "sender_number": "+16155574482",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {
+            "identityConfidence": "high",
+            "contextDraftAllowed": True,
+        },
+        "crm_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio",
+            "company": "White House Chiropractic",
+            "deal": "ShapeScale demo",
+            "stage": "Demo Request",
+        },
+        "calendar_context": {
+            "usable": False,
+            "status": "not_found",
+            "basis": "google_calendar",
+        },
+    }
+
+    rich_reply = webhook_server.build_contextual_sales_sms_reply(
+        normalized_event,
+        sender_enrichment={"first_name": "Dr. Chris"},
+    )
+
+    assert rich_reply["basis"] == "attio_crm"
+    assert rich_reply["modelDraft"]["status"] == "unsafe_output"
+    assert "Attio" not in rich_reply["message"]
+    assert "CRM" not in rich_reply["message"]
+
+def test_model_draft_omits_low_confidence_calendar_facts(monkeypatch):
+    captured = {}
+
+    def _draft_model(_args, **kwargs):
+        captured["facts"] = json.loads(kwargs["input"])
+        return _FakeCompletedProcess(stdout=json.dumps({"message": "Hi there, thanks for the update. We'll follow up shortly."}))
+
+    monkeypatch.setattr(webhook_server.draft_model.subprocess, "run", _draft_model)
+    event = {
+        "event_type": "missed_call",
+        "text": "",
+        "inbound_context": {"identityConfidence": "medium"},
+        "calendar_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar",
+            "summary": "Upcoming demo: Other Prospect",
+            "demoState": "upcoming",
+        },
+        "comms_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "prior_comms",
+            "summary": "SMS: 2 outbound for Other Prospect",
+        },
+    }
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_meeting",
+        "category": "meeting_logistics",
+        "message": "Hi there, thanks for the update.",
+    }
+
+    result = webhook_server.draft_model.apply_model_draft(
+        event,
+        payload,
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert captured["facts"]["sources"]["calendar"] == {}
+    assert captured["facts"]["sources"]["comms"] == {}
+    assert "Other Prospect" not in json.dumps(captured["facts"])
+    assert result["basis"] == "model_calendar_meeting"
+
+def test_model_draft_rejects_future_schedule_claim_for_recent_demo(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Dr. Chris, your demo is scheduled for tomorrow."})
+        ),
+    )
+    event = {
+        "event_type": "missed_call",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "calendar_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar",
+            "summary": "Recent demo: White House Chiropractic",
+            "demoState": "recent",
+        },
+    }
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_meeting",
+        "category": "meeting_logistics",
+        "message": "Hi Dr. Chris, sorry we missed your call. I saw your ShapeScale demo context and will follow up shortly.",
+    }
+
+    result = webhook_server.draft_model.apply_model_draft(
+        event,
+        payload,
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="Dr. Chris",
+    )
+
+    assert result["basis"] == "calendar_meeting"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "scheduled for tomorrow" not in result["message"]
+
+def test_model_draft_rejects_booked_claim_for_availability_windows(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Natalie, you're booked for 2:30 PM today."})
+        ),
+    )
+    event = {
+        "event_type": "sms",
+        "text": "Do you have anything today?",
+        "inbound_context": {"identityConfidence": "high"},
+        "calendar_context": {
+            "usable": True,
+            "status": "ok",
+            "basis": "google_calendar_availability",
+            "summary": "Candidate windows: Alex 2:30 PM UTC-3:00 PM UTC",
+            "intent": "availability",
+        },
+    }
+    payload = {
+        "usable": True,
+        "status": "ok",
+        "basis": "calendar_availability",
+        "category": "scheduling_availability",
+        "message": "Hi Natalie, yes, we can make something work today. Would 2:30 PM work?",
+    }
+
+    result = webhook_server.draft_model.apply_model_draft(
+        event,
+        payload,
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="Natalie",
+    )
+
+    assert result["basis"] == "calendar_availability"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "booked" not in result["message"]
+
+def test_model_draft_rejects_bare_unapproved_links(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi there, try calendly.com/not-approved."})
+        ),
+    )
+    result = webhook_server.draft_model.apply_model_draft(
+        {
+            "event_type": "sms",
+            "text": "",
+            "inbound_context": {"identityConfidence": "high"},
+        },
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio_crm",
+            "category": "crm_context",
+            "message": "Hi there, thanks for reaching out. We'll follow up shortly.",
+        },
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert result["basis"] == "attio_crm"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "calendly.com" not in result["message"]
+
+def test_model_draft_rejects_unsupported_booking_time_claim(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi there, your demo is tomorrow."})
+        ),
+    )
+    result = webhook_server.draft_model.apply_model_draft(
+        {
+            "event_type": "missed_call",
+            "text": "",
+            "inbound_context": {"identityConfidence": "high"},
+        },
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio_crm",
+            "category": "crm_context",
+            "message": "Hi there, sorry we missed your call. We'll follow up shortly.",
+        },
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert result["basis"] == "attio_crm"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert "demo is tomorrow" not in result["message"]
+
+def test_model_draft_rejects_low_confidence_personal_greeting(monkeypatch):
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _FakeCompletedProcess(
+            stdout=json.dumps({"message": "Hi Jane, sorry we missed your call."})
+        ),
+    )
+    result = webhook_server.draft_model.apply_model_draft(
+        {
+            "event_type": "missed_call",
+            "text": "",
+            "inbound_context": {"identityConfidence": "medium"},
+        },
+        {
+            "usable": True,
+            "status": "ok",
+            "basis": "attio_crm",
+            "category": "crm_context",
+            "message": "Hi there, sorry we missed your call. We'll follow up shortly.",
+        },
+        webhook_server.draft_model.DraftModelConfig(command="/usr/bin/fake-draft-model"),
+        greeting="there",
+    )
+
+    assert result["basis"] == "attio_crm"
+    assert result["modelDraft"]["status"] == "unsafe_output"
+    assert result["message"].startswith("Hi there")
+
+def test_recent_thread_link_skips_model_rewrite(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_DRAFT_MODEL_COMMAND", "/usr/bin/fake-draft-model")
+    monkeypatch.setattr(
+        webhook_server.draft_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("link_issue should stay deterministic")),
+    )
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155201316",
+        "text": "The link does not work",
+        "recent_sms_thread": [
+            {
+                "direction": "outbound",
+                "text": "Book here: https://bysha.pe/book-demo",
+            }
+        ],
+    }
+
+    rich_reply = webhook_server.build_rich_sms_reply(normalized_event)
+
+    assert rich_reply["usable"] is True
+    assert rich_reply["basis"] == "recent_thread_link"
+    assert "modelDraft" not in rich_reply
+    assert "https://bysha.pe/book-demo" in rich_reply["message"]
+
+def test_known_recent_sales_sms_creates_context_approval_draft(inbound_driver, monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    inbound_driver.set_contact_lookup(
+        contact_name="Ann Harper",
+        first_name="Ann",
+        last_name="Harper",
+        company="Prospect",
+        job_title=None,
+        status="resolved",
+    )
+
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": 1001,
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+14322083277"],
+                "text": "Prior ShapeScale follow-up.",
+                "created_date": now_ms - (2 * 24 * 60 * 60 * 1000),
+                "contact": {"name": "Ann Harper"},
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "id": 1002,
+        "direction": "inbound",
+        "from_number": "+14322083277",
+        "to_number": ["+14155201316"],
+        "text": "Can you call me?",
+        "created_date": now_ms,
+        "contact": {"name": "Ann Harper"},
+    }
+    capture = inbound_driver.dispatch_sms(payload)
+
+    normalized_sms = capture.hook_calls[0]["normalized_sms"]
+    inbound_context = normalized_sms["inbound_context"]
+    auto_reply = normalized_sms["auto_reply"]
+    assert capture.ack_code == 200
+    assert capture.sms_calls == []
+    assert inbound_context["knownContact"] is True
+    assert inbound_context["identityConfidence"] == "high"
+    assert inbound_context["recency"]["state"] == "fresh"
+    assert inbound_context["contextDraftAllowed"] is True
+    assert "local_sms_history" in inbound_context["evidence"]
+    assert auto_reply["draftCreated"] is True
+    assert auto_reply["status"] == "draft_created"
+    assert auto_reply["draftId"]
+    assert "Inbound context" in capture.telegram_messages[0]
+    assert "Ann Harper" in capture.telegram_messages[0]
+    assert "SMS approval draft" in capture.telegram_messages[0]
+
+
+@pytest.mark.parametrize("lookup_status", ["disabled", "not_applicable", "resolved"])
+def test_should_send_proactive_reply_requires_unknown_lookup(monkeypatch, lookup_status):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155201316",
+        "first_contact": {
+            "knownContact": False,
+            "lookup": {
+                "status": lookup_status,
+                "degraded": False,
+                "degradedReason": None,
+            },
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+
+def test_should_send_proactive_reply_allows_payload_contact_sms_generic_draft(monkeypatch):
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+
+    normalized_event = {
+        "event_type": "sms",
+        "sender_number": "+14155550123",
+        "recipient_number": "+14155201316",
+        "first_contact": {
+            "knownContact": False,
+            "needsDraftReply": True,
+            "lookup": {
+                "status": "payload_contact",
+                "degraded": False,
+                "degradedReason": None,
+            },
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is True
+
+def test_should_send_proactive_reply_suppresses_generic_draft_for_active_thread(monkeypatch, tmp_path):
+    sms_db = tmp_path / "sms.db"
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
+    now_ms = 1760000000000
+    conn = sms_sqlite.init_db()
+    try:
+        sms_sqlite.store_message(
+            conn,
+            {
+                "id": "prior-outbound",
+                "direction": "outbound",
+                "from_number": "+14155201316",
+                "to_number": ["+15109125052"],
+                "text": "You can grab a time here: bysha.pe/book-demo",
+                "created_date": now_ms - 5 * 60 * 1000,
+            },
+            is_new=False,
+        )
+    finally:
+        conn.close()
+
+    normalized_event = {
+        "event_type": "sms",
+        "message_id": "current-inbound",
+        "timestamp": now_ms,
+        "sender_number": "+15109125052",
+        "recipient_number": "+14155201316",
+        "first_contact": {
+            "knownContact": False,
+            "needsDraftReply": True,
+            "lookup": {
+                "status": "payload_contact",
+                "degraded": False,
+                "degradedReason": None,
+            },
+        },
+    }
+
+    assert webhook_server.should_send_proactive_reply(normalized_event) is False
+
+def test_missed_call_low_confidence_with_crm_gets_segment_copy_without_company():
+    """U2: low confidence + CRM match with demo-request segment → segment-aware copy, no company name."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "low"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Request",
+        },
+        "calendar_context": {"usable": False, "status": "not_found"},
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "demo request" in msg.lower()
+    assert "Acme Spa" not in msg  # PII safety: no company at low confidence
+
+def test_missed_call_low_confidence_no_crm_gets_generic():
+    """U2: low confidence + no CRM → generic copy (existing behavior)."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "low"},
+        "crm_context": {"usable": False, "status": "not_configured"},
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "sorry we missed your call" in msg
+    assert "will follow up shortly" in msg
+
+def test_missed_call_demo_booked_includes_timing():
+    """U2: high confidence + demo booked + upcoming → draft includes demo timing."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Booked",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "upcoming",
+            "startsInMinutes": 45,
+        },
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "scheduled for a ShapeScale demo" in msg
+    assert "in 45 minutes" in msg
+    assert "Is there something you wanted to ask" in msg
+
+def test_missed_call_demo_recent_mentions_followup():
+    """U2: high confidence + demo recent → draft mentions recent demo."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Completed",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "recent",
+        },
+    }
+    msg = webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "recent ShapeScale demo" in msg
+    assert "follow up" in msg.lower()
+
+def test_missed_call_urgency_stamped_when_demo_within_2h():
+    """U2: demo in 90 min → inbound_context urgency is set."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Booked",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "upcoming",
+            "startsInMinutes": 90,
+        },
+    }
+    webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert event["inbound_context"]["urgency"] == "demo in 90 min — consider calling back"
+
+def test_missed_call_no_urgency_when_demo_beyond_2h():
+    """U2: demo in 3h → no urgency stamped."""
+    event = {
+        "event_type": "missed_call",
+        "sender_number": "+12034916798",
+        "recipient_number": "+14155201316",
+        "text": "",
+        "inbound_context": {"identityConfidence": "high"},
+        "crm_context": {
+            "usable": True, "status": "ok", "basis": "attio",
+            "company": "Acme Spa",
+            "deal": "ShapeScale demo", "stage": "Demo Booked",
+        },
+        "calendar_context": {
+            "usable": True, "status": "ok", "demoState": "upcoming",
+            "startsInMinutes": 180,
+        },
+    }
+    webhook_server._crm_reply_message(event, {}, event["crm_context"])
+    assert "urgency" not in event["inbound_context"]
+
+def test_inbound_context_brief_includes_urgency_when_set():
+    """U3: urgency set → brief includes urgency line."""
+    brief = webhook_server.build_inbound_context_brief({"urgency": "demo in 45 min — consider calling back"})
+    assert "Urgency" in brief
+    assert "demo in 45 min" in brief
+
+def test_inbound_context_brief_no_urgency_when_not_set():
+    """U3: no urgency → brief does not include urgency line."""
+    brief = webhook_server.build_inbound_context_brief({})
+    assert "Urgency" not in brief
+

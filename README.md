@@ -113,6 +113,7 @@ export OPENCLAW_HOOKS_TO="telegram:group:-1001234567890:topic:2"
 # Optional per-event hook controls (disabled by default)
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
+export OPENCLAW_HOOKS_INCLUDE_SESSION_KEY="0" # 0 (default): server-derived; 1: legacy request-supplied
 
 # Optional merged-flow agent draft callback URL. The default is reachable from
 # the AlphaClaw/OpenClaw gateway container when the webhook binds 0.0.0.0:8888.
@@ -137,6 +138,7 @@ OpenClaw hook or enter inbound dedupe. Receipt updates require a provider
 or held without overwriting message text or participants.
 
 When `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS and inbound missed-call events are only forwarded to OpenClaw when the matching event flag is explicitly enabled. Leave `OPENCLAW_HOOKS_SMS_ENABLED=0` and `OPENCLAW_HOOKS_CALL_ENABLED=0` for notification-only mode.
+By default, `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=0` omits `sessionKey` from request payloads so OpenClaw can run audit-clean with `hooks.allowRequestSessionKey=false`; OpenClaw derives session keys server-side via trusted hook mapping or transform (`hooks/transforms/dialpad-hook-transform.mjs`).
 When `DIALPAD_MERGED_DRAFT_FLOW=1`, the webhook sends no immediate Telegram card for eligible inbound SMS or missed calls.
 It waits for `/internal/draft-callback` from the agent, then falls back to the deterministic draft after `DIALPAD_AGENT_DRAFT_TIMEOUT_SECONDS`.
 The webhook uses `DIALPAD_DRAFT_CALLBACK_URL` in the hook prompt; the `dialpad-draft-callback` OpenClaw plugin should use the same value through its `callbackUrl` config key.

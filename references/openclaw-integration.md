@@ -69,6 +69,7 @@ export OPENCLAW_HOOKS_CHANNEL="telegram"
 export OPENCLAW_HOOKS_TO="telegram:group:-1001234567890:topic:2"
 export OPENCLAW_HOOKS_SMS_ENABLED="0"
 export OPENCLAW_HOOKS_CALL_ENABLED="0"
+export OPENCLAW_HOOKS_INCLUDE_SESSION_KEY="0"
 export DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY="0"
 export DIALPAD_AUTO_REPLY_ENABLED="0"
 export DIALPAD_SMS_APPROVAL_DB="/home/art/clawd/logs/sms_approvals.db"
@@ -80,6 +81,7 @@ export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 Behavior:
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS forwarding still requires `OPENCLAW_HOOKS_SMS_ENABLED=1`
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding still requires `OPENCLAW_HOOKS_CALL_ENABLED=1`
+- `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=0` (default) omits `sessionKey` from the outbound request payload, allowing OpenClaw to run with `hooks.allowRequestSessionKey=false` without breaking Dialpad ingress; OpenClaw derives session keys server-side via trusted hook mapping or transform (`hooks/transforms/dialpad-hook-transform.mjs`). Set `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=1` only for legacy configurations requiring client-supplied session keys.
 - when OpenClaw hook delivery and the local Dialpad Telegram card resolve to the same Telegram target, the local card owns the visible operator notification by default; the hook request carries structured context with `deliver=false` and `operatorNotification.hookDelivery=context_only`
 - set `DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY=1` only for intentional same-target fanout; a different hook target or Telegram topic remains independently deliverable
 - when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, eligible first-contact messages on the sales line `(415) 520-1316` create exact-text approval drafts instead of sending SMS directly, even when identity is low-confidence and the draft must stay generic
@@ -93,7 +95,7 @@ Behavior:
 - before enabling Telegram buttons, check `getWebhookInfo` and local OpenClaw runtime ownership; do not replace another webhook or `getUpdates` polling owner for the same bot
 - Telegram callback requests must include `X-Telegram-Bot-Api-Secret-Token`, must come from the configured Telegram chat, and must identify a real non-bot actor
 - if your gateway listens on a different port, change `OPENCLAW_GATEWAY_URL` accordingly
-- the local gateway allows explicit `niemand-work` routing and the `hook:dialpad:` session-key namespace
+- the local gateway allows explicit `niemand-work` routing and server-side derived `hook:dialpad:` session keys
 
 ## Dialpad Webhook Endpoints
 
@@ -120,9 +122,10 @@ Relevant endpoints in `scripts/webhook_server.py`:
 
 ## OpenClaw Receiver Contract
 
-OpenClaw should expose:
+OpenClaw can receive Dialpad events via:
 
-- `POST /hooks/agent`
+- `POST /hooks/dialpad` (recommended; maps to trusted transform with server-side session-key derivation)
+- `POST /hooks/agent` (direct agent entrypoint; supports `hooks.allowRequestSessionKey=false` when client `sessionKey` is omitted)
 
 Expected auth:
 
@@ -134,11 +137,12 @@ The token should match `OPENCLAW_HOOKS_TOKEN`.
 
 - `message`
 - `name`
-- `sessionKey`
 - `deliver`
+- `routing` (contains `eventType`, `conversationId`, `callId`, `senderNumber`, `recipientNumber`, `timestamp`, `derivedSessionKey`)
 
 ### Optional Request Fields
 
+- `sessionKey` (only present when legacy `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=1` is set)
 - `channel`
 - `to`
 - `agentId`
@@ -465,6 +469,70 @@ Missed call:
   }
 }
 ```
+
+## Server-Side Session Key Derivation (`hooks.allowRequestSessionKey=false`)
+
+In standard OpenClaw deployments, allowing external callers to specify arbitrary `sessionKey` values produces an audit-critical security warning:
+```
+hooks.request_session_key_enabled External hook payloads may override sessionKey
+```
+
+To eliminate this finding while preserving per-conversation and per-call session continuity, Dialpad event session keys are derived server-side via OpenClaw hook transforms.
+
+### 1. Dialpad Webhook Server Behavior
+
+By default (`OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=0`), the Dialpad webhook server omits `sessionKey` from the top-level hook payload, preventing OpenClaw's gateway from rejecting requests when `hooks.allowRequestSessionKey=false`.
+
+Instead, the payload includes structured `routing` metadata:
+```json
+{
+  "routing": {
+    "eventType": "sms",
+    "conversationId": "conv-123",
+    "messageId": null,
+    "callId": null,
+    "senderNumber": "4155550123",
+    "recipientNumber": "4155201316",
+    "timestamp": 1760000000000,
+    "derivedSessionKey": "hook:dialpad:sms:conv-123"
+  }
+}
+```
+
+### 2. OpenClaw Gateway Configuration
+
+In `~/.openclaw/openclaw.json`, configure a mapped hook endpoint with `hooks.allowRequestSessionKey: false`:
+
+```json5
+{
+  hooks: {
+    enabled: true,
+    token: "your-openclaw-hooks-token",
+    path: "/hooks",
+    allowRequestSessionKey: false,
+    allowedAgentIds: ["niemand-work"],
+    transformsDir: "~/.openclaw/hooks/transforms",
+    mappings: [
+      {
+        match: { path: "dialpad" },
+        action: "agent",
+        agentId: "niemand-work",
+        transform: {
+          module: "dialpad-hook-transform.mjs"
+        }
+      }
+    ]
+  }
+}
+```
+
+Point Dialpad's `OPENCLAW_HOOKS_PATH` to `/hooks/dialpad`.
+
+### 3. OpenClaw Transform Module
+
+Deploy the reference transform provided in `hooks/transforms/dialpad-hook-transform.mjs` (or `references/transforms/dialpad-hook-transform.js`) to `~/.openclaw/hooks/transforms/dialpad-hook-transform.mjs`.
+
+The transform reads `ctx.payload.routing` and returns `{ sessionKey, sessionKeySource: "static" }`. Because OpenClaw treats `sessionKeySource: "static"` as trusted server derivation, it bypasses the `allowRequestSessionKey` check and routes each conversation or call to its stable session key without any client override authority.
 
 ## OpenClaw Processing Flow
 

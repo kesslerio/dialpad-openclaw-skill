@@ -152,13 +152,15 @@ def send_to_telegram(text):
     Send a message to the configured Telegram channel.
     Returns True on success, False on failure (non-blocking).
     """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    bot_token = os.environ.get("DIALPAD_TELEGRAM_BOT_TOKEN") or TELEGRAM_BOT_TOKEN
+    chat_id = os.environ.get("DIALPAD_TELEGRAM_CHAT_ID") or TELEGRAM_CHAT_ID
+    if not bot_token or not chat_id:
         print("⚠️  Telegram not configured (missing BOT_TOKEN or CHAT_ID)", file=sys.stderr)
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "Markdown",
     }
@@ -330,15 +332,17 @@ def main():
     notified_count = 0
 
     try:
-        lookback_hours = parse_positive_float(LOOKBACK_HOURS_RAW, 2.0)
+        lookback_raw = os.environ.get("POLL_LOOKBACK_HOURS") or LOOKBACK_HOURS_RAW
+        lookback_hours = parse_positive_float(lookback_raw, 2.0)
         lookback_ms = int(lookback_hours * 60 * 60 * 1000)
 
-        if not DIALPAD_API_KEY:
+        api_key = os.environ.get("DIALPAD_API_KEY") or DIALPAD_API_KEY
+        if not api_key:
             print("❌ Missing required env var: DIALPAD_API_KEY", file=sys.stderr)
-            print("found 0 voicemail(s), notified 0 new")
-            return 0
+            return 2
 
-        db_path = Path(DB_PATH_RAW).expanduser()
+        db_raw = os.environ.get("VOICEMAIL_DB_PATH") or DB_PATH_RAW
+        db_path = Path(db_raw).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         now_ms = int(time.time() * 1000)
@@ -347,7 +351,7 @@ def main():
             ensure_db(conn)
 
             try:
-                calls = fetch_inbound_calls(DIALPAD_API_KEY, lookback_ms=lookback_ms, now_ms=now_ms)
+                calls = fetch_inbound_calls(api_key, lookback_ms=lookback_ms, now_ms=now_ms)
             except urllib.error.HTTPError as exc:
                 print(f"❌ Dialpad API HTTP error: {exc.code} {exc.reason}", file=sys.stderr)
                 return 1
@@ -378,6 +382,7 @@ def main():
 
     except Exception as exc:
         print(f"❌ Poller error: {exc}", file=sys.stderr)
+        return 1
 
     print(f"found {found_count} voicemail(s), notified {notified_count} new")
     return 0

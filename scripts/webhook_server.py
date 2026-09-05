@@ -2838,6 +2838,28 @@ def build_proactive_reply_message(normalized_event, sender_enrichment=None):
     return f"Hi {greeting_name}, {body}"
 
 
+_NON_PRICING_AMOUNT_RE = re.compile(
+    r"\bhow\s+much\s+(?:time|effort|data|space|room|bandwidth|weight|memory|storage|people|notice)\b",
+    re.IGNORECASE,
+)
+
+_DIRECT_PRICING_RE = re.compile(
+    r"^(?:(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))\b[\s,.]*)?"
+    r"(?:(?:(?:can|could)\s+you\s+(?:please\s+)?)?(?:tell\s+me\s+|let\s+me\s+know\s+|send\s+(?:me\s+)?|share\s+)?)?"
+    r"(?:i(?:'d| would)?\s+(?:like|love)\s+to\s+know\s+)?"
+    r"(?:"
+    r"how\s+much\s+(?:is\s+it|is\s+this|is\s+that|is\s+one|are\s+they|for\s+one|to\s+buy|to\s+lease)"
+    r"|how\s+much\s+(?:is|for)\s+(?:the\s+|a\s+)?(?:shapescale|scanner|unit|machine|system)"
+    r"|how\s+much\s+does\s+(?:it|this|(?:the\s+|a\s+)?(?:shapescale|scanner|unit|machine|system))\s+cost"
+    r"|how\s+much"
+    r"|what(?:\s+is|\s*'s)\s+(?:the\s+|your\s+)?(?:price|pricing|cost)"
+    r"|what\s+does\s+(?:it|this|(?:the\s+|a\s+)?(?:shapescale|scanner|unit|machine|system))\s+cost"
+    r"|(?:the\s+|your\s+)?(?:price|pricing|quote)"
+    r"|cost"
+    r")\s*(?:please\s*)?[?!.]*$",
+    re.IGNORECASE,
+)
+
 _PRICING_KEYWORD_RE = re.compile(r"\b(price|pricing|cost|quote|lease|buyout|finance|financing|monthly|payment)\b")
 _PRICING_AMOUNT_RE = re.compile(r"\bhow\s+much\b")
 _PRICING_AMOUNT_CONTEXT_RE = re.compile(
@@ -2845,10 +2867,26 @@ _PRICING_AMOUNT_CONTEXT_RE = re.compile(
 )
 
 
+def _is_direct_pricing_question(text):
+    body = " ".join(str(text or "").strip().lower().split())
+    if not body:
+        return False
+    if _NON_PRICING_AMOUNT_RE.search(body):
+        return False
+    return bool(_DIRECT_PRICING_RE.search(body))
+
+
 def _is_pricing_question(body):
-    if _PRICING_KEYWORD_RE.search(body):
+    clean = " ".join(str(body or "").strip().lower().split())
+    if not clean:
+        return False
+    if _NON_PRICING_AMOUNT_RE.search(clean):
+        return False
+    if _is_direct_pricing_question(clean):
         return True
-    return bool(_PRICING_AMOUNT_RE.search(body) and _PRICING_AMOUNT_CONTEXT_RE.search(body))
+    if _PRICING_KEYWORD_RE.search(clean):
+        return True
+    return bool(_PRICING_AMOUNT_RE.search(clean) and _PRICING_AMOUNT_CONTEXT_RE.search(clean))
 
 
 def classify_rich_sms_question(text, recent_thread=None):
@@ -2863,6 +2901,8 @@ def classify_rich_sms_question(text, recent_thread=None):
 
     if has_prior_link and re.search(r"\b(link|url|website|site)\b.*\b(doesn'?t|dont|won'?t|not|broken|work|open|load)\b", body):
         return "link_issue"
+    if _is_direct_pricing_question(body):
+        return "pricing"
     if re.search(r"\b(book|booking|schedule|demo|appointment|calendar|time)\b", body):
         return "booking"
     if _is_pricing_question(body):
@@ -3104,6 +3144,7 @@ def _context_name(sender_enrichment, normalized_event):
 
 
 def _context_greeting(sender_enrichment, normalized_event):
+    sender_enrichment = sender_enrichment or {}
     first_name = sender_enrichment.get("first_name")
     if not first_name:
         contact_name = _context_name(sender_enrichment, normalized_event)
@@ -4074,6 +4115,7 @@ def _draft_greeting(normalized_event, sender_enrichment):
     low confidence — a reused/shared/ported number can carry a stale Dialpad
     contact name, so 'Hi Wrong,' is a leak. Mirrors the generic fallback, which
     already drops names at low confidence."""
+    sender_enrichment = sender_enrichment or {}
     if (normalized_event.get("inbound_context") or {}).get("identityConfidence") == "low":
         return "there"
     return _context_greeting(sender_enrichment, normalized_event)
@@ -4349,6 +4391,9 @@ def build_contextual_sales_sms_reply(normalized_event, sender_enrichment=None):
     if not _sales_context_draft_allowed(normalized_event):
         return {"usable": False, "status": "not_allowed"}
 
+    if _is_pricing_question(normalized_event.get("text")):
+        return {"usable": False, "status": "pricing_intent", "category": "pricing"}
+
     crm_context = normalized_event.get("crm_context")
     if crm_context is None:
         crm_context = lookup_sales_crm_context(normalized_event, sender_enrichment=sender_enrichment)
@@ -4569,6 +4614,22 @@ def build_rich_sms_reply(normalized_event, sender_enrichment=None):
         }
         return payload
 
+    if not _is_missed_call_event(normalized_event) and category == "pricing" and _is_direct_pricing_question(normalized_event.get("text")):
+        greeting = _draft_greeting(normalized_event, sender_enrichment)
+        message = (
+            f"Hi {greeting}, ShapeScale is $9,990 for purchase. We also offer a 12-month lease "
+            f"with monthly billing: $499/month, or a 12-month lease with annual billing: $5,388 upfront. "
+            f"You can book a demo here: {DIALPAD_BOOK_DEMO_URL}"
+        )
+        payload = {
+            "usable": True,
+            "status": "ok",
+            "basis": "approved_pricing",
+            "category": category,
+            "message": message,
+        }
+        return _apply_model_draft(normalized_event, sender_enrichment, payload)
+
     knowledge = lookup_shapescale_knowledge(_knowledge_query_for_category(category, normalized_event.get("text")))
     if not knowledge.get("usable"):
         return {
@@ -4760,7 +4821,9 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
     rich_draft_allowed = inbound_context.get("richDraftAllowed")
     draft_mode = inbound_context.get("draftMode") or "none"
     if auto_reply_draft_created:
-        if draft_mode == "knowledge_backed":
+        if draft_mode == "pricing_aware":
+            mode_text = "pricing-aware"
+        elif draft_mode == "knowledge_backed":
             mode_text = "ShapeScale knowledge-backed"
         elif draft_mode == "availability_aware":
             mode_text = "availability-aware"
@@ -4775,6 +4838,8 @@ def build_inbound_context_brief(inbound_context, auto_reply_status=None, auto_re
         draft_text = f"approval draft created ({mode_text})"
     elif auto_reply_status and auto_reply_status not in {"draft_created", "approval_required"}:
         draft_text = f"no approval draft ({auto_reply_status})"
+    elif draft_mode == "pricing_aware":
+        draft_text = "pricing-aware approval draft eligible"
     elif draft_allowed:
         draft_text = "context-aware approval draft eligible"
     elif rich_draft_allowed:
@@ -4947,6 +5012,8 @@ def _build_draft_provenance(normalized_event):
         # recent_thread_link is a prior-SMS-history link resend, not QMD.
         if rich_basis == "shapescale_knowledge":
             parts.append("QMD knowledge")
+        elif rich_basis == "approved_pricing":
+            parts.append("Approved pricing")
         elif rich_basis == "recent_thread_link":
             parts.append("Prior-thread link")
     return " | ".join(parts) if parts else None
@@ -4968,12 +5035,17 @@ def collect_enrichment_source_statuses(normalized_event):
         _base_draft_basis(rich.get("basis")) == "shapescale_knowledge" and
         rich.get("usable")
     )
+    pricing_answered = (
+        isinstance(rich, dict) and
+        _base_draft_basis(rich.get("basis")) == "approved_pricing" and
+        rich.get("usable")
+    )
     if isinstance(crm, dict):
         statuses["crm"] = {
             "status": "usable" if crm.get("usable") else _source_status(crm.get("status")),
             "basis": crm.get("basis"),
         }
-    elif qmd_answered:
+    elif qmd_answered or pricing_answered:
         statuses["crm"] = {"status": "not_applicable"}
     else:
         statuses["crm"] = {"status": "not_configured" if not DIALPAD_CRM_CONTEXT_COMMAND else "not_found"}
@@ -5167,7 +5239,9 @@ def create_proactive_reply_draft(normalized_event, sender_enrichment=None, line_
             inbound_context["richDraftAllowed"] = True
             inbound_context["richDraftBasis"] = rich_reply.get("basis")
             inbound_context["richDraftCategory"] = rich_reply.get("category")
-            if base_basis == "calendar_availability":
+            if base_basis == "approved_pricing":
+                inbound_context["draftMode"] = "pricing_aware"
+            elif base_basis == "calendar_availability":
                 inbound_context["draftMode"] = "availability_aware"
             elif base_basis == "calendar_meeting":
                 inbound_context["draftMode"] = "meeting_aware"

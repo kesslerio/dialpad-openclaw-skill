@@ -140,6 +140,39 @@ class GetCallTranscriptWrapperTests(unittest.TestCase):
         self.assertEqual(parsed["error"]["code"], "not_found")
         self.assertFalse(parsed["error"]["retryable"])
 
+    def test_local_mode_retrieves_transcript_from_sqlite_without_api_key(self):
+        fake_record = {
+            "call_id": "local-call-1",
+            "available": True,
+            "status": "available",
+            "transcript_text": "Local offline transcript",
+            "transcript_review_url": "https://dialpad.com/review/local-call-1",
+            "source": "local_calls_db",
+            "unavailable_reason": None,
+            "call": {"id": "local-call-1", "duration": 120},
+        }
+        with patch("call_sqlite.get_call_transcript_record", return_value=fake_record):
+            code, out, err = self._run(["bin/get_call_transcript.py", "--call-id", "local-call-1", "--local", "--json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = json.loads(out)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["data"]["call_id"], "local-call-1")
+        self.assertEqual(parsed["data"]["transcript_text"], "Local offline transcript")
+        self.assertEqual(parsed["data"]["source"], "local_calls_db")
+
+    def test_local_mode_last_returns_not_found_when_empty(self):
+        with patch("call_sqlite.list_stored_calls", return_value=[]):
+            code, out, err = self._run(["bin/get_call_transcript.py", "--last", "--local", "--json"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        parsed = json.loads(out)
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["error"]["code"], "not_found")
+
 
 if __name__ == "__main__":
     unittest.main()
+

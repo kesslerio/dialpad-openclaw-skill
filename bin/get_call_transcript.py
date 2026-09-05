@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="with_value",
         help="Filter --last by phone number or contact substring",
     )
+    parser.add_argument("--local", action="store_true", help="Read from local calls SQLite database")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     return parser
 
@@ -83,11 +84,33 @@ def main() -> int:
         json_mode = args.json
         _validate_args(args)
 
-        require_api_key()
-        try:
-            result = resolve_call_transcript(args.call_id, args.last, args.with_value)
-        except (DialpadApiError, DialpadConfigError) as exc:
-            raise _wrapper_error_from_dialpad(exc) from exc
+        if args.local:
+            try:
+                from call_sqlite import get_call_transcript_record, list_stored_calls
+                if args.call_id:
+                    result = get_call_transcript_record(args.call_id)
+                else:
+                    candidates = list_stored_calls(phone=args.with_value, transcript_only=True, limit=1)
+                    if not candidates:
+                        candidates = list_stored_calls(phone=args.with_value, limit=1)
+                    if not candidates:
+                        raise WrapperError("No calls found in local store", code="not_found", retryable=False)
+                    call_id = candidates[0]["call_id"]
+                    result = get_call_transcript_record(call_id)
+            except WrapperError:
+                raise
+            except Exception as exc:
+                raise WrapperError(
+                    f"Failed to read local call history database: {exc}",
+                    code="internal_error",
+                    retryable=False,
+                ) from exc
+        else:
+            require_api_key()
+            try:
+                result = resolve_call_transcript(args.call_id, args.last, args.with_value)
+            except (DialpadApiError, DialpadConfigError) as exc:
+                raise _wrapper_error_from_dialpad(exc) from exc
 
         if json_mode:
             emit_success(command, wrapper, result)

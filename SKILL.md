@@ -10,13 +10,13 @@ Send SMS and make voice calls via the Dialpad API.
 
 ## When to Use
 
-**Native tools:** `submit_draft` (registered by this skill's `dialpad-draft-callback` plugin). **Owned entrypoints:** `list_sms_thread.py`, `lookup_contact.py`, `poll_voicemails.py`.
+**Native tools:** `submit_draft` (registered by this skill's `dialpad-draft-callback` plugin). **Owned entrypoints:** `list_sms_thread.py`, `list_call_history.py`, `lookup_contact.py`, `poll_voicemails.py`.
 
 Use this skill to:
 - Send SMS messages (individual or batch)
 - Make voice calls (with TTS or custom voices)
 - Manage contacts and organization settings
-- Inspect SMS history through operator tooling when needed
+- Inspect SMS and call history through operator tooling when needed
 
 ## Available Phone Numbers
 
@@ -102,9 +102,9 @@ bin/update_contact.py --id "contact_123" --phone "+14155550123" --job-title "VP"
    - `--allow-profile-mismatch` permits explicit/profile mismatches when intentional
    - `--dry-run` prints sender resolution and the exact message/request preview without an API call
 8. **Group intro:** `bin/send_group_intro.py` mirrors intro messages as two one-to-one SMS sends (`mirrored_fallback`) because true group threads are unsupported via this wrapper.
-9. **Call history:** `bin/list_calls.py` is the supported call-history command for agents. Use `--json` when downstream automation needs a deterministic response envelope.
-10. **Call transcripts:** `bin/get_call_transcript.py` is the supported transcript retrieval command for agents. It uses Dialpad's plural transcript endpoints (`GET /api/v2/transcripts/{call_id}` and optional review URL `GET /api/v2/transcripts/{call_id}/url`); singular `/api/v2/transcript/{id}` is not the supported endpoint. It is transcript-only; AI recap, CRM enrichment, and follow-up drafting are intentionally separate work.
-11. **SMS thread history:** Before saying a contact was not already messaged, run `bin/list_sms_thread.py --phone PHONE --json` and check `has_outbound` / `outbound_count`. This local SQLite history is the supported current-turn response-state check. Set `DIALPAD_SMS_DB` when the runtime SMS database lives outside the default `/home/art/clawd/logs/sms.db` path; AlphaClaw uses `/home/art/niemand/logs/sms.db`.
+9. **Call history:** `bin/list_calls.py` is the supported call-history command for agents (supporting `--today`, `--hours`, `--missed`, and `--local` for offline store queries). `bin/list_call_history.py` provides dedicated read-only local store queries with `--phone`, `--direction`, `--min-duration`, and `--transcript-only` filters. Use `--json` when downstream automation needs a deterministic response envelope.
+10. **Call transcripts:** `bin/get_call_transcript.py` is the supported transcript retrieval command for agents. It supports `--local` to retrieve transcripts deterministically from the local SQLite store without hitting the live Dialpad API. When hitting the live API, it uses Dialpad's plural transcript endpoints (`GET /api/v2/transcripts/{call_id}` and optional review URL `GET /api/v2/transcripts/{call_id}/url`); singular `/api/v2/transcript/{id}` is not the supported endpoint. It is transcript-only; AI recap, CRM enrichment, and follow-up drafting are intentionally separate work.
+11. **Call & SMS local stores:** Incoming webhooks persist events in local append-only SQLite databases (`DIALPAD_SMS_DB` defaulting to `/home/art/niemand/logs/sms.db`, and `DIALPAD_CALLS_DB` defaulting to `/home/art/niemand/logs/calls.db`). Before saying a contact was not messaged or called, inspect local history first. For SMS, run `bin/list_sms_thread.py --phone PHONE --json` and check `has_outbound` / `outbound_count`. For calls, run `bin/list_call_history.py --phone PHONE --json`.
 12. **SMS export sync:** `bin/sync_sms_export.py` imports Dialpad Stats text export metadata into local SQLite for direct Dialpad UI sends and other out-of-band messages. It skips existing message IDs to preserve webhook-captured text.
 13. **Create/Update Contact Behavior:** `bin/create_contact.py` upserts shared/local contacts by phone/email match (or forces create with `--allow-duplicate`). `bin/update_contact.py` updates by `--id` with partial fields.
 14. **Current-turn verification:** "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory. If the current turn has not verified the action yet, say that plainly and run the tool now.

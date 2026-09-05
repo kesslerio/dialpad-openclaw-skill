@@ -112,6 +112,34 @@ class ListCallsWrapperTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(captured_headers["authorization"], "Bearer token-only")
 
+    def test_local_mode_reads_from_call_sqlite_without_api_key(self):
+        stored_calls = [
+            {
+                "call_id": "call-local-99",
+                "direction": "inbound",
+                "contact_number": "4155550123",
+                "contact_name": "Jane",
+                "from_number": "+14155550123",
+                "to_number": "+14155201316",
+                "date_started": 1770000000000,
+                "date_ended": 1770000060000,
+                "duration": 60,
+                "call_state": "completed",
+                "transcript_present": True,
+                "transcript_url": "https://dialpad.com/review/call-local-99",
+            }
+        ]
+        with patch("call_sqlite.list_stored_calls", return_value=stored_calls):
+            code, out, err = self._run(["bin/list_calls.py", "--local", "--json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = json.loads(out)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["data"]["count"], 1)
+        self.assertEqual(parsed["data"]["calls"][0]["call_id"], "call-local-99")
+
 
 if __name__ == "__main__":
     unittest.main()
+

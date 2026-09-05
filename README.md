@@ -23,6 +23,9 @@ export DIALPAD_API_KEY="your-api-key"
 # Optional local SMS history DB override
 export DIALPAD_SMS_DB="/home/art/niemand/logs/sms.db"
 
+# Optional local call history DB override
+export DIALPAD_CALLS_DB="/home/art/niemand/logs/calls.db"
+
 # Optional authoritative SMS receipt ledger override
 export DIALPAD_SMS_RECEIPT_LEDGER="/data/.openclaw/state/dialpad/sms-receipts.jsonl"
 
@@ -62,12 +65,18 @@ bin/approve_sms_draft.py smsdraft_abc123 --actor-id "telegram-user-123" --actor-
 # Make a call with TTS
 bin/make_call.py --to "+14155551234" --text "This is a test call."
 
-# List recent calls
+# List recent calls (API or local)
 bin/list_calls.py --today --limit 20
 bin/list_calls.py --hours 6 --missed --json
+bin/list_calls.py --today --local --json
 
-# Get a call transcript
+# List stored call history and transcripts (deterministic read-only offline access)
+bin/list_call_history.py --phone "+14155551234" --json
+bin/list_call_history.py --min-duration 30 --transcript-only --json
+
+# Get a call transcript (live API or local offline store)
 bin/get_call_transcript.py --call-id "call_123" --json
+bin/get_call_transcript.py --call-id "call_123" --local --json
 bin/get_call_transcript.py --last --with "+14155551234" --json
 
 # Check whether a contact already has local SMS replies
@@ -153,6 +162,8 @@ Current-turn verification still applies: "Already sent" and "Already updated" ar
 Successful SMS sends through `bin/send_sms.py`, both legs of `bin/send_group_intro.py`, and the approval lane append authoritative receipt evidence to `DIALPAD_SMS_RECEIPT_LEDGER` when configured, defaulting to `/data/.openclaw/state/dialpad/sms-receipts.jsonl`. The ledger is JSONL and is used by the OpenClaw SMS receipt guard as delivery evidence; failed sends and dry runs do not write receipts. When confirming a sent SMS to an operator, always include a literal `To: <number>` line or phrase so the downstream guard can bind the receipt to the intended recipient.
 For SMS response checks, use `bin/list_sms_thread.py --phone PHONE --json` before claiming a thread has no visible reply history. The local SQLite store is the first-line operational history; Dialpad Stats export is slower and should be treated as a fallback/export path.
 If the runtime stores live SMS history outside the legacy `/home/art/clawd/logs/sms.db` path, set `DIALPAD_SMS_DB`. AlphaClaw exposes the live DB at `/home/art/niemand/logs/sms.db`; a missing `/home/art/clawd` path there means the old alias/default path is wrong, not that SMS history is unmounted.
+
+For call history and transcripts, all incoming call events and transcripts received by the webhook are recorded in the local SQLite store (`DIALPAD_CALLS_DB`, defaulting to `/home/art/niemand/logs/calls.db`). Downstream tools (such as task-tracker standup harvesting) can query call duration, direction, contact, timestamps, and transcripts deterministically without hitting the live Dialpad API using `bin/list_call_history.py` or passing `--local` to `bin/get_call_transcript.py` and `bin/list_calls.py`.
 For completeness after direct Dialpad UI sends or other out-of-band sends, run `bin/sync_sms_export.py` for the relevant date range. The export sync upserts previously unseen message IDs only and skips existing local messages so webhook-captured plaintext is not replaced by export metadata.
 For identity work, treat `resolved` as the only state that is safe to mutate automatically; `not_found`, `ambiguous`, and `degraded` stay draft-only until the CRM layer proves otherwise.
 When `DIALPAD_AUTO_REPLY_ENABLED` is set, first-contact inbound events to the sales line `(415) 520-1316` create a short exact-text approval draft instead of sending SMS directly. Low-confidence Sales SMS and missed calls, including payload-only contact names, may create generic approval drafts; low confidence suppresses personalization and CRM claims, not the approval-gated draft itself. Eligible Sales SMS may also create ShapeScale knowledge-backed approval drafts for obvious product, booking, link, and pricing questions; the webhook uses recent Dialpad SMS history to resolve active-thread references and uses qmd-backed ShapeScale knowledge for factual answers. High-confidence fresh Sales SMS may create CRM-aware approval drafts from compact Attio context, and targeted calendar lookup is used for obvious meeting logistics such as lateness, joining, rescheduling, meeting links, and demo-prospect availability requests like "Do you have anything today?" Availability requests use calendar-aware drafts when bounded candidate windows are available; when availability cannot be verified, the webhook suppresses generic CRM follow-up copy instead of creating a competing scheduling suggestion. Demo-context missed calls also surface deterministic prior-comms provenance from local SMS history and strict Gmail search, such as booking-link send counts and exact-match Gmail counts, without copying raw message bodies into customer-facing text. If `DIALPAD_DRAFT_MODEL_COMMAND` is configured, final wording can be produced by a cheap model from compact tool-call facts plus the deterministic fallback; unsafe, unsupported, or overlong model output is discarded. If knowledge, CRM, calendar, or comms context is unavailable or ambiguous, rich drafting fails closed to the existing generic, no-draft, context-aware, or human-only behavior. Known contacts only get context-aware approval drafts when identity confidence is high and recent SMS/call continuity is no older than 14 days; stale or degraded context produces a brief only. Missed calls get a "sorry we missed you" draft variant; SMS and voicemail get a "we'll be in touch shortly" draft variant. Explicit opt-out language creates no draft, invalidates pending drafts for that customer, and sends only a human-only Telegram notice.

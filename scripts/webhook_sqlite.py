@@ -15,12 +15,11 @@ sys.path.insert(0, str(skill_dir))
 from sms_sqlite import (
     init_db,
     normalize_provider_id,
-    store_message,
-    update_message_delivery,
     get_all_threads,
     get_unread,
     mark_as_read,
 )
+from interaction_log import InteractionLog
 
 try:
     from sms_security_filter import redact_preview as _security_redact_preview
@@ -95,10 +94,8 @@ def handle_sms_webhook(data: dict, *, event_type: str | None = None) -> dict:
     """
     event_type = event_type or classify_sms_webhook_event(data)
     if event_type == "delivery_status":
-        conn = None
         try:
-            conn = init_db()
-            receipt = update_message_delivery(conn, data)
+            receipt = InteractionLog().update_message_delivery(data)
             if receipt.get("status") == "success":
                 return {
                     **receipt,
@@ -125,9 +122,6 @@ def handle_sms_webhook(data: dict, *, event_type: str | None = None) -> dict:
                 "event_type": "delivery_status",
                 "error": str(exc),
             }
-        finally:
-            if conn is not None:
-                conn.close()
 
     # Keep the historical /store compatibility path for payloads without any
     # delivery fields, while rejecting malformed status-bearing hybrids.
@@ -139,9 +133,11 @@ def handle_sms_webhook(data: dict, *, event_type: str | None = None) -> dict:
             "error": "invalid_sms_event_shape",
         }
 
-    conn = init_db()
+    log = InteractionLog()
     try:
-        msg = store_message(conn, data, is_new=True)
+        stored = log.record_message(data, is_new=True)
+        msg = stored["message"]
+        conn = init_db(log.sms_db)
         
         # Get updated unread count for this contact
         cursor = conn.execute(
@@ -169,7 +165,8 @@ def handle_sms_webhook(data: dict, *, event_type: str | None = None) -> dict:
             "error": str(e)
         }
     finally:
-        conn.close()
+        if "conn" in locals():
+            conn.close()
 
 
 def format_notification(response: dict) -> str:

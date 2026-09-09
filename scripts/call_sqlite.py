@@ -152,10 +152,28 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(calls)").fetchall()}
+    # The live theshop calls.db predates the shared interaction facade. Keep
+    # this migration additive: calls remain in calls.db and existing transcript
+    # rows are untouched.
+    for column, definition in (
+        ("provider_call_id", "TEXT"),
+        ("entry_point_call_id", "TEXT"),
+        ("interaction_key", "TEXT"),
+        ("disposition", "TEXT"),
+        ("line", "TEXT"),
+        ("recording_url", "TEXT"),
+        ("source", "TEXT"),
+        ("observed_at", "TEXT"),
+        ("reconciled_at", "TEXT"),
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE calls ADD COLUMN {column} {definition}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_call_id ON calls(call_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_contact_number ON calls(contact_number)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_date_started ON calls(date_started)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_transcript ON calls(transcript_present)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_interaction_key ON calls(interaction_key) WHERE interaction_key IS NOT NULL")
     conn.commit()
     return conn
 

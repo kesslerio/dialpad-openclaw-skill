@@ -32,6 +32,7 @@ import create_contact
 import create_sms_webhook
 import export_sms
 import list_call_history
+import list_sms_inbox
 import list_sms_thread
 import lookup_contact
 import make_call
@@ -734,6 +735,46 @@ class JsonContractTests(unittest.TestCase):
         self.assertNotIn("Traceback", out)
         self.assertNotIn("Traceback", err)
 
+    def test_list_sms_inbox_json_success_envelope(self):
+        with patch.object(
+            list_sms_inbox.InteractionLog,
+            "inbox",
+            return_value={
+                "count": 1,
+                "unread_only": False,
+                "messages": [{
+                    "dialpad_id": 7,
+                    "direction": "inbound",
+                    "from_number": "+14155550123",
+                    "to_number": "+14155201316",
+                    "contact_number": "+14155550123",
+                    "timestamp": 1770000000000,
+                    "text": "Hello",
+                    "read": False,
+                }],
+            },
+        ):
+            code, out, err = self._run(
+                list_sms_inbox,
+                ["bin/list_sms_inbox.py", "--limit", "1", "--json"],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        parsed = self._parse(out)
+        self._assert_success(parsed, "list_sms_inbox.list")
+        self.assertEqual(parsed["data"]["count"], 1)
+        self.assertEqual(parsed["data"]["messages"][0]["direction"], "inbound")
+
+    def test_list_sms_inbox_argparse_failure_is_json_envelope(self):
+        code, out, err = self._run(
+            list_sms_inbox,
+            ["bin/list_sms_inbox.py", "--limit", "0", "--json"],
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        self._assert_error(self._parse(out), "list_sms_inbox.list")
+
     def test_list_call_history_json_success_envelope(self):
         calls = [
             {
@@ -919,7 +960,7 @@ class JsonContractTests(unittest.TestCase):
 
         with patch("sync_sms_export.init_db", return_value=FakeConn()), \
                 patch("sync_sms_export.message_exists", return_value=False), \
-                patch("sync_sms_export.store_message") as store_message:
+                patch("sync_sms_export.InteractionLog") as interaction_log:
             code, out, err = self._run(
                 sync_sms_export,
                 ["bin/sync_sms_export.py", "--input-csv", str(csv_path), "--dry-run", "--json"],
@@ -931,7 +972,7 @@ class JsonContractTests(unittest.TestCase):
         self._assert_success(parsed, "sync_sms_export.sync")
         self.assertEqual(parsed["data"]["rows"], 1)
         self.assertEqual(parsed["data"]["imported"], 1)
-        store_message.assert_not_called()
+        interaction_log.assert_not_called()
 
     def test_sync_sms_export_skips_existing_rows_to_preserve_webhook_text(self):
         class FakeConn:
@@ -947,7 +988,7 @@ class JsonContractTests(unittest.TestCase):
 
         with patch("sync_sms_export.init_db", return_value=FakeConn()), \
                 patch("sync_sms_export.message_exists", return_value=True), \
-                patch("sync_sms_export.store_message") as store_message:
+                patch("sync_sms_export.InteractionLog") as interaction_log:
             code, out, err = self._run(
                 sync_sms_export,
                 ["bin/sync_sms_export.py", "--input-csv", str(csv_path), "--json"],
@@ -959,7 +1000,7 @@ class JsonContractTests(unittest.TestCase):
         self._assert_success(parsed, "sync_sms_export.sync")
         self.assertEqual(parsed["data"]["imported"], 0)
         self.assertEqual(parsed["data"]["skipped_existing"], 1)
-        store_message.assert_not_called()
+        interaction_log.assert_not_called()
 
     def test_update_contact_argparse_failure_is_json_envelope(self):
         code, out, err = self._run(update_contact, ["bin/update_contact.py", "--json"])

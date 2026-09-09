@@ -24,6 +24,7 @@ from _dialpad_compat import (  # noqa: E402
     print_wrapper_error,
 )
 from sms_sqlite import filter_messages, init_db  # noqa: E402
+from log_api_client import LogApiError, configured_log_url, get_data  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +64,16 @@ def _summarize_message(message: dict[str, Any]) -> dict[str, Any]:
         "delivery_result": message.get("delivery_result"),
         "text": message.get("text") or "",
     }
+
+
+def _summarize_thread_data(summary: dict[str, Any]) -> dict[str, Any]:
+    """Normalize local and API rows to the wrapper's existing data shape."""
+    normalized = dict(summary)
+    normalized["messages"] = [
+        _summarize_message(message)
+        for message in (summary.get("messages") if isinstance(summary.get("messages"), list) else [])
+    ]
+    return normalized
 
 
 def load_thread_summary(conn: Any, phone: str, limit: int) -> dict[str, Any]:
@@ -119,21 +130,33 @@ def main() -> int:
         if not phone:
             raise WrapperError("--phone is required", code="invalid_argument", retryable=False)
 
-        try:
-            conn = init_db()
+        meta_extra = None
+        if configured_log_url():
             try:
-                summary = load_thread_summary(conn, phone, limit=limit)
-            finally:
-                conn.close()
-        except (OSError, sqlite3.Error) as exc:
-            raise WrapperError(
-                f"Failed to read local SMS history database: {exc}",
-                code="internal_error",
-                retryable=False,
-            ) from exc
+                summary, _remote_meta = get_data(
+                    "/v1/sms/thread",
+                    query={"phone": phone, "limit": limit},
+                )
+            except LogApiError as exc:
+                raise WrapperError(str(exc), code=exc.code, retryable=exc.retryable) from exc
+            summary = _summarize_thread_data(summary)
+            meta_extra = {"history_source": "shared_log"}
+        else:
+            try:
+                conn = init_db()
+                try:
+                    summary = load_thread_summary(conn, phone, limit=limit)
+                finally:
+                    conn.close()
+            except (OSError, sqlite3.Error) as exc:
+                raise WrapperError(
+                    f"Failed to read local SMS history database: {exc}",
+                    code="internal_error",
+                    retryable=False,
+                ) from exc
 
         if json_mode:
-            emit_success(command, wrapper, summary)
+            emit_success(command, wrapper, summary, meta_extra=meta_extra)
             return 0
 
         print(f"Thread {phone}: {summary['count']} message(s), {summary['outbound_count']} outbound")

@@ -1,0 +1,27 @@
+[Unit]
+Description=Dialpad Interaction Log API (Tailscale only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/skills/work/dialpad
+EnvironmentFile=%h/.config/systemd/user/secrets.conf
+EnvironmentFile=%h/projects/skills/work/dialpad/.env
+# Fail before Python starts if the private bearer boundary is missing.
+ExecStartPre=/bin/sh -c 'test -n "$DIALPAD_LOG_TOKEN"'
+# Keep this listener separate from dialpad-webhook.service on 0.0.0.0:8888.
+Environment=DIALPAD_LOG_BIND=100.85.254.62
+Environment=DIALPAD_LOG_PORT=18887
+Environment=DIALPAD_SMS_DB=/home/art/niemand/logs/sms.db
+Environment=DIALPAD_CALLS_DB=/home/art/niemand/logs/calls.db
+# Adjust Python path to your theshop installation if needed.
+ExecStart=%h/.linuxbrew/bin/python3 %h/projects/skills/work/dialpad/scripts/log_api_server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+

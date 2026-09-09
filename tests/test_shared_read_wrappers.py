@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import importlib.util
 import json
 import sys
 from contextlib import redirect_stderr, redirect_stdout
@@ -10,8 +11,17 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 
-import list_calls  # noqa: E402
-import list_sms_thread  # noqa: E402
+
+def _load_wrapper(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+list_calls = _load_wrapper("shared_test_list_calls", ROOT / "bin" / "list_calls.py")
+list_sms_thread = _load_wrapper("shared_test_list_sms_thread", ROOT / "bin" / "list_sms_thread.py")
 
 
 def _run(module, argv: list[str]) -> tuple[int, dict[str, object], str]:

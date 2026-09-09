@@ -145,6 +145,7 @@ def handle_sms_webhook(data: dict, *, event_type: str | None = None) -> dict:
             (msg["contact_number"],)
         )
         row = cursor.fetchone()
+        text = msg.get("text") or ""
         
         return {
             "status": "success",
@@ -154,7 +155,7 @@ def handle_sms_webhook(data: dict, *, event_type: str | None = None) -> dict:
                 "direction": msg["direction"],
                 "contact_number": msg["contact_number"],
                 "contact_name": msg.get("contact_name") or row["name"] if row else "Unknown",
-                "preview": msg.get("text", "")[:60] + "..." if len(msg.get("text", "")) > 60 else msg.get("text", ""),
+                "preview": text[:60] + "..." if len(text) > 60 else text,
                 "unread_count": row["unread_count"] if row else 0
             }
         }

@@ -9,15 +9,16 @@ from pathlib import Path
 import pytest
 
 from interaction_log import InteractionLog
-from log_api_server import create_server
+from log_api_server import LogApiServer, create_server
 
 
 @pytest.fixture
 def running_server(tmp_path: Path):
     log = InteractionLog(sms_db=tmp_path / "sms.db", calls_db=tmp_path / "calls.db")
-    server = create_server(
-        bind="127.0.0.1",
-        port=0,
+    # Bind the test socket locally while production create_server enforces the
+    # Tailscale CGNAT range.
+    server = LogApiServer(
+        ("127.0.0.1", 0),
         token="unit-test-token",
         interaction_log=log,
     )

@@ -16,6 +16,7 @@ from interaction_log import InteractionLog
 
 DEFAULT_BIND = "100.85.254.62"
 DEFAULT_PORT = 18887
+TAILSCALE_IPV4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 MAX_BODY_BYTES = 64 * 1024
 MAX_LIMIT = 500
 COMMANDS = {
@@ -82,6 +83,18 @@ def _bool_query(value: str | None, *, name: str) -> bool:
     raise LogApiError(f"{name} must be a boolean", status=400, code="invalid_argument")
 
 
+def _timestamp_query(value: str | None, *, name: str) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise LogApiError(f"{name} must be an integer", status=400, code="invalid_argument") from exc
+    if parsed <= 0:
+        raise LogApiError(f"{name} must be greater than 0", status=400, code="invalid_argument")
+    return parsed
+
+
 def validate_bind_address(bind: str) -> str:
     """Reject wildcard binds; production defaults to the host's Tailscale IPv4."""
     value = str(bind or "").strip()
@@ -89,7 +102,7 @@ def validate_bind_address(bind: str) -> str:
         address = ipaddress.ip_address(value)
     except ValueError as exc:
         raise ValueError("DIALPAD_LOG_BIND must be a literal IPv4 address") from exc
-    if address.version != 4 or address.is_unspecified:
+    if address.version != 4 or address.is_unspecified or address not in TAILSCALE_IPV4_NETWORK:
         raise ValueError("DIALPAD_LOG_BIND must be a non-wildcard Tailscale IPv4 address")
     return value
 
@@ -174,13 +187,17 @@ class LogApiRequestHandler(BaseHTTPRequestHandler):
                     missed=_bool_query(_query_value(query, "missed"), name="missed"),
                     with_phone=_query_value(query, "with"),
                     limit=limit,
+                    since_ms=_timestamp_query(_query_value(query, "since_ms"), name="since_ms"),
+                    until_ms=_timestamp_query(_query_value(query, "until_ms"), name="until_ms"),
                 )
             else:
                 raise LogApiError("route not found", status=404, code="not_found")
             self._write_json(200, _success_payload(command, data))
         except LogApiError as error:
             self._fail(error, command)
-        except (OSError, ValueError) as error:
+        except ValueError as error:
+            self._fail(LogApiError(str(error), status=400, code="invalid_argument"), command)
+        except OSError:
             self._fail(LogApiError("interaction log request failed", status=500), command)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
@@ -210,7 +227,12 @@ class LogApiRequestHandler(BaseHTTPRequestHandler):
             self._fail(LogApiError(str(error), status=400, code="invalid_argument"), command)
 
     def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
-        self._write_json(405, _error_payload(self._route_command(urlparse(self.path).path), "invalid_argument", "method not allowed"))
+        path = urlparse(self.path).path
+        command = self._route_command(path)
+        if not self._authorized():
+            self._write_json(401, _error_payload(command, "auth_missing", "valid bearer authorization is required"))
+            return
+        self._write_json(405, _error_payload(command, "invalid_argument", "method not allowed"))
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
         self.do_PUT()

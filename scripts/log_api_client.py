@@ -100,7 +100,6 @@ def get_data(path: str, *, query: dict[str, Any] | None = None) -> tuple[dict[st
     meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
     return data, meta
 
-
 def record_message(observation: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     response = request_json("/v1/sms/record", method="POST", payload=observation)
     data = response.get("data")
@@ -108,4 +107,3 @@ def record_message(observation: dict[str, Any]) -> tuple[dict[str, Any], dict[st
         raise LogApiError("interaction log API returned invalid record data", code="upstream_error", retryable=True)
     meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
     return data, meta
-

@@ -55,4 +55,3 @@ def test_replay_records_once_and_removes_only_successful_observations(tmp_path: 
     assert InteractionLog(sms_db=sms_db, calls_db=tmp_path / "calls.db").thread(
         "+14155550111", limit=10
     )["count"] == 1
-

@@ -56,4 +56,3 @@ def test_supported_send_records_exact_successful_observation() -> None:
         "from_number": "+14155201316",
         "body": "Exact $body",
     }
-

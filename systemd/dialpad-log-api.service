@@ -24,4 +24,3 @@ StandardError=journal
 
 [Install]
 WantedBy=default.target
-

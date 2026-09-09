@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only wrapper for local Dialpad SMS thread history."""
+"""Read-only wrapper for Dialpad SMS thread history."""
 
 from __future__ import annotations
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from interaction_log import InteractionLog
+from interaction_log import InteractionLog, record_call
 
 
 def _message(**overrides: object) -> dict[str, object]:
@@ -204,3 +204,5 @@ def test_record_call_requires_owner_or_reconciler(log_paths: tuple[Path, Path]) 
 
     with pytest.raises(PermissionError):
         log.record_call(_call())
+    with pytest.raises(PermissionError):
+        record_call(_call(), sms_db=log_paths[0], calls_db=log_paths[1])

@@ -892,5 +892,12 @@ def record_message(observation: dict[str, Any], **kwargs: Any) -> dict[str, Any]
     return InteractionLog(**kwargs).record_message(observation)
 
 
-def record_call(observation: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-    return InteractionLog(**kwargs).record_call(observation, owner=True)
+def record_call(
+    observation: dict[str, Any],
+    *,
+    owner: bool = False,
+    reconciler: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Record a call only when the caller explicitly has write authority."""
+    return InteractionLog(**kwargs).record_call(observation, owner=owner, reconciler=reconciler)

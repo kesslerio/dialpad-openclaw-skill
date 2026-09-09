@@ -164,7 +164,7 @@ def main() -> int:
             for call in raw_calls:
                 rows.append(
                     {
-                    "started": str(call.get("started_at") or "-").replace("T", " ").replace("Z", "")[:16],
+                        "started": str(call.get("started_at") or "-").replace("T", " ").replace("Z", "")[:16],
                         "caller": str(call.get("contact") or call.get("contact_phone") or "-"),
                         "direction": str(call.get("direction") or "unknown"),
                         "duration": str(call.get("duration_display") or "0:00"),

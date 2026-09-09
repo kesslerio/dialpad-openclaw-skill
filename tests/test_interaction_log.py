@@ -93,6 +93,50 @@ def test_missing_provider_id_uses_fingerprint_and_does_not_erase_body(
     assert replay["message"]["interaction_key"].startswith("fingerprint:")
 
 
+def test_provider_id_upgrades_unknown_or_known_fallback_without_identity_downgrade(
+    log_paths: tuple[Path, Path],
+) -> None:
+    sms_db, calls_db = log_paths
+    log = InteractionLog(sms_db=sms_db, calls_db=calls_db)
+
+    unknown = log.record_message(_message(provider_id=None, body="", body_known=False))
+    upgraded = log.record_message(_message(provider_id="provider-after", body="Recovered body"))
+    assert unknown["created"] is True
+    assert upgraded["created"] is False
+    assert upgraded["message"]["dialpad_id"] == "provider-after"
+    assert upgraded["message"]["text"] == "Recovered body"
+    assert upgraded["message"]["interaction_key"] == "provider:provider-after"
+
+    known = log.record_message(
+        _message(provider_id=None, body="Known body", timestamp=1770000060000)
+    )
+    provider_repair = log.record_message(
+        _message(
+            provider_id="provider-known",
+            body="",
+            body_known=False,
+            timestamp=1770000060000,
+        )
+    )
+    assert known["created"] is True
+    assert provider_repair["created"] is False
+    assert provider_repair["message"]["text"] == "Known body"
+    assert provider_repair["message"]["interaction_key"] == "provider:provider-known"
+
+
+def test_known_fallback_messages_with_same_participants_and_minute_do_not_merge(
+    log_paths: tuple[Path, Path],
+) -> None:
+    log = InteractionLog(sms_db=log_paths[0], calls_db=log_paths[1])
+
+    first = log.record_message(_message(provider_id=None, body="First", timestamp=1770000000000))
+    second = log.record_message(_message(provider_id=None, body="Second", timestamp=1770000001000))
+
+    assert first["created"] is True
+    assert second["created"] is True
+    assert log.thread("+14155550111")["count"] == 2
+
+
 def test_inbox_returns_inbound_messages_only(log_paths: tuple[Path, Path]) -> None:
     sms_db, calls_db = log_paths
     log = InteractionLog(sms_db=sms_db, calls_db=calls_db)

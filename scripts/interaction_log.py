@@ -339,14 +339,24 @@ def _message_find(conn, normalized: dict[str, Any]) -> Any:
     # A provider id can upgrade a previously id-less row when the complete
     # observation has exactly the same constrained fallback fingerprint.
     if provider_id is not None:
+        fingerprint = normalized["fingerprint"] if normalized.get("body_known") else normalized["fingerprint_base"]
         return conn.execute(
-            "SELECT * FROM messages WHERE fingerprint = ? ORDER BY id LIMIT 1",
-            (normalized["fingerprint"],),
+            "SELECT * FROM messages WHERE fingerprint = ? OR fingerprint_base = ? ORDER BY id LIMIT 1",
+            (fingerprint, normalized["fingerprint_base"]),
         ).fetchone()
-    row = conn.execute(
-        "SELECT * FROM messages WHERE fingerprint_base = ? ORDER BY id LIMIT 1",
-        (normalized["fingerprint_base"],),
-    ).fetchone()
+    if normalized.get("body_known"):
+        row = conn.execute(
+            """SELECT * FROM messages
+               WHERE fingerprint_base = ?
+                 AND (body_known = 0 OR text IS NULL OR TRIM(text) = '')
+               ORDER BY id LIMIT 1""",
+            (normalized["fingerprint_base"],),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM messages WHERE fingerprint_base = ? ORDER BY id LIMIT 1",
+            (normalized["fingerprint_base"],),
+        ).fetchone()
     if row is not None:
         return row
     return None
@@ -390,6 +400,8 @@ def _merge_message(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[s
     merged["fingerprint_base"] = incoming.get("fingerprint_base") or existing.get("fingerprint_base")
     if incoming.get("dialpad_id"):
         merged["interaction_key"] = incoming.get("interaction_key")
+    elif existing.get("dialpad_id"):
+        merged["interaction_key"] = existing.get("interaction_key") or f"provider:{existing['dialpad_id']}"
     elif incoming.get("body_known"):
         merged["interaction_key"] = f"fingerprint:{incoming.get('fingerprint')}"
     else:

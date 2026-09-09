@@ -26,6 +26,11 @@ export DIALPAD_SMS_DB="/home/art/niemand/logs/sms.db"
 # Optional local call history DB override
 export DIALPAD_CALLS_DB="/home/art/niemand/logs/calls.db"
 
+# Optional cross-host interaction log (the log API runs on theshop)
+export DIALPAD_LOG_URL="http://100.85.254.62:18887"
+export DIALPAD_LOG_TOKEN="operator-managed-token"
+export DIALPAD_LOG_OUTBOX="/home/art/.dialpad/log-outbox.jsonl"
+
 # Optional authoritative SMS receipt ledger override
 export DIALPAD_SMS_RECEIPT_LEDGER="/data/.openclaw/state/dialpad/sms-receipts.jsonl"
 
@@ -67,7 +72,10 @@ bin/make_call.py --to "+14155551234" --text "This is a test call."
 
 # List recent calls (API or local)
 bin/list_calls.py --today --limit 20
+# With DIALPAD_LOG_URL set, shared history is the default. Use --live for an
+# explicit live Dialpad query, or --local for the legacy local SQLite read.
 bin/list_calls.py --hours 6 --missed --json
+bin/list_calls.py --live --hours 6 --json
 bin/list_calls.py --today --local --json
 
 # List stored call history and transcripts (deterministic read-only offline access)
@@ -81,6 +89,9 @@ bin/get_call_transcript.py --last --with "+14155551234" --json
 
 # Check whether a contact already has local SMS replies
 bin/list_sms_thread.py --phone "+14155551234" --json
+
+# List inbound SMS across all threads
+bin/list_sms_inbox.py --limit 20 --json
 
 # Sync Dialpad Stats text export metadata into local SMS SQLite
 bin/sync_sms_export.py --start-date 2026-05-13 --end-date 2026-05-13 --json
@@ -160,6 +171,7 @@ For all eligible inbound SMS and missed calls, the payload may also carry `inbou
 That pattern is CRM-agnostic: Attio is one example, but the same setup works with HubSpot, Pipedrive, Airtable, a spreadsheet, or a custom directory service downstream.
 Current-turn verification still applies: "Already sent" and "Already updated" are only valid after a fresh current-turn tool result, not from stale session memory.
 Successful SMS sends through `bin/send_sms.py`, both legs of `bin/send_group_intro.py`, and the approval lane append authoritative receipt evidence to `DIALPAD_SMS_RECEIPT_LEDGER` when configured, defaulting to `/data/.openclaw/state/dialpad/sms-receipts.jsonl`. The ledger is JSONL and is used by the OpenClaw SMS receipt guard as delivery evidence; failed sends and dry runs do not write receipts. When confirming a sent SMS to an operator, always include a literal `To: <number>` line or phrase so the downstream guard can bind the receipt to the intended recipient.
+When Grok Bot sends through `bin/send_sms.py`, a successful Dialpad response is also recorded as an outbound observation in the shared interaction log when `DIALPAD_LOG_URL` is configured. The observation includes the provider message id, exact body, sender, recipient, timestamp, outbound direction, and `source=local_send`. A log outage never retries the provider send: the observation is queued in `DIALPAD_LOG_OUTBOX` for record-only replay with `python3 scripts/log_outbox.py replay --json`.
 For SMS response checks, use `bin/list_sms_thread.py --phone PHONE --json` before claiming a thread has no visible reply history. The local SQLite store is the first-line operational history; Dialpad Stats export is slower and should be treated as a fallback/export path.
 If the runtime stores live SMS history outside the legacy `/home/art/clawd/logs/sms.db` path, set `DIALPAD_SMS_DB`. AlphaClaw exposes the live DB at `/home/art/niemand/logs/sms.db`; a missing `/home/art/clawd` path there means the old alias/default path is wrong, not that SMS history is unmounted.
 

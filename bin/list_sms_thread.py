@@ -28,7 +28,7 @@ from log_api_client import LogApiError, configured_log_url, get_data  # noqa: E4
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = WrapperArgumentParser(description="List local Dialpad SMS history for one phone number")
+    parser = WrapperArgumentParser(description="List Dialpad SMS history for one phone number")
     parser.add_argument("--phone", required=True, help="Contact phone number in E.164 format")
     parser.add_argument("--limit", type=int, default=20, help="Maximum messages to return (default: 20)")
     parser.add_argument("--json", action="store_true", help="Output JSON")

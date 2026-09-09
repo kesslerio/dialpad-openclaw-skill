@@ -340,6 +340,15 @@ def _message_find(conn, normalized: dict[str, Any]) -> Any:
     # observation has exactly the same constrained fallback fingerprint.
     if provider_id is not None:
         fingerprint = normalized["fingerprint"] if normalized.get("body_known") else normalized["fingerprint_base"]
+        if normalized.get("body_known"):
+            return conn.execute(
+                """SELECT * FROM messages
+                   WHERE fingerprint = ?
+                      OR (fingerprint_base = ?
+                          AND (body_known = 0 OR text IS NULL OR TRIM(text) = ''))
+                   ORDER BY id LIMIT 1""",
+                (fingerprint, normalized["fingerprint_base"]),
+            ).fetchone()
         return conn.execute(
             "SELECT * FROM messages WHERE fingerprint = ? OR fingerprint_base = ? ORDER BY id LIMIT 1",
             (fingerprint, normalized["fingerprint_base"]),

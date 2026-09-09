@@ -137,6 +137,27 @@ def test_known_fallback_messages_with_same_participants_and_minute_do_not_merge(
     assert log.thread("+14155550111")["count"] == 2
 
 
+def test_provider_id_does_not_merge_different_known_body_on_fallback_base(
+    log_paths: tuple[Path, Path],
+) -> None:
+    log = InteractionLog(sms_db=log_paths[0], calls_db=log_paths[1])
+
+    first = log.record_message(
+        _message(provider_id=None, body="First known body", timestamp=1770000120000)
+    )
+    second = log.record_message(
+        _message(
+            provider_id="provider-different-body",
+            body="Second known body",
+            timestamp=1770000120000,
+        )
+    )
+
+    assert first["created"] is True
+    assert second["created"] is True
+    assert log.thread("+14155550111")["count"] == 2
+
+
 def test_inbox_returns_inbound_messages_only(log_paths: tuple[Path, Path]) -> None:
     sms_db, calls_db = log_paths
     log = InteractionLog(sms_db=sms_db, calls_db=calls_db)

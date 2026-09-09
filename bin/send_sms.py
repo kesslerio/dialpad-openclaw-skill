@@ -33,6 +33,7 @@ if SCRIPTS_DIR not in sys.path:
     sys.path.append(SCRIPTS_DIR)
 
 import sms_approval
+from log_outbox import record_outbound_observation
 from outbound_destination_policy import normalize_supported_outbound_destinations
 
 _DIRECT_SEND_SMS_SPEC = importlib.util.spec_from_file_location(
@@ -439,6 +440,18 @@ def main() -> int:
                 raise
 
         receipt_meta = take_receipt_meta()
+        memory_sync = record_outbound_observation(
+            result,
+            to_numbers=list(args.to),
+            from_number=sender_number,
+            body=message_text,
+        )
+        memory_meta = {
+            key: value
+            for key, value in memory_sync.items()
+            if key.startswith("memory_")
+        }
+        combined_meta = {**(receipt_meta or {}), **memory_meta}
         approval_audit = record_approval_audit(args, result)
         annotated_result = attach_approval_audit(result, approval_audit)
 
@@ -447,7 +460,7 @@ def main() -> int:
                 command,
                 wrapper,
                 annotate_message_status(annotated_result) if isinstance(annotated_result, dict) else {"result": annotated_result},
-                meta_extra=receipt_meta,
+                meta_extra=combined_meta or None,
             )
         else:
             print(f"Selected sender: {sender_number} ({sender_source})")
@@ -465,6 +478,8 @@ def main() -> int:
                 audit_status = approval_audit.get("status")
                 audit_label = "recorded" if approval_audit.get("ok") else "failed"
                 print(f"   Approval audit: {audit_label} ({audit_status})")
+            if memory_sync.get("memory_sync") not in {None, "disabled"}:
+                print(f"   Memory sync: {memory_sync.get('memory_sync')}")
 
         return 0
     except WrapperError as err:

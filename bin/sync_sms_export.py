@@ -28,7 +28,8 @@ from _dialpad_compat import (  # noqa: E402
     run_generated_json,
 )
 from export_sms import build_create_args, download_file, poll_for_completion  # noqa: E402
-from sms_sqlite import init_db, store_message  # noqa: E402
+from interaction_log import InteractionLog  # noqa: E402
+from sms_sqlite import init_db  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,6 +90,8 @@ def export_row_to_webhook_payload(row: dict[str, str]) -> dict[str, Any] | None:
         "from_number": from_phone,
         "to_number": [to_phone],
         "text": "",
+        "body_known": False,
+        "source": "export_repair",
         "message_status": "exported",
         "message_delivery_result": None,
         "mms": str(row.get("mms") or "").strip().lower() in {"1", "true", "yes"},
@@ -122,7 +125,10 @@ def import_csv(path: str, *, dry_run: bool = False) -> dict[str, int]:
                     counts["skipped_existing"] += 1
                     continue
                 if not dry_run:
-                    store_message(conn, payload, is_new=False)
+                    # Export rows do not contain body text. The facade keeps
+                    # that observation additive and cannot erase a body later
+                    # captured by the webhook or a successful local send.
+                    InteractionLog().record_message(payload, is_new=False)
                 counts["imported"] += 1
     finally:
         conn.close()

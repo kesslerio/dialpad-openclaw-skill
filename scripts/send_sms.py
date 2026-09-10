@@ -16,6 +16,7 @@ import urllib.request
 import urllib.error
 
 from outbound_destination_policy import normalize_supported_outbound_destinations
+from log_outbox import record_outbound_observation
 
 
 # Configuration
@@ -127,6 +128,14 @@ def main():
             from_number=args.from_number,
             infer_country_code=args.infer_country_code
         )
+        if isinstance(result, dict):
+            memory_sync = record_outbound_observation(
+                result,
+                to_numbers=list(args.to),
+                from_number=args.from_number or str(result.get("from_number") or ""),
+                body=args.message,
+            )
+            result = {**result, **{key: value for key, value in memory_sync.items() if key.startswith("memory_")}}
 
         if args.json:
             print(json.dumps(result, indent=2))

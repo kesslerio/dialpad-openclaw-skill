@@ -39,6 +39,7 @@ Environment Variables:
 """
 
 import json
+import importlib.util
 import os
 import sys
 import time
@@ -72,12 +73,29 @@ try:
 except Exception:
     init_sms_history_db = None
 try:
-    from call_sqlite import init_db as init_call_history_db, store_call as record_stored_call
+    from interaction_log import InteractionLog
 except Exception:
-    init_call_history_db = None
-    record_stored_call = None
+    InteractionLog = None
+
+
+def record_stored_call(data):
+    """Route owner-side call observations through the shared facade."""
+    if InteractionLog is None:
+        raise RuntimeError("interaction log unavailable")
+    return InteractionLog().record_call(data, owner=True)
 try:
-    from send_sms import send_sms as dialpad_send_sms
+    # Load the provider helper under a private alias. Importing it as the
+    # top-level name ``send_sms`` lets pytest cache the script module before
+    # the supported bin/send_sms wrapper is imported, breaking wrapper tests.
+    _send_sms_spec = importlib.util.spec_from_file_location(
+        "_dialpad_provider_send_sms",
+        skill_dir / "send_sms.py",
+    )
+    if _send_sms_spec is None or _send_sms_spec.loader is None:
+        raise ImportError("unable to load send_sms provider helper")
+    _send_sms_module = importlib.util.module_from_spec(_send_sms_spec)
+    _send_sms_spec.loader.exec_module(_send_sms_module)
+    dialpad_send_sms = _send_sms_module.send_sms
 except Exception:
     dialpad_send_sms = None
 

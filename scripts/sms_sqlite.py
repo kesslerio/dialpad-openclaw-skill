@@ -150,10 +150,17 @@ def classify_delivery_status(message_status: Any, delivery_result: Any) -> dict[
     return {"outcome": "delivery_unknown", "terminal": False, "conflict": False}
 
 
-def init_db() -> sqlite3.Connection:
-    """Initialize the database with schema"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
+    """Initialize the database with schema.
+
+    ``db_path`` is optional so owner-side adapters can open an explicit
+    canonical database without mutating the module-level compatibility path.
+    Existing callers that patch ``DB_PATH`` or rely on ``DIALPAD_SMS_DB`` keep
+    their historical behavior.
+    """
+    target_path = Path(db_path).expanduser() if db_path is not None else DB_PATH
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(target_path)
     conn.execute("PRAGMA busy_timeout=5000")  # serialize concurrent webhook-thread writers
     try:
         conn.execute("PRAGMA journal_mode=WAL")  # best-effort; busy_timeout provides the serialization
@@ -183,11 +190,27 @@ def init_db() -> sqlite3.Connection:
         )
     """)
 
-    # Existing production databases predate delivery receipts. This additive
-    # migration is intentionally local and preserves every existing row.
+    # Existing production databases predate delivery receipts and interaction
+    # provenance. These additive migrations preserve every existing row.
     columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
     if "delivery_event_timestamp" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN delivery_event_timestamp INTEGER")
+    for column, definition in (
+        ("interaction_key", "TEXT"),
+        ("fingerprint", "TEXT"),
+        ("fingerprint_base", "TEXT"),
+        ("body_known", "BOOLEAN DEFAULT 0"),
+        ("body_source", "TEXT"),
+        ("source", "TEXT"),
+        ("observed_at", "TEXT"),
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
+    if "body_known" not in columns:
+        conn.execute(
+            "UPDATE messages SET body_known = 1 "
+            "WHERE text IS NOT NULL AND TRIM(text) != ''"
+        )
     
     # Contacts summary table (denormalized for fast lookups)
     conn.execute("""
@@ -247,6 +270,10 @@ def init_db() -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_read ON messages(read) WHERE read = 0")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_interaction_key "
+        "ON messages(interaction_key) WHERE interaction_key IS NOT NULL"
+    )
     
     conn.commit()
     return conn

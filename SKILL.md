@@ -10,7 +10,7 @@ Send SMS and make voice calls via the Dialpad API.
 
 ## When to Use
 
-**Native tools:** `submit_draft` (registered by this skill's `dialpad-draft-callback` plugin). **Owned entrypoints:** `list_sms_thread.py`, `list_call_history.py`, `lookup_contact.py`, `poll_voicemails.py`.
+**Native tools:** `submit_draft` (registered by this skill's `dialpad-draft-callback` plugin). **Owned entrypoints:** `list_sms_thread.py`, `list_sms_inbox.py`, `list_call_history.py`, `lookup_contact.py`, `poll_voicemails.py`.
 
 Use this skill to:
 - Send SMS messages (individual or batch)
@@ -69,7 +69,16 @@ bin/get_call_transcript.py --last --with "+14155551234" --json
 **Check SMS Thread History:**
 ```bash
 bin/list_sms_thread.py --phone "+14155551234" --json
+bin/list_sms_inbox.py --limit 20 --json
 ```
+
+When `DIALPAD_LOG_URL` is configured, SMS thread/inbox reads and call-list
+reads use the authenticated theshop interaction log by default. Use
+`bin/list_calls.py --live` only for an explicit live Dialpad query and
+`--local` for the legacy local calls database. After a successful
+`bin/send_sms.py`, the exact outbound observation is recorded through the
+shared log or queued in the record-only `DIALPAD_LOG_OUTBOX`; replaying that
+outbox never sends SMS or places calls.
 
 **Sync Direct Dialpad SMS Sends:**
 ```bash

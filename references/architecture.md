@@ -18,6 +18,7 @@ Dialpad OpenClaw Skill
 │   ├── create_sms_draft.py
 │   ├── approve_sms_draft.py
 │   ├── list_sms_thread.py
+│   ├── list_sms_inbox.py
 │   ├── sync_sms_export.py
 │   └── _dialpad_compat.py       # internal helper, not a command
 ├── generated/                    # Internal backend CLI used by wrappers
@@ -33,6 +34,11 @@ Dialpad OpenClaw Skill
 │   ├── create_sms_webhook.py
 │   ├── export_sms.py
 │   ├── lookup_contact.py
+│   ├── interaction_log.py
+│   ├── log_api_client.py
+│   ├── log_api_server.py
+│   ├── log_outbox.py
+│   ├── call_sqlite.py
 │   ├── sms_sqlite.py
 │   ├── sms_storage.py
 │   ├── webhook_sqlite.py
@@ -51,12 +57,17 @@ Dialpad OpenClaw Skill
 
 1. Wrapper receives task-oriented arguments.
 2. Wrapper chooses the narrow backend needed for the task.
-3. Most wrappers execute `generated/dialpad` with auth from env, while `bin/list_calls.py` and `bin/get_call_transcript.py` reuse proven `scripts/` HTTP helpers for call history and transcripts.
+3. Most wrappers execute `generated/dialpad` with auth from env. The SMS thread/inbox and calls wrappers use the authenticated shared interaction-log API when `DIALPAD_LOG_URL` is configured, while `bin/get_call_transcript.py` reuses proven `scripts/` HTTP/local helpers for transcripts.
 4. Wrapper normalizes output for downstream workflows.
 
 ## Script Layer
 
 Scripts in `scripts/` are retained for compatibility and operational workflows (webhooks, storage, exports, and call lookup utilities). They are no longer placed in repository root and are not the supported agent-facing interface.
+
+`interaction_log.py` is the canonical owner boundary for SMS and calls. The
+log API is a separate listener from provider webhook ingress, and
+`log_outbox.py` only replays successful-send observations; it never retries a
+provider send.
 
 ## Regeneration
 

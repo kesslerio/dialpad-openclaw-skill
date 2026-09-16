@@ -90,12 +90,12 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_json_success_envelope(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json", return_value={"id": "msg-1", "message_status": "pending"}), \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
                 send_sms,
-                ["bin/send_sms.py", "--to", "+14155550111", "--message", "hello", "--from", "+14155201316", "--json"],
+                ["bin/send_sms.py", "--to", "+14155550111", "--message", "hello", "--from", "+14155550140", "--json"],
             )
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
@@ -109,12 +109,12 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_json_success_envelope_status_fallback(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json", return_value={"id": "msg-2", "status": "pending"}), \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
                 send_sms,
-                ["bin/send_sms.py", "--to", "+14155550111", "--message", "hello", "--from", "+14155201316", "--json"],
+                ["bin/send_sms.py", "--to", "+14155550111", "--message", "hello", "--from", "+14155550140", "--json"],
             )
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
@@ -128,7 +128,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_json_dry_run_omits_audit_when_unused(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")):
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")):
             code, out, err = self._run(
                 send_sms,
                 [
@@ -138,7 +138,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "hello",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--dry-run",
                     "--json",
                 ],
@@ -171,7 +171,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_blocks_suspicious_stripped_currency(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json") as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -183,7 +183,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "Your lease buyout: ,035 (10% off + ,956 credit). Financing: ~45-156/month. That's about 0 LESS than your current 99/month lease.",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -198,7 +198,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_blocks_suspicious_multidigit_stripped_currency(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json") as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -210,7 +210,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "Your lease buyout: 0,035 after discount.",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -224,7 +224,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_blocks_suspicious_large_stripped_currency(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json") as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -236,7 +236,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "Your lease buyout: 20,035 after discount.",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -250,7 +250,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_allows_valid_currency(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json", return_value={"id": "msg-3", "message_status": "pending"}) as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -262,7 +262,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "Your lease buyout: $7,035. Financing: ~$145-156/month. That's about $50 LESS than your current $199/month lease.",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -274,7 +274,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_allows_usd_prefixed_currency(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json", return_value={"id": "msg-usd", "message_status": "pending"}) as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -286,7 +286,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "Quote is USD 20,035 after discount.",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -298,7 +298,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_allows_non_currency_thousands(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json", return_value={"id": "msg-5", "message_status": "pending"}) as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -310,7 +310,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "We had 1,000 attendees and 2,500 check-ins this month.",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -322,7 +322,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_allows_non_currency_lease_and_monthly_thousands(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json", return_value={"id": "msg-6", "message_status": "pending"}) as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -334,7 +334,7 @@ class JsonContractTests(unittest.TestCase):
                     "--message",
                     "Your lease includes 10,000 annual miles and monthly allowance is 1,000 minutes.",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -346,7 +346,7 @@ class JsonContractTests(unittest.TestCase):
 
     def test_send_sms_allows_explicit_suspicious_currency_override(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json", return_value={"id": "msg-4", "message_status": "pending"}) as run_generated_json, \
                 patch("send_sms.require_api_key"):
             code, out, err = self._run(
@@ -359,7 +359,7 @@ class JsonContractTests(unittest.TestCase):
                     "Financing: ~45-156/month.",
                     "--allow-suspicious-currency",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--json",
                 ],
             )
@@ -630,7 +630,7 @@ class JsonContractTests(unittest.TestCase):
                 "dialpad_id": 1,
                 "direction": "inbound",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "contact_name": "Jane Doe",
                 "timestamp": 1770000000000,
                 "text": "Question",
@@ -638,7 +638,7 @@ class JsonContractTests(unittest.TestCase):
             {
                 "dialpad_id": 2,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": "+14155550123",
                 "contact_name": "Jane Doe",
                 "timestamp": 1770000060000,
@@ -746,7 +746,7 @@ class JsonContractTests(unittest.TestCase):
                     "dialpad_id": 7,
                     "direction": "inbound",
                     "from_number": "+14155550123",
-                    "to_number": "+14155201316",
+                    "to_number": "+14155550140",
                     "contact_number": "+14155550123",
                     "timestamp": 1770000000000,
                     "text": "Hello",
@@ -783,7 +783,7 @@ class JsonContractTests(unittest.TestCase):
                 "contact_number": "4155550123",
                 "contact_name": "Jane Doe",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1770000000000,
                 "date_ended": 1770000060000,
                 "duration": 60,
@@ -881,8 +881,8 @@ class JsonContractTests(unittest.TestCase):
                     "+14155550123",
                     "Jane Doe",
                     "outbound" if idx == 0 else "inbound",
-                    "+14155201316" if idx == 0 else "+14155550123",
-                    "+14155550123" if idx == 0 else "+14155201316",
+                    "+14155550140" if idx == 0 else "+14155550123",
+                    "+14155550123" if idx == 0 else "+14155550140",
                     f"message {idx}",
                     1770000000000 + idx,
                 ),
@@ -930,7 +930,7 @@ class JsonContractTests(unittest.TestCase):
                 "Jane Doe",
                 "inbound",
                 "+14155550123",
-                "+14155201316",
+                "+14155550140",
                 "raw sensitive text",
                 1770000000000,
             ),
@@ -954,7 +954,7 @@ class JsonContractTests(unittest.TestCase):
         csv_path = Path("/tmp/test-sync-sms-export.csv")
         csv_path.write_text(
             '"date","message_id","name","email","target_type","target_id","sender_id","direction","to_phone","from_phone","encrypted_text","encrypted_aes_text","mms","timezone"\n'
-            '"2026-05-08 03:17:13.418699","6676061264355328","Sales","","department","6500922273529856","6500922273529856","internal","+16694009313","+14155201316","","","","UTC"\n',
+            '"2026-05-08 03:17:13.418699","6676061264355328","Sales","","department","6500922273529856","6500922273529856","internal","+16694009313","+14155550140","","","","UTC"\n',
             encoding="utf-8",
         )
 
@@ -982,7 +982,7 @@ class JsonContractTests(unittest.TestCase):
         csv_path = Path("/tmp/test-sync-sms-export-existing.csv")
         csv_path.write_text(
             '"date","message_id","name","email","target_type","target_id","sender_id","direction","to_phone","from_phone","encrypted_text","encrypted_aes_text","mms","timezone"\n'
-            '"2026-05-08 03:17:13.418699","6676061264355328","Sales","","department","6500922273529856","6500922273529856","internal","+16694009313","+14155201316","","","","UTC"\n',
+            '"2026-05-08 03:17:13.418699","6676061264355328","Sales","","department","6500922273529856","6500922273529856","internal","+16694009313","+14155550140","","","","UTC"\n',
             encoding="utf-8",
         )
 

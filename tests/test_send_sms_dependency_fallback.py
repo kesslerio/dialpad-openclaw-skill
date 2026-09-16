@@ -56,7 +56,7 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
         fake_api_response = {
             "id": "sms_998877",
             "message_status": "sent",
-            "from_number": "+14155201316",
+            "from_number": "+14155550140",
             "to_numbers": ["+14155550111"],
             "text": "Fallback delivered test",
         }
@@ -67,7 +67,7 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
                 "os.environ",
                 {
                     "DIALPAD_API_KEY": "fake_token",
-                    "DIALPAD_PROFILE_SALES_FROM": "+14155201316",
+                    "DIALPAD_PROFILE_SALES_FROM": "+14155550140",
                     "DIALPAD_SMS_RECEIPT_LEDGER": str(ledger_file),
                 },
             ):
@@ -92,7 +92,7 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
                                     "--to",
                                     "+14155550111",
                                     "--from",
-                                    "+14155201316",
+                                    "+14155550140",
                                     "--message",
                                     "Fallback delivered test",
                                     "--json",
@@ -104,7 +104,7 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
                             mock_direct_send.assert_called_once_with(
                                 to_numbers=["+14155550111"],
                                 message="Fallback delivered test",
-                                from_number="+14155201316",
+                                from_number="+14155550140",
                                 infer_country_code=False,
                             )
                             parsed = json.loads(out)
@@ -125,7 +125,7 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
             "os.environ",
             {
                 "DIALPAD_API_KEY": "fake_token",
-                "DIALPAD_PROFILE_SALES_FROM": "+14155201316",
+                "DIALPAD_PROFILE_SALES_FROM": "+14155550140",
             },
         ):
             with patch.object(send_sms, "require_generated_cli"):
@@ -148,7 +148,7 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
                                 "--to",
                                 "+14155550111",
                                 "--from",
-                                "+14155201316",
+                                "+14155550140",
                                 "--message",
                                 "Should fail gracefully",
                                 "--json",

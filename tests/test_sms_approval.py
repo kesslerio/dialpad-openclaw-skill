@@ -56,7 +56,7 @@ class SmsApprovalTests(unittest.TestCase):
         params = {
             "thread_key": "thread-1",
             "customer_number": "+15125550100",
-            "sender_number": "+14155201316",
+            "sender_number": "+14155550140",
             "draft_text": "See you at 2:30 PM Central.",
         }
         params.update(kwargs)
@@ -80,7 +80,7 @@ class SmsApprovalTests(unittest.TestCase):
 
         self.assertTrue(result["sent"])
         self.assertEqual(result["dialpad_sms_id"], "sms-1")
-        self.assertEqual(calls, [(["+15125550100"], "See you at 2:30 PM Central.", "+14155201316")])
+        self.assertEqual(calls, [(["+15125550100"], "See you at 2:30 PM Central.", "+14155550140")])
         stored = sms_approval.get_draft(self.conn, draft["draft_id"])
         self.assertEqual(stored["status"], sms_approval.STATUS_SENT)
         self.assertEqual(stored["approved_by"], "12345")
@@ -303,7 +303,7 @@ class SmsApprovalTests(unittest.TestCase):
             actor_id="12345",
             actor_username="operator",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
             claim=True,
             approved_at_ms=2000,
@@ -338,7 +338,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Different text.",
         )
 
@@ -355,7 +355,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550199",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
         )
         sender = sms_approval.preflight_agent_direct_send(
@@ -363,7 +363,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14153602954",
+            sender_number="+14155550100",
             draft_text="See you at 2:30 PM Central.",
         )
 
@@ -380,7 +380,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+991234567890",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
         )
 
@@ -398,7 +398,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
         )
 
@@ -417,7 +417,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
         )
         still_blocked = sms_approval.preflight_agent_direct_send(
@@ -425,7 +425,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
             confirm_risk=True,
         )
@@ -441,7 +441,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
             confirm_risk=True,
         )
@@ -459,7 +459,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
             claim=True,
         )
@@ -480,7 +480,7 @@ class SmsApprovalTests(unittest.TestCase):
             actor_id="12345",
             actor_username="first",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
             claim=True,
             approved_at_ms=2000,
@@ -491,7 +491,7 @@ class SmsApprovalTests(unittest.TestCase):
             actor_id="67890",
             actor_username="second",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
             claim=True,
             approved_at_ms=3000,
@@ -513,7 +513,7 @@ class SmsApprovalTests(unittest.TestCase):
             draft_id=draft["draft_id"],
             actor_id="12345",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="See you at 2:30 PM Central.",
             claim=True,
         )
@@ -573,7 +573,7 @@ class SmsApprovalTests(unittest.TestCase):
                     invalidate_customer_number="+15125550100",
                     thread_key="thread-1",
                     customer_number="+15125550100",
-                    sender_number="+14155201316",
+                    sender_number="+14155550140",
                     draft_text=f"Replacement draft {suffix}.",
                 )
             finally:
@@ -614,7 +614,7 @@ class SmsApprovalTests(unittest.TestCase):
             self.conn,
             thread_key="thread-2",
             customer_number="+15125550101",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Temporary draft.",
         )
         sms_approval.mark_opt_out(
@@ -666,7 +666,7 @@ class SmsApprovalTests(unittest.TestCase):
                 "--to",
                 "+15125550100",
                 "--from",
-                "+14155201316",
+                "+14155550140",
                 "--message",
                 "Exact CLI draft.",
                 "--json",
@@ -698,7 +698,7 @@ class SmsApprovalTests(unittest.TestCase):
                 "--to",
                 "+15125550100",
                 "--from",
-                "+14155201316",
+                "+14155550140",
                 "--message",
                 "Exact CLI draft.",
                 "--json",

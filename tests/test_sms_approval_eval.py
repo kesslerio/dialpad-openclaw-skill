@@ -51,7 +51,7 @@ def _make_approval_db(path: str, rows: list[dict]) -> None:
                 r.get("draft_id", f"draft_{i}"),
                 r.get("thread_key", "t"),
                 r.get("customer_number", "+14155550000"),
-                r.get("sender_number", "+14155201316"),
+                r.get("sender_number", "+14155550140"),
                 r.get("draft_text", "draft body"),
                 r.get("risk_state", "normal"),
                 r["status"],
@@ -130,7 +130,7 @@ class ExhaustivePartitionTests(unittest.TestCase):
 
 class CategoryAggregationTests(unittest.TestCase):
     def test_per_category_accept_reject_rates(self):
-        sales_meta = json.dumps({"line_display": "Sales (415) 520-1316"})
+        sales_meta = json.dumps({"line_display": "Sales (415) 555-0140"})
         support_meta = json.dumps({"line_display": "Support (415) 999-0000"})
         rows = [
             {"status": "sent", "metadata_json": sales_meta},
@@ -142,7 +142,7 @@ class CategoryAggregationTests(unittest.TestCase):
         ]
         stats = ev.aggregate_by_category(rows)
 
-        sales = stats["Sales (415) 520-1316"]
+        sales = stats["Sales (415) 555-0140"]
         self.assertEqual((sales.accept, sales.reject, sales.excluded), (2, 1, 0))
         self.assertAlmostEqual(sales.accept_rate, 2 / 3)
 
@@ -160,11 +160,11 @@ class CategoryAggregationTests(unittest.TestCase):
 
     def test_category_falls_back_to_sender_then_unknown(self):
         rows = [
-            {"status": "sent", "sender_number": "+14155201316", "metadata_json": None},
+            {"status": "sent", "sender_number": "+14155550140", "metadata_json": None},
             {"status": "sent", "sender_number": None, "metadata_json": None},
         ]
         stats = ev.aggregate_by_category(rows)
-        self.assertIn("+14155201316", stats)
+        self.assertIn("+14155550140", stats)
         self.assertIn("unknown", stats)
 
 
@@ -297,7 +297,7 @@ class PiiSafetyTests(unittest.TestCase):
         secret_body = "CALL ME AT 415-867-5309 ABOUT MY ORDER"
         secret_phone = "+14158675309"
         secret_name = "Jane Q. Customer"
-        meta = json.dumps({"line_display": "Sales (415) 520-1316"})
+        meta = json.dumps({"line_display": "Sales (415) 555-0140"})
         rows = [
             {
                 "status": "sent",
@@ -332,7 +332,7 @@ class PiiSafetyTests(unittest.TestCase):
         self.assertNotIn(secret_phone, blob)
         self.assertNotIn(secret_name, blob)
         # The business-line category label IS allowed.
-        self.assertIn("Sales (415) 520-1316", blob)
+        self.assertIn("Sales (415) 555-0140", blob)
 
     def test_fetch_drafts_does_not_select_draft_text(self):
         # Belt-and-suspenders: the windowed query never pulls customer body.
@@ -353,7 +353,7 @@ class DeterminismAndWindowTests(unittest.TestCase):
     def test_frozen_window_is_reproducible(self):
         # Two pulses over the same frozen [start,end] must be identical, and
         # a pending row inside the window must not change the decided counts.
-        meta = json.dumps({"line_display": "Sales (415) 520-1316"})
+        meta = json.dumps({"line_display": "Sales (415) 555-0140"})
         rows_data = [
             {"status": "sent", "created_at_ms": 1_500_000, "metadata_json": meta},
             {"status": "stale", "invalidated_reason": "manual_outbound", "created_at_ms": 1_600_000, "metadata_json": meta},

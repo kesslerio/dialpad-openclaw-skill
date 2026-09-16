@@ -227,9 +227,9 @@ DIALPAD_PUBLIC_PROSPECT_SEARCH_CACHE_TTL_SECONDS = int(
 DIALPAD_JSON_COMMAND_MAX_OUTPUT_CHARS = int(os.environ.get("DIALPAD_JSON_COMMAND_MAX_OUTPUT_CHARS", "65536"))
 
 DEFAULT_LINE_NAMES = {
-    "+14155201316": "Sales",
-    "+14153602954": "Work",
-    "+14159917155": "Support",
+    "+14155550140": "Sales",
+    "+14155550100": "Work",
+    "+14155550141": "Support",
     "+14159065785": "Main",
     "+18332974273": "Main",
 }
@@ -379,7 +379,7 @@ def normalize_phone_number(phone_number):
 
 
 DIALPAD_AUTO_REPLY_SALES_LINE = normalize_phone_number(
-    os.environ.get("DIALPAD_AUTO_REPLY_SALES_LINE", "+14155201316")
+    os.environ.get("DIALPAD_AUTO_REPLY_SALES_LINE", "+14155550140")
 )
 INBOUND_CONTEXT_FRESHNESS_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
 CURRENT_EVENT_EXCLUSION_MS = 60 * 1000

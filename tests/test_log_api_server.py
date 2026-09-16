@@ -66,7 +66,7 @@ def test_record_endpoint_is_idempotent_and_thread_reads_same_data(running_server
     observation = {
         "provider_id": "msg-api-1",
         "direction": "outbound",
-        "from_number": "+14155201316",
+        "from_number": "+14155550140",
         "to_number": "+14155550111",
         "body": "Recorded once",
         "timestamp": 1770000000000,

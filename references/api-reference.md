@@ -50,9 +50,9 @@ The OpenAPI-generated CLI (`generated/dialpad`) exposes 241 endpoints. It is the
 
 ```bash
 bin/send_sms.py --to "+14155550111" --message 'Hello' --profile work
-bin/send_sms.py --to "+14155550111" --from "+14155201316" --message 'Exact approved text' --resolve-draft-id smsdraft_abc123 --approval-actor-id "telegram-user-123" --json
-printf '%s' 'The premium hardshell travel case is $499.' | bin/send_sms.py --to "+14155550111" --from "+14155201316" --message-stdin --dry-run
-bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
+bin/send_sms.py --to "+14155550111" --from "+14155550140" --message 'Exact approved text' --resolve-draft-id smsdraft_abc123 --approval-actor-id "telegram-user-123" --json
+printf '%s' 'The premium hardshell travel case is $499.' | bin/send_sms.py --to "+14155550111" --from "+14155550140" --message-stdin --dry-run
+bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14155550100"
 bin/list_calls.py --today --limit 20
 bin/list_calls.py --hours 6 --missed --json
 bin/list_calls.py --today --local --json
@@ -80,7 +80,7 @@ dialpad users users.get --id "5765607478525952"
 dialpad stats stats.create --stat-type "calls" --export-type "stats" --days-ago-start 7 --days-ago-end 0
 
 # Known-good explicit SMS send shape:
-dialpad --output json sms sms.send --from-number "+14155201316" --to-numbers "+14155551234" --text "Hello" --infer-country-code false
+dialpad --output json sms sms.send --from-number "+14155550140" --to-numbers "+14155551234" --text "Hello" --infer-country-code false
 
 # Note on users command discovery:
 # The generated CLI does not provide `users list`. Probing `users list` is invalid.
@@ -188,7 +188,7 @@ dialpad subscriptions webhook_voicemail_event_subscription.create \
   "status": "pending",
   "message_delivery_result": "pending",
   "to_numbers": ["+14158235304"],
-  "from_number": "+14155201316",
+  "from_number": "+14155550140",
   "direction": "outbound"
 }
 ```

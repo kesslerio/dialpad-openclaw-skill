@@ -12,7 +12,7 @@ def _observation() -> dict[str, object]:
     return {
         "provider_id": "msg-outbox-1",
         "direction": "outbound",
-        "from_number": "+14155201316",
+        "from_number": "+14155550140",
         "to_number": "+14155550111",
         "body": "exact queued body",
         "timestamp": 1770000000000,
@@ -30,7 +30,7 @@ def test_successful_send_record_failure_is_queued_without_retrying_provider(tmp_
         result = record_outbound_observation(
             {"id": "msg-outbox-1", "message_status": "pending"},
             to_numbers=["+14155550111"],
-            from_number="+14155201316",
+            from_number="+14155550140",
             body="exact queued body",
         )
 

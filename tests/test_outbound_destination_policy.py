@@ -44,7 +44,7 @@ def test_approval_lane_transport_rejects_non_nanp_recipient_before_api(monkeypat
             legacy_send_sms.send_sms(
                 ["+442071838750"],
                 "Hello",
-                from_number="+14155201316",
+                from_number="+14155550140",
             )
 
     urlopen.assert_not_called()
@@ -58,7 +58,7 @@ def test_approval_lane_transport_rejects_mixed_batch_before_api(monkeypatch):
             legacy_send_sms.send_sms(
                 ["+14155550100", "+442071838750"],
                 "Hello",
-                from_number="+14155201316",
+                from_number="+14155550140",
             )
 
     urlopen.assert_not_called()
@@ -74,7 +74,7 @@ def test_legacy_sms_normalizes_inferred_nanp_before_api(monkeypatch):
         legacy_send_sms.send_sms(
             ["4155550100"],
             "Hello",
-            from_number="+14155201316",
+            from_number="+14155550140",
             infer_country_code=True,
         )
 

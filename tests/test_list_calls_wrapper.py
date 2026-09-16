@@ -120,7 +120,7 @@ class ListCallsWrapperTests(unittest.TestCase):
                 "contact_number": "4155550123",
                 "contact_name": "Jane",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1770000000000,
                 "date_ended": 1770000060000,
                 "duration": 60,

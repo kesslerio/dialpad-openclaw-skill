@@ -54,7 +54,7 @@ class SendSmsWrapperTests(unittest.TestCase):
 
         with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
-                patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14153602954"}, clear=False), \
+                patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14155550100"}, clear=False), \
                 patch("send_sms.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main(send_sms, [
                 "--to", "+14155550111",
@@ -64,9 +64,9 @@ class SendSmsWrapperTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
-        self.assertIn("Selected sender: +14153602954", out)
+        self.assertIn("Selected sender: +14155550100", out)
         payload = json.loads(calls[0][3])
-        self.assertEqual(payload["from_number"], "+14153602954")
+        self.assertEqual(payload["from_number"], "+14155550100")
 
     def test_send_sms_profile_requires_configured_sender(self):
         with patch("send_sms.require_generated_cli"), \
@@ -100,11 +100,11 @@ class SendSmsWrapperTests(unittest.TestCase):
     def test_send_sms_conflict_between_from_and_profile(self):
         with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
-                patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14153602954"}, clear=False), \
+                patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14155550100"}, clear=False), \
                 patch("send_sms.run_generated_json"):
             code, out, err = self._run_main(send_sms, [
                 "--to", "+14155550111",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--profile", "work",
                 "--message", "Hello",
             ])
@@ -122,11 +122,11 @@ class SendSmsWrapperTests(unittest.TestCase):
 
         with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
-                patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14153602954"}, clear=False), \
+                patch.dict("os.environ", {"DIALPAD_PROFILE_WORK_FROM": "+14155550100"}, clear=False), \
                 patch("send_sms.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main(send_sms, [
                 "--to", "+14155550111",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--profile", "work",
                 "--allow-profile-mismatch",
                 "--message", "Hello",
@@ -135,8 +135,8 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
         payload = json.loads(calls[0][3])
-        self.assertEqual(payload["from_number"], "+14155201316")
-        self.assertIn("Selected sender: +14155201316", out)
+        self.assertEqual(payload["from_number"], "+14155550140")
+        self.assertIn("Selected sender: +14155550140", out)
 
     def test_send_sms_reports_accepted_queued_for_pending_result(self):
         def fake_run_generated(cmd: list[str]):
@@ -148,7 +148,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                 patch("send_sms.run_generated_json", side_effect=fake_run_generated):
             code, out, err = self._run_main(send_sms, [
                 "--to", "+14155550111",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--message", "Hello",
             ])
 
@@ -163,7 +163,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                 patch("send_sms.run_generated_json") as run_json:
             code, out, err = self._run_main(send_sms, [
                 "--to", "+14155550111",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--message", "Hello",
                 "--dry-run",
             ])
@@ -173,7 +173,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(require_key.call_count, 0)
         self.assertEqual(run_json.call_count, 0)
         self.assertIn("Dry run: SMS not sent", out)
-        self.assertIn("Selected sender: +14155201316", out)
+        self.assertIn("Selected sender: +14155550140", out)
         self.assertIn("Message source: --message", out)
         self.assertIn("Message preview:", out)
         self.assertIn("Hello", out)
@@ -184,7 +184,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                 patch("send_sms.run_generated_json") as run_json:
             code, out, err = self._run_main(send_sms, [
                 "--to", "+442071838750",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--message", "Hello",
             ])
 
@@ -200,7 +200,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                 patch("send_sms.run_generated_json") as run_json:
             code, out, err = self._run_main(send_sms, [
                 "--to", "+442071838750",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--message", "Hello",
                 "--json",
             ])
@@ -227,7 +227,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                 ):
             code, out, err = self._run_main(send_sms, [
                 "--to", "4155550100",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--message", "Hello",
                 "--infer-country-code",
                 "--json",
@@ -257,7 +257,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                     patch("send_sms.run_generated_json", side_effect=fake_run_generated):
                 code, out, err = self._run_main(send_sms, [
                     "--to", "+14155550111",
-                    "--from", "+14155201316",
+                    "--from", "+14155550140",
                     "--message-file", message_path,
                 ])
         finally:
@@ -267,7 +267,7 @@ class SendSmsWrapperTests(unittest.TestCase):
         self.assertEqual(err, "")
         payload = json.loads(calls[0][3])
         self.assertEqual(payload["text"], "The premium hardshell travel case is $499.")
-        self.assertIn("Selected sender: +14155201316", out)
+        self.assertIn("Selected sender: +14155550140", out)
 
     def test_send_sms_message_stdin_dry_run_shows_exact_message(self):
         with patch.object(sys, "stdin", io.StringIO("It's $499 typically.")), \
@@ -276,7 +276,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                 patch("send_sms.run_generated_json") as run_json:
             code, out, err = self._run_main(send_sms, [
                 "--to", "+14155550111",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--message-stdin",
                 "--dry-run",
             ])
@@ -299,7 +299,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                     patch("send_sms.run_generated_json"):
                 code, out, err = self._run_main(send_sms, [
                     "--to", "+14155550111",
-                    "--from", "+14155201316",
+                    "--from", "+14155550140",
                     "--message-file", message_path,
                 ])
         finally:
@@ -320,7 +320,7 @@ class SendSmsWrapperTests(unittest.TestCase):
                     patch("send_sms.run_generated_json"):
                 code, out, err = self._run_main(send_sms, [
                     "--to", "+14155550111",
-                    "--from", "+14155201316",
+                    "--from", "+14155550140",
                     "--message-file", message_path,
                 ])
         finally:
@@ -361,7 +361,7 @@ class SendGroupIntroTests(unittest.TestCase):
             code, out, err = self._run_main([
                 "--prospect", "+14155550111",
                 "--reference", "+14155559999",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--message", "Please connect",
             ])
 
@@ -376,7 +376,7 @@ class SendGroupIntroTests(unittest.TestCase):
             code, out, err = self._run_main([
                 "--prospect", "+14155550111",
                 "--reference", "+14155559999",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--confirm-share",
                 "--dry-run",
                 "--json",
@@ -396,7 +396,7 @@ class SendGroupIntroTests(unittest.TestCase):
 
     def test_send_group_intro_rejects_non_nanp_party_before_api(self):
         with patch("send_group_intro.require_generated_cli"), \
-                patch("send_group_intro.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_group_intro.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_group_intro.require_api_key") as require_key, \
                 patch("send_group_intro.run_generated_json") as run_json:
             code, out, err = self._run_main([
@@ -447,7 +447,7 @@ class SendGroupIntroTests(unittest.TestCase):
             code, out, err = self._run_main([
                 "--prospect", "+14155550111",
                 "--reference", "+14155559999",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--confirm-share",
                 "--json",
             ])
@@ -461,8 +461,8 @@ class SendGroupIntroTests(unittest.TestCase):
         payload_b = json.loads(calls[1][3])
         self.assertEqual(payload_a["to_numbers"], ["+14155550111"])
         self.assertEqual(payload_b["to_numbers"], ["+14155559999"])
-        self.assertEqual(payload_a["from_number"], "+14155201316")
-        self.assertEqual(payload_b["from_number"], "+14155201316")
+        self.assertEqual(payload_a["from_number"], "+14155550140")
+        self.assertEqual(payload_b["from_number"], "+14155550140")
         parsed = json.loads(out)
         self.assertTrue(parsed["ok"])
         self.assertEqual(parsed["command"], "send_group_intro.send")
@@ -485,7 +485,7 @@ class SendGroupIntroTests(unittest.TestCase):
             code, out, err = self._run_main([
                 "--prospect", "+14155550111",
                 "--reference", "+14155559999",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--confirm-share",
             ])
 
@@ -503,7 +503,7 @@ class SendGroupIntroTests(unittest.TestCase):
             code, out, err = self._run_main([
                 "--prospect", "+14155550111",
                 "--reference", "+14155559999",
-                "--from", "+14155201316",
+                "--from", "+14155550140",
                 "--confirm-share",
             ])
 

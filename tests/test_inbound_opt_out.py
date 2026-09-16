@@ -29,7 +29,7 @@ def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(inbou
             conn,
             thread_key="prior-thread",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Prior draft must not remain approvable.",
         )
     finally:
@@ -38,7 +38,7 @@ def test_inbound_opt_out_blocks_hooks_sends_and_invalidates_pending_drafts(inbou
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "I need a real person. Please don't bother me anymore.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -81,7 +81,7 @@ def test_opt_out_persistence_failure_records_emergency_block(inbound_driver, mon
             conn,
             thread_key="prior-thread",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Prior draft must not remain approvable.",
         )
     finally:
@@ -95,7 +95,7 @@ def test_opt_out_persistence_failure_records_emergency_block(inbound_driver, mon
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Please stop texting me.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -132,7 +132,7 @@ def test_opt_out_persistence_total_failure_reports_failure_status(inbound_driver
             conn,
             thread_key="prior-thread",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Prior draft must not remain approvable.",
         )
     finally:
@@ -146,7 +146,7 @@ def test_opt_out_persistence_total_failure_reports_failure_status(inbound_driver
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Please stop texting me.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -168,7 +168,7 @@ def test_standard_stop_keyword_blocks_sms_automation(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "STOPALL",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -187,7 +187,7 @@ def test_opt_out_with_security_code_persists_opt_out_before_sensitive_filter(inb
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Your security code is 123456. Do not contact me.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -206,7 +206,7 @@ def test_stop_by_phrase_does_not_create_permanent_opt_out(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Can we stop by later?",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -225,7 +225,7 @@ def test_closed_office_autoresponder_with_boilerplate_does_not_opt_out(inbound_d
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Thank you for reaching out to ACME Clinic. Our office is closed until Monday 8am. Reply STOP to unsubscribe.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -242,12 +242,12 @@ def test_closed_office_autoresponder_with_boilerplate_does_not_opt_out(inbound_d
 
 def test_second_inbound_without_conversation_id_invalidates_previous_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
 
     first = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "message_id": "msg-1",
         "text": "First question.",
     }
@@ -258,7 +258,7 @@ def test_second_inbound_without_conversation_id_invalidates_previous_draft(inbou
     second = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "message_id": "msg-2",
         "text": "Second question.",
     }
@@ -281,14 +281,14 @@ def test_outbound_sms_invalidates_pending_approval_draft(inbound_driver):
             conn,
             thread_key="thread-1",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Pending draft.",
         )
         second_draft = webhook_server.sms_approval.create_draft(
             conn,
             thread_key="thread-2",
             customer_number="+14155550124",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Second pending draft.",
         )
     finally:
@@ -296,7 +296,7 @@ def test_outbound_sms_invalidates_pending_approval_draft(inbound_driver):
 
     payload = {
         "direction": "outbound",
-        "from_number": "+14155201316",
+        "from_number": "+14155550140",
         "to_number": ["+14155550123", "+14155550124"],
         "text": "Human replied.",
     }
@@ -318,12 +318,12 @@ def test_outbound_sms_invalidates_pending_approval_draft(inbound_driver):
 
 def test_risky_inbound_sales_sms_creates_two_step_approval_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
 
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "I need to talk to a real person about the meeting time.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -350,7 +350,7 @@ def test_risky_inbound_sales_sms_creates_two_step_approval_draft(inbound_driver,
 
 def test_previously_opted_out_customer_gets_blocked_status_not_persistence_failure(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
 
     conn = webhook_server.sms_approval.init_db()
     try:
@@ -366,7 +366,7 @@ def test_previously_opted_out_customer_gets_blocked_status_not_persistence_failu
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Can you answer one more question?",
     }
     capture = inbound_driver.dispatch_sms(payload)

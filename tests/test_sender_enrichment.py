@@ -23,7 +23,7 @@ def _unknown_sales_event(text="Need help"):
         "event_type": "sms",
         "sender": "+12025550142",
         "sender_number": "+12025550142",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": text,
         "message_id": "msg-phone-intel",
     }
@@ -116,7 +116,7 @@ def test_lookup_contact_enrichment_401_degraded_and_cached_fallback(monkeypatch,
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Need callback",
     }
     handler, status = build_handler(payload)
@@ -707,7 +707,7 @@ def test_sales_comms_context_summarizes_sms_and_gmail_without_message_bodies(mon
             (
                 "+16155574482",
                 "outbound",
-                "+14155201316",
+                "+14155550140",
                 "+16155574482",
                 "Looks like the demo booking did not finish. https://bysha.pe/book-demo",
                 1760000000000 - 1000,
@@ -723,7 +723,7 @@ def test_sales_comms_context_summarizes_sms_and_gmail_without_message_bodies(mon
             (
                 "+16155574482",
                 "outbound",
-                "+14155201316",
+                "+14155550140",
                 "+16155574482",
                 "Second private booking-link follow-up https://bysha.pe/book-demo",
                 1760000000000 - 500,
@@ -755,7 +755,7 @@ def test_sales_comms_context_summarizes_sms_and_gmail_without_message_bodies(mon
         {
             "event_type": "missed_call",
             "sender_number": "+16155574482",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "timestamp": 1760000000000,
         },
         crm_context={
@@ -781,7 +781,7 @@ def test_sales_comms_context_summarizes_sms_and_gmail_without_message_bodies(mon
 
 def test_sales_comms_context_not_applicable_without_demo_missed_call(monkeypatch):
     ctx = webhook_server.lookup_sales_comms_context(
-        {"event_type": "sms", "sender_number": "+16155574482", "recipient_number": "+14155201316"},
+        {"event_type": "sms", "sender_number": "+16155574482", "recipient_number": "+14155550140"},
         crm_context={"usable": True, "stage": "Demo Request"},
     )
     assert ctx == {"usable": False, "status": "not_applicable"}

@@ -41,7 +41,7 @@ class SmsSqliteCacheCleanupTests(unittest.TestCase):
             "created_date": ts,
             "direction": "inbound",
             "from_number": phone,
-            "to_number": ["+14155201316"],
+            "to_number": ["+14155550140"],
             "text": f"msg-{dialpad_id}",
             "contact": {"name": name},
         }

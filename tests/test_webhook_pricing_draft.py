@@ -38,7 +38,7 @@ def test_direct_pricing_draft_uses_approved_lease_wording_exactly():
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+13144494744",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "How much is it",
     }
     sender_enrichment = {
@@ -64,7 +64,7 @@ def test_direct_pricing_draft_uses_approved_lease_wording_exactly():
 
 def test_shirley_moore_scenario_suppresses_generic_crm_acknowledgement(monkeypatch, tmp_path):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     monkeypatch.setattr(webhook_server, "lookup_recent_sms_thread", lambda *_a, **_k: [])
     monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", tmp_path / "approvals.db")
 
@@ -81,7 +81,7 @@ def test_shirley_moore_scenario_suppresses_generic_crm_acknowledgement(monkeypat
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+13144494744",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "How much is it",
         "timestamp": 1750000000000,
         "first_contact": {
@@ -127,7 +127,7 @@ def test_build_contextual_sales_sms_reply_suppressed_for_pricing_intent():
     event = {
         "event_type": "sms",
         "sender_number": "+13144494744",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "How much is it",
         "inbound_context": {"contextDraftAllowed": True},
     }
@@ -142,7 +142,7 @@ def test_short_direct_pricing_variants():
         normalized_event = {
             "event_type": "sms",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": text,
         }
         reply = webhook_server.build_rich_sms_reply(normalized_event)

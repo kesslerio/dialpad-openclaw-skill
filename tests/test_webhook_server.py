@@ -336,8 +336,8 @@ class LineTopicRoutingTests(unittest.TestCase):
     """Line-based Telegram topic routing for inbound-SMS notification/approval cards."""
 
     ROUTES = {
-        "+14155201316": "telegram:group:-1003882776023:topic:3530",
-        "+14153602954": "telegram:group:-1003882776023:topic:3533",
+        "+14155550140": "telegram:group:-1003882776023:topic:3530",
+        "+14155550100": "telegram:group:-1003882776023:topic:3533",
         "+14159065785": "telegram:group:-1003882776023:topic:3537",
     }
 
@@ -366,8 +366,8 @@ class LineTopicRoutingTests(unittest.TestCase):
     def test_parse_line_topic_routes_normalizes_keys(self):
         routes = self._routes_map()
         # Keys normalized to last-10-digit form for inbound matching.
-        self.assertEqual(routes["4155201316"], "telegram:group:-1003882776023:topic:3530")
-        self.assertEqual(routes["4153602954"], "telegram:group:-1003882776023:topic:3533")
+        self.assertEqual(routes["4155550140"], "telegram:group:-1003882776023:topic:3530")
+        self.assertEqual(routes["4155550100"], "telegram:group:-1003882776023:topic:3533")
         self.assertEqual(routes["4159065785"], "telegram:group:-1003882776023:topic:3537")
 
     def test_parse_line_topic_routes_defensive_on_bad_json(self):
@@ -393,7 +393,7 @@ class LineTopicRoutingTests(unittest.TestCase):
                 patch.object(webhook_server, "DIALPAD_PRIORITY_ROUTE_TO", ""):
             # Dialpad payloads often wrap to_number in a list.
             chat_id, thread_id = webhook_server.resolve_telegram_route(
-                "+14155550123", ["+14153602954"]
+                "+14155550123", ["+14155550100"]
             )
         self.assertEqual(chat_id, "-1003882776023")
         self.assertEqual(thread_id, "3533")
@@ -434,7 +434,7 @@ class LineTopicRoutingTests(unittest.TestCase):
             payload = webhook_server.build_openclaw_hook_payload({
                 "event_type": "sms",
                 "sender_number": "+17018333346",
-                "recipient_number": "+14155201316",
+                "recipient_number": "+14155550140",
                 "text": "Hi I got a confirmation?",
             })
 
@@ -514,7 +514,7 @@ class MissedCallResolutionTests(unittest.TestCase):
             },
             {
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "event_ts_ms": 1760000000000,
             },
         )
@@ -526,13 +526,13 @@ class MissedCallResolutionTests(unittest.TestCase):
                 "timestamp": 1760000000000,
                 "call": {
                     "from_number": "+14155550123",
-                    "to_number": "+14155201316",
+                    "to_number": "+14155550140",
                 },
             }
         }
         resolved = resolve_missed_call_context(payload)
         self.assertEqual(resolved["from_number"], "+14155550123")
-        self.assertEqual(resolved["to_number"], "+14155201316")
+        self.assertEqual(resolved["to_number"], "+14155550140")
         self.assertEqual(resolved["caller_resolution_path"], "payload_inferred")
         self.assertEqual(resolved["line_resolution_path"], "payload_inferred")
 
@@ -550,21 +550,21 @@ class MissedCallResolutionTests(unittest.TestCase):
         payload = {
             "timestamp": 1760000000000,
             "caller_number": "+14155550123",
-            "called_number": "+14155201316",
+            "called_number": "+14155550140",
         }
         resolved = resolve_missed_call_context(payload)
         self.assertEqual(resolved["from_number"], "+14155550123")
-        self.assertEqual(resolved["to_number"], "+14155201316")
+        self.assertEqual(resolved["to_number"], "+14155550140")
         self.assertEqual(resolved["caller_resolution_path"], "payload_direct")
         self.assertEqual(resolved["line_resolution_path"], "payload_direct")
 
     def test_legacy_line_number_fallback_infers_line_display(self):
         payload = {
             "timestamp": 1760000000000,
-            "line_number": "+14155201316",
+            "line_number": "+14155550140",
         }
         resolved = resolve_missed_call_context(payload, history_fetcher=lambda _ts: [])
-        self.assertEqual(resolved["line_display"], "Sales (415) 520-1316")
+        self.assertEqual(resolved["line_display"], "Sales (415) 555-0140")
         self.assertEqual(resolved["line_resolution_path"], "payload_inferred")
 
     def test_history_backfill_resolution(self):
@@ -582,7 +582,7 @@ class MissedCallResolutionTests(unittest.TestCase):
                     "date_started": 1760000000500,
                     "external_number": "+14155550999",
                     "entry_point_target": {
-                        "phone": "+14159917155",
+                        "phone": "+14155550141",
                         "name": "Support",
                     },
                 }
@@ -590,7 +590,7 @@ class MissedCallResolutionTests(unittest.TestCase):
 
         resolved = resolve_missed_call_context(payload, history_fetcher=fake_history)
         self.assertEqual(resolved["from_number"], "+14155550999")
-        self.assertEqual(resolved["to_number"], "+14159917155")
+        self.assertEqual(resolved["to_number"], "+14155550141")
         self.assertEqual(resolved["caller_resolution_path"], "payload_direct")
         self.assertEqual(resolved["line_resolution_path"], "history_backfill")
 
@@ -613,7 +613,7 @@ class MissedCallResolutionTests(unittest.TestCase):
                     "duration": 65,
                     "date_started": 1760000000050,
                     "external_number": "+14155550999",
-                    "entry_point_target": {"phone": "+14159917155", "name": "Support"},
+                    "entry_point_target": {"phone": "+14155550141", "name": "Support"},
                 }
             ]
 
@@ -638,7 +638,7 @@ class MissedCallResolutionTests(unittest.TestCase):
                     "duration": 0,
                     "date_started": 1760000000050,
                     "external_number": "+14155550999",
-                    "entry_point_target": {"phone": "+14159917155", "name": "Support"},
+                    "entry_point_target": {"phone": "+14155550141", "name": "Support"},
                 }
             ]
 
@@ -663,7 +663,7 @@ class MissedCallResolutionTests(unittest.TestCase):
                     "duration": "",
                     "date_started": 1760000000050,
                     "external_number": "+14155550000",
-                    "entry_point_target": {"phone": "+14159917155", "name": "Support"},
+                    "entry_point_target": {"phone": "+14155550141", "name": "Support"},
                 }
             ]
 
@@ -727,7 +727,7 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
                     conn,
                     thread_key="thread-1",
                     customer_number="+15125550100",
-                    sender_number="+14155201316",
+                    sender_number="+14155550140",
                     draft_text="Stored exact text.",
                 )
             finally:
@@ -742,7 +742,7 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
         response = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(status["code"], 200)
         self.assertTrue(response["sent"])
-        self.assertEqual(send_calls, [(["+15125550100"], "Stored exact text.", "+14155201316")])
+        self.assertEqual(send_calls, [(["+15125550100"], "Stored exact text.", "+14155550140")])
         self.assertIn("answerCallbackQuery", [method for method, _payload in telegram_api_calls])
         self.assertIn("editMessageReplyMarkup", [method for method, _payload in telegram_api_calls])
         self.assertIn("sendMessage", [method for method, _payload in telegram_api_calls])
@@ -775,7 +775,7 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
                     conn,
                     thread_key="thread-1",
                     customer_number="+15125550100",
-                    sender_number="+14155201316",
+                    sender_number="+14155550140",
                     draft_text="Stored exact text.",
                     risk_state=webhook_server.sms_approval.RISK_RISKY,
                     risk_reason="customer asked for a real person",
@@ -824,7 +824,7 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
                     conn,
                     thread_key="thread-1",
                     customer_number="+15125550100",
-                    sender_number="+14155201316",
+                    sender_number="+14155550140",
                     draft_text="Stored exact text.",
                 )
             finally:
@@ -1113,7 +1113,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, \
                 patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
-                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140"), \
                 patch.object(webhook_server, "DIALPAD_CRM_CONTEXT_COMMAND", "crm"), \
                 patch.object(webhook_server, "_run_context_command", side_effect=[crm_payload, calendar_payload]), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
@@ -1164,7 +1164,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "call-123",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000000000,
             }
             handler, status = _build_handler(payload)
@@ -1227,7 +1227,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "root-call",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000000000,
             }
             child = {
@@ -1235,8 +1235,8 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_id": "child-call",
                 "entry_point_call_id": "root-call",
                 "date_started": 1760000002500,
-                "target": {"name": "Martin Kessler", "phone": "+14153602954"},
-                "entry_point_target": {"name": "Sales", "phone": "+14155201316"},
+                "target": {"name": "Martin Kessler", "phone": "+14155550100"},
+                "entry_point_target": {"name": "Sales", "phone": "+14155550140"},
             }
 
             first_handler, first_status = _build_handler(parent)
@@ -1289,7 +1289,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_id": "child-1",
                 "entry_point_call_id": "root-call",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000002500,
             }
             second_child = {
@@ -1342,7 +1342,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_id": "child-call",
                 "entry_point_call_id": "root-call",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000002500,
             }
             handler, status = _build_handler(payload)
@@ -1379,7 +1379,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "call-123",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000000000,
             }
             handler, status = _build_handler(payload)
@@ -1419,7 +1419,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "call-123",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000000000,
             }
             handler, status = _build_handler(payload)
@@ -1454,7 +1454,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_state": "missed",
                 "call_id": "call-123",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000000000,
             }
             handler, status = _build_handler(payload)
@@ -1489,7 +1489,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_state": "answered",
                 "call_id": "call-123",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
             }
             handler, status = _build_handler(payload)
             webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
@@ -1530,7 +1530,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "call-123",
                 "from_number": "+14155550123",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": 1760000000000,
             }
             handler, status = _build_handler(payload)
@@ -1559,7 +1559,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         calendar_payload = {"usable": False, "status": "not_found"}
         recent_call = {
             "external_number": "+14322083277",
-            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+            "entry_point_target": {"phone": "+14155550140", "name": "Sales"},
             "date_started": event_ts - (2 * 24 * 60 * 60 * 1000),
             "direction": "inbound",
             "state": "hangup",
@@ -1569,7 +1569,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, \
                 patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
-                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140"), \
                 patch.object(webhook_server, "DIALPAD_CRM_CONTEXT_COMMAND", "crm"), \
                 patch.object(webhook_server, "_run_context_command", side_effect=[crm_payload, calendar_payload]), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
@@ -1613,7 +1613,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "call-123",
                 "from_number": "+14322083277",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": event_ts,
             }
             handler, status = _build_handler(payload)
@@ -1644,7 +1644,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         event_ts = 1760000000000
         stale_call = {
             "external_number": "+14322083277",
-            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+            "entry_point_target": {"phone": "+14155550140", "name": "Sales"},
             "date_started": event_ts - (16 * 24 * 60 * 60 * 1000),
             "direction": "inbound",
             "state": "hangup",
@@ -1654,7 +1654,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, \
                 patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
-                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140"), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
                 patch.object(
@@ -1691,7 +1691,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "call-123",
                 "from_number": "+14322083277",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": event_ts,
             }
             handler, status = _build_handler(payload)
@@ -1713,7 +1713,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         event_ts = 1760000000000
         recent_call = {
             "external_number": "+14322083277",
-            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+            "entry_point_target": {"phone": "+14155550140", "name": "Sales"},
             "date_started": event_ts - (2 * 24 * 60 * 60 * 1000),
             "direction": "inbound",
             "state": "hangup",
@@ -1723,7 +1723,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, \
                 patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
                 patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), \
-                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316"), \
+                patch.object(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140"), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CALL_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "token-123"), \
                 patch.object(
@@ -1760,7 +1760,7 @@ class CallWebhookHandlerTests(unittest.TestCase):
                 "call_missed": True,
                 "call_id": "call-123",
                 "from_number": "+14322083277",
-                "to_number": "+14155201316",
+                "to_number": "+14155550140",
                 "date_started": event_ts,
                 "contact": {"name": "Payload Person"},
             }
@@ -1798,7 +1798,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         with patch.object(webhook_server, "WEBHOOK_SECRET", "secret-123"):
             payload = {
                 "from_number": "+14155550123",
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "duration": 19,
                 "voicemail_transcription": "Please call me back.",
             }
@@ -1818,7 +1818,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
             webhook_server,
             "DIALPAD_AUTO_REPLY_SALES_LINE",
-            "4155201316",
+            "4155550140",
         ), patch.object(
             webhook_server,
             "lookup_contact_enrichment",
@@ -1850,7 +1850,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ):
             payload = {
                 "from_number": "+14155550123",
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "duration": 19,
                 "voicemail_transcription": "Please call me back.",
             }
@@ -1875,7 +1875,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
             webhook_server,
             "DIALPAD_AUTO_REPLY_SALES_LINE",
-            "4155201316",
+            "4155550140",
         ), patch.object(
             webhook_server,
             "lookup_contact_enrichment",
@@ -1896,7 +1896,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ):
             payload = {
                 "from_number": "+14155550123",
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "duration": 19,
                 "voicemail_transcription": "STOP texting me.",
             }
@@ -1932,7 +1932,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
             webhook_server,
             "DIALPAD_AUTO_REPLY_SALES_LINE",
-            "4155201316",
+            "4155550140",
         ), patch.object(
             webhook_server,
             "lookup_contact_enrichment",
@@ -1957,7 +1957,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ):
             payload = {
                 "from_number": customer_number,
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "duration": 19,
                 "voicemail_transcription": "STOP texting me.",
             }
@@ -1985,7 +1985,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
             webhook_server,
             "DIALPAD_AUTO_REPLY_SALES_LINE",
-            "4155201316",
+            "4155550140",
         ), patch.object(
             webhook_server,
             "lookup_contact_enrichment",
@@ -2006,7 +2006,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ):
             payload = {
                 "from_number": "+14155550123",
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "duration": 19,
                 "voicemail_transcription": "Please stop texting me.",
             }
@@ -2036,7 +2036,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True), patch.object(
             webhook_server,
             "DIALPAD_AUTO_REPLY_SALES_LINE",
-            "4155201316",
+            "4155550140",
         ), patch.object(
             webhook_server,
             "lookup_contact_enrichment",
@@ -2053,7 +2053,7 @@ class VoicemailWebhookHandlerTests(unittest.TestCase):
         ), patch.object(webhook_server, "send_to_telegram", return_value=True):
             payload = {
                 "from_number": "+14155550123",
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "duration": 19,
                 "voicemail_transcription": "I need to talk to a real person.",
             }
@@ -2315,7 +2315,7 @@ class MissedCallHistoryFetchTests(unittest.TestCase):
 
         payload_resolved = {
             "from_number": "+14155550123",
-            "to_number": "+14155201316",
+            "to_number": "+14155550140",
             "date_started": 1760000000000,
         }
         # When caller and line are present, resolve_missed_call_context MUST NOT call history fetcher

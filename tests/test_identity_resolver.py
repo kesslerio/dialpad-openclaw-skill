@@ -35,7 +35,7 @@ PERSON_FULL = {
             "active_from": "2026-01-01T00:00:00Z",
         }],
         "company": [{"target_record_id": "co-1", "target_object": "companies"}],
-        "phone_numbers": [{"phone_number": "+14155201316"}],
+        "phone_numbers": [{"phone_number": "+14155550140"}],
     },
 }
 
@@ -94,7 +94,7 @@ class AttioPhoneHighTests(unittest.TestCase):
     def test_attio_phone_high(self):
         fake = make_fake_request(person_for_phone=PERSON_FULL)
         with with_key(), patch.object(attio, "_request", side_effect=fake):
-            out = resolver.resolve_identity("+1 (415) 520-1316")
+            out = resolver.resolve_identity("+1 (415) 555-0140")
         self.assertEqual(out["confidence"], "high")
         self.assertEqual(out["identity"]["name"], "Jane Doe")
         self.assertEqual(out["identity"]["first_name"], "Jane")
@@ -111,7 +111,7 @@ class AttioPhoneHighTests(unittest.TestCase):
         fake = make_fake_request(person_for_phone=PERSON_FULL)
         contact = {"name": "J. Doe (stale)", "company": None, "title": "VP"}
         with with_key(), patch.object(attio, "_request", side_effect=fake):
-            out = resolver.resolve_identity("+14155201316", dialpad_contact=contact)
+            out = resolver.resolve_identity("+14155550140", dialpad_contact=contact)
         self.assertEqual(out["confidence"], "high")
         self.assertEqual(out["identity"]["name"], "Jane Doe")  # Attio wins
         self.assertEqual(out["identity"]["company"], "Acme Corp")
@@ -171,7 +171,7 @@ class EmailFollowupHighTests(unittest.TestCase):
             return {"data": []}
 
         with with_key(), patch.object(attio, "_request", side_effect=fake):
-            out = resolver.resolve_identity("+14155201316", email="someone@else.com")
+            out = resolver.resolve_identity("+14155550140", email="someone@else.com")
         self.assertEqual(out["confidence"], "high")
         self.assertNotIn("attio_email", out["sources"])
         # No people query carried an email_addresses filter.
@@ -300,7 +300,7 @@ class SecretLeakTests(unittest.TestCase):
     def test_secret_never_appears_in_output(self):
         with patch.dict("os.environ", {"ATTIO_API_KEY": "SENTINEL"}), \
              patch.object(attio, "_request", side_effect=attio.AttioError("http_403")):
-            out = resolver.resolve_identity("+14155201316", dialpad_contact={"name": "Z"})
+            out = resolver.resolve_identity("+14155550140", dialpad_contact={"name": "Z"})
         self.assertNotIn("SENTINEL", json.dumps(out))
 
 
@@ -310,7 +310,7 @@ class ImportSafeTests(unittest.TestCase):
         # never even reach the HTTP layer (urlopen is not called).
         with patch.dict("os.environ", {}, clear=True), \
              patch("attio_context.urllib.request.urlopen") as urlopen:
-            out = resolver.resolve_identity("+14155201316")
+            out = resolver.resolve_identity("+14155550140")
         urlopen.assert_not_called()
         self.assertEqual(out["confidence"], "low")
 
@@ -341,7 +341,7 @@ class CodexP2RegressionTests(unittest.TestCase):
     def test_numeric_phone_does_not_raise(self):
         # No API key -> no network; the entrypoint must still return a contract.
         with patch.dict("os.environ", {}, clear=True):
-            out = resolver.resolve_identity(14155201316)  # int, not str
+            out = resolver.resolve_identity(14155550140)  # int, not str
         self.assertEqual(set(out), {"identity", "confidence", "sources"})
         self.assertEqual(out["confidence"], "low")
 
@@ -349,7 +349,7 @@ class CodexP2RegressionTests(unittest.TestCase):
         # A coerced numeric phone still reaches Attio and can resolve high.
         fake = make_fake_request(person_for_phone=PERSON_FULL)
         with with_key(), patch.object(attio, "_request", side_effect=fake):
-            out = resolver.resolve_identity(14155201316)
+            out = resolver.resolve_identity(14155550140)
         self.assertEqual(out["confidence"], "high")
         self.assertEqual(out["identity"]["name"], "Jane Doe")
         self.assertIn("attio_phone", out["sources"])

@@ -21,7 +21,7 @@ def test_inbound_sensitive_sms_filtered_for_hook_and_telegram(inbound_driver):
             conn,
             thread_key="prior-thread",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Old draft must stale when sensitive inbound arrives.",
         )
     finally:
@@ -30,7 +30,7 @@ def test_inbound_sensitive_sms_filtered_for_hook_and_telegram(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Your OTP code is 773311 for login.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -53,7 +53,7 @@ def test_inbound_shortcode_sms_filtered_for_hook_and_telegram(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "12345",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Code 009821 to verify.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -74,7 +74,7 @@ def test_inbound_hook_and_telegram_paths_share_eligible_result(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Inbound hello",
     }
     capture = inbound_driver.dispatch_sms(payload)

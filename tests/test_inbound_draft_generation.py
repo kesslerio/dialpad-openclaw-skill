@@ -22,7 +22,7 @@ from inbound_driver import _FakeCompletedProcess, _FakeResponse
 def test_not_eligible_inbound_stales_pending_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
     monkeypatch.setattr(webhook_server, "DIALPAD_RICH_SMS_DRAFTS_ENABLED", False)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     inbound_driver.set_contact_lookup(
         contact_name="Jane Doe",
         first_name="Jane",
@@ -36,9 +36,9 @@ def test_not_eligible_inbound_stales_pending_draft(inbound_driver, monkeypatch):
     try:
         pending = webhook_server.sms_approval.create_draft(
             conn,
-            thread_key="hook:dialpad:sms:14155550123:14155201316",
+            thread_key="hook:dialpad:sms:14155550123:14155550140",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Old draft must stale when contact is now known.",
         )
     finally:
@@ -47,7 +47,7 @@ def test_not_eligible_inbound_stales_pending_draft(inbound_driver, monkeypatch):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "I already spoke with someone.",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -69,12 +69,12 @@ def test_not_eligible_inbound_stales_pending_draft(inbound_driver, monkeypatch):
 
 def test_inbound_sales_sms_creates_approval_draft_on_first_contact(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
 
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Do you have the same type of machine?",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -98,12 +98,12 @@ def test_inbound_sales_sms_creates_approval_draft_on_first_contact(inbound_drive
 def test_inbound_sales_sms_creates_generic_draft_for_payload_contact(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
     monkeypatch.setattr(webhook_server, "DIALPAD_RICH_SMS_DRAFTS_ENABLED", False)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
 
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Can I know the difference between the consumer and business version?",
         "contact": {"name": "Payload Person"},
     }
@@ -132,7 +132,7 @@ def test_inbound_sales_sms_creates_generic_draft_for_payload_contact(inbound_dri
 
 def test_recent_thread_link_issue_creates_rich_approval_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     now_ms = 1760000000000
     conn = sms_sqlite.init_db()
     try:
@@ -141,7 +141,7 @@ def test_recent_thread_link_issue_creates_rich_approval_draft(inbound_driver, mo
             {
                 "id": 2001,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+15109125052"],
                 "text": "You can grab a time here: bysha.pe/book-demo",
                 "created_date": now_ms - 5 * 60 * 1000,
@@ -155,7 +155,7 @@ def test_recent_thread_link_issue_creates_rich_approval_draft(inbound_driver, mo
                 "id": 2003,
                 "direction": "inbound",
                 "from_number": "+15109125052",
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "text": "I tried https://customer.example.test/wrong",
                 "created_date": now_ms - 2 * 60 * 1000,
                 "contact": {"name": "Gabriela Valle"},
@@ -169,7 +169,7 @@ def test_recent_thread_link_issue_creates_rich_approval_draft(inbound_driver, mo
         "id": 2002,
         "direction": "inbound",
         "from_number": "+15109125052",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "The link doesn't work",
         "created_date": now_ms,
         "contact": {"name": "Gabriela Valle"},
@@ -213,7 +213,7 @@ def test_recent_sms_thread_context_excludes_current_message(monkeypatch, tmp_pat
             {
                 "id": 3001,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+15109125052"],
                 "text": "You can grab a time here: bysha.pe/book-demo",
                 "created_date": now_ms - 5 * 60 * 1000,
@@ -226,7 +226,7 @@ def test_recent_sms_thread_context_excludes_current_message(monkeypatch, tmp_pat
                 "id": 3002,
                 "direction": "inbound",
                 "from_number": "+15109125052",
-                "to_number": ["+14155201316"],
+                "to_number": ["+14155550140"],
                 "text": "The link doesn't work",
                 "created_date": now_ms,
             },
@@ -257,7 +257,7 @@ def test_recent_sms_thread_context_filters_stale_and_wrong_line_links(monkeypatc
             {
                 "id": 3101,
                 "direction": "outbound",
-                "from_number": "+14159917155",
+                "from_number": "+14155550141",
                 "to_number": ["+15109125052"],
                 "text": "Old support link: https://support.example.test/wrong",
                 "created_date": now_ms - 5 * 60 * 1000,
@@ -269,7 +269,7 @@ def test_recent_sms_thread_context_filters_stale_and_wrong_line_links(monkeypatc
             {
                 "id": 3102,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+15109125052"],
                 "text": "Stale sales link: https://stale.example.test/book",
                 "created_date": now_ms - 20 * 24 * 60 * 60 * 1000,
@@ -281,7 +281,7 @@ def test_recent_sms_thread_context_filters_stale_and_wrong_line_links(monkeypatc
             {
                 "id": 3103,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+15109125052"],
                 "text": "Fresh sales link: bysha.pe/book-demo",
                 "created_date": now_ms - 5 * 60 * 1000,
@@ -295,7 +295,7 @@ def test_recent_sms_thread_context_filters_stale_and_wrong_line_links(monkeypatc
         "+15109125052",
         current_dialpad_id=3104,
         current_timestamp_ms=now_ms,
-        current_line_number="+14155201316",
+        current_line_number="+14155550140",
     )
 
     thread_text = " ".join(item["text"] for item in thread)
@@ -305,7 +305,7 @@ def test_recent_sms_thread_context_filters_stale_and_wrong_line_links(monkeypatc
 
 def test_product_question_uses_shapescale_knowledge_for_rich_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     monkeypatch.setattr(
         webhook_server,
         "lookup_shapescale_knowledge",
@@ -320,7 +320,7 @@ def test_product_question_uses_shapescale_knowledge_for_rich_draft(inbound_drive
         "id": 4001,
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "How does the business scanner work?",
         "contact": {"name": "Payload Person"},
     }
@@ -346,7 +346,7 @@ def test_product_question_falls_back_when_knowledge_unavailable(monkeypatch, tmp
     approval_db = tmp_path / "approvals.db"
     monkeypatch.setattr(webhook_server, "WEBHOOK_SECRET", "")
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     monkeypatch.setattr(webhook_server.sms_approval, "DB_PATH", approval_db)
     monkeypatch.setattr(
         webhook_server,
@@ -356,7 +356,7 @@ def test_product_question_falls_back_when_knowledge_unavailable(monkeypatch, tmp
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+14155550123",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "How does the business scanner work?",
         "first_contact": {
             "knownContact": False,
@@ -582,7 +582,7 @@ def test_cad_pricing_question_uses_knowledge_before_crm(monkeypatch):
         {
             "event_type": "sms",
             "sender_number": "+15148179929",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "Personal use\nHow\nMuch is it in CAD dollars?",
             "inbound_context": {
                 "identityConfidence": "high",
@@ -600,7 +600,7 @@ def test_cad_pricing_question_uses_knowledge_before_crm(monkeypatch):
 
 def test_pricing_question_with_unavailable_knowledge_does_not_use_generic_crm_fallback(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     monkeypatch.setattr(webhook_server, "lookup_recent_sms_thread", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         webhook_server,
@@ -621,7 +621,7 @@ def test_pricing_question_with_unavailable_knowledge_does_not_use_generic_crm_fa
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15148179929",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Personal use\nHow\nMuch is it in CAD dollars?",
         "first_contact": {
             "knownContact": True,
@@ -687,12 +687,12 @@ def test_failed_rich_lookup_is_cached_for_generic_fallback(monkeypatch):
         return {"usable": False, "status": "timeout", "text": ""}
 
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     monkeypatch.setattr(webhook_server, "lookup_shapescale_knowledge", _lookup)
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+14155550123",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "How does the business scanner work?",
         "first_contact": {
             "knownContact": False,
@@ -708,7 +708,7 @@ def test_failed_rich_lookup_is_cached_for_generic_fallback(monkeypatch):
 
 def test_known_sales_sms_creates_crm_aware_approval_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     inbound_driver.set_contact_lookup(
         contact_name="Gabriela Valle (Evolve from within medspa)",
         first_name="Gabriela",
@@ -745,7 +745,7 @@ def test_known_sales_sms_creates_crm_aware_approval_draft(inbound_driver, monkey
             {
                 "id": 5001,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+15109125052"],
                 "text": "Looking forward to our ShapeScale demo.",
                 "created_date": now_ms - 60 * 60 * 1000,
@@ -760,7 +760,7 @@ def test_known_sales_sms_creates_crm_aware_approval_draft(inbound_driver, monkey
         "id": 5002,
         "direction": "inbound",
         "from_number": "+15109125052",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Thanks, sounds good",
         "created_date": now_ms,
         "contact": {"name": "Gabriela Valle"},
@@ -790,7 +790,7 @@ def test_known_sales_sms_creates_crm_aware_approval_draft(inbound_driver, monkey
 
 def test_running_late_sms_creates_meeting_aware_approval_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     inbound_driver.set_contact_lookup(
         contact_name="Gabriela Valle (Evolve from within medspa)",
         first_name="Gabriela",
@@ -835,7 +835,7 @@ def test_running_late_sms_creates_meeting_aware_approval_draft(inbound_driver, m
             {
                 "id": 5101,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+15109125052"],
                 "text": "See you on the demo shortly.",
                 "created_date": now_ms - 20 * 60 * 1000,
@@ -850,7 +850,7 @@ def test_running_late_sms_creates_meeting_aware_approval_draft(inbound_driver, m
         "id": 5102,
         "direction": "inbound",
         "from_number": "+15109125052",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "I'm running 5 min late",
         "created_date": now_ms,
         "contact": {"name": "Gabriela Valle"},
@@ -878,12 +878,12 @@ def test_running_late_sms_creates_meeting_aware_approval_draft(inbound_driver, m
 
 def test_availability_sms_uses_calendar_aware_reply_for_demo_prospect(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     calendar_calls = []
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Do you have anything today?",
         "timestamp": 1760000000000,
         "first_contact": {
@@ -936,11 +936,11 @@ def test_availability_sms_uses_calendar_aware_reply_for_demo_prospect(monkeypatc
 
 def test_availability_sms_without_calendar_match_does_not_create_crm_draft(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Do you have anything today?",
         "timestamp": 1760000000000,
         "first_contact": {
@@ -986,11 +986,11 @@ def test_non_scheduling_anything_question_does_not_trigger_availability():
 
 def test_availability_sms_without_crm_context_does_not_create_generic_draft(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Do you have anything today?",
         "timestamp": 1760000000000,
         "first_contact": {
@@ -1025,12 +1025,12 @@ def test_availability_sms_without_crm_context_does_not_create_generic_draft(monk
 
 def test_low_confidence_availability_sms_does_not_create_customer_draft(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     calendar_calls = []
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Do you have anything today?",
         "timestamp": 1760000000000,
         "first_contact": {
@@ -1082,7 +1082,7 @@ def test_calendar_context_sanitizes_candidate_windows(monkeypatch):
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Do you have anything today?",
         "timestamp": 1760000000000,
         "inbound_context": {
@@ -1142,7 +1142,7 @@ def test_high_confidence_non_demo_availability_sms_does_not_lookup_calendar(monk
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Do you have anything today?",
         "timestamp": 1760000000000,
         "inbound_context": {
@@ -1173,12 +1173,12 @@ def test_high_confidence_non_demo_availability_sms_does_not_lookup_calendar(monk
 
 def test_meeting_logistics_without_calendar_match_falls_back_safely(monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     calendar_calls = []
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "I'm running 5 min late",
         "timestamp": 1760000000000,
         "first_contact": {
@@ -1237,7 +1237,7 @@ def test_model_draft_uses_compact_tool_facts_for_crm_reply(monkeypatch):
     normalized_event = {
         "event_type": "missed_call",
         "sender_number": "+16155574482",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "line_display": "Sales",
         "inbound_context": {
@@ -1301,7 +1301,7 @@ def test_model_draft_fails_closed_on_unsafe_output(monkeypatch):
     normalized_event = {
         "event_type": "missed_call",
         "sender_number": "+16155574482",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {
             "identityConfidence": "high",
@@ -1346,7 +1346,7 @@ def test_model_draft_omits_low_confidence_crm_facts(monkeypatch):
     normalized_event = {
         "event_type": "missed_call",
         "sender_number": "+16155574482",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {
             "identityConfidence": "medium",
@@ -1389,7 +1389,7 @@ def test_model_draft_rejects_internal_tool_names(monkeypatch):
     normalized_event = {
         "event_type": "missed_call",
         "sender_number": "+16155574482",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {
             "identityConfidence": "high",
@@ -1641,7 +1641,7 @@ def test_recent_thread_link_skips_model_rewrite(monkeypatch):
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+14155550123",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "The link does not work",
         "recent_sms_thread": [
             {
@@ -1660,7 +1660,7 @@ def test_recent_thread_link_skips_model_rewrite(monkeypatch):
 
 def test_known_recent_sales_sms_creates_context_approval_draft(inbound_driver, monkeypatch):
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     inbound_driver.set_contact_lookup(
         contact_name="Ann Harper",
         first_name="Ann",
@@ -1678,7 +1678,7 @@ def test_known_recent_sales_sms_creates_context_approval_draft(inbound_driver, m
             {
                 "id": 1001,
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+14322083277"],
                 "text": "Prior ShapeScale follow-up.",
                 "created_date": now_ms - (2 * 24 * 60 * 60 * 1000),
@@ -1693,7 +1693,7 @@ def test_known_recent_sales_sms_creates_context_approval_draft(inbound_driver, m
         "id": 1002,
         "direction": "inbound",
         "from_number": "+14322083277",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Can you call me?",
         "created_date": now_ms,
         "contact": {"name": "Ann Harper"},
@@ -1725,7 +1725,7 @@ def test_should_send_proactive_reply_requires_unknown_lookup(monkeypatch, lookup
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+14155550123",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "first_contact": {
             "knownContact": False,
             "lookup": {
@@ -1744,7 +1744,7 @@ def test_should_send_proactive_reply_allows_payload_contact_sms_generic_draft(mo
     normalized_event = {
         "event_type": "sms",
         "sender_number": "+14155550123",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "first_contact": {
             "knownContact": False,
             "needsDraftReply": True,
@@ -1761,7 +1761,7 @@ def test_should_send_proactive_reply_allows_payload_contact_sms_generic_draft(mo
 def test_should_send_proactive_reply_suppresses_generic_draft_for_active_thread(monkeypatch, tmp_path):
     sms_db = tmp_path / "sms.db"
     monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_ENABLED", True)
-    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155201316")
+    monkeypatch.setattr(webhook_server, "DIALPAD_AUTO_REPLY_SALES_LINE", "4155550140")
     monkeypatch.setattr(sms_sqlite, "DB_PATH", sms_db)
     now_ms = 1760000000000
     conn = sms_sqlite.init_db()
@@ -1771,7 +1771,7 @@ def test_should_send_proactive_reply_suppresses_generic_draft_for_active_thread(
             {
                 "id": "prior-outbound",
                 "direction": "outbound",
-                "from_number": "+14155201316",
+                "from_number": "+14155550140",
                 "to_number": ["+15109125052"],
                 "text": "You can grab a time here: bysha.pe/book-demo",
                 "created_date": now_ms - 5 * 60 * 1000,
@@ -1786,7 +1786,7 @@ def test_should_send_proactive_reply_suppresses_generic_draft_for_active_thread(
         "message_id": "current-inbound",
         "timestamp": now_ms,
         "sender_number": "+15109125052",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "first_contact": {
             "knownContact": False,
             "needsDraftReply": True,
@@ -1805,7 +1805,7 @@ def test_missed_call_low_confidence_with_crm_gets_segment_copy_without_company()
     event = {
         "event_type": "missed_call",
         "sender_number": "+12034916798",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {"identityConfidence": "low"},
         "crm_context": {
@@ -1824,7 +1824,7 @@ def test_missed_call_low_confidence_no_crm_gets_generic():
     event = {
         "event_type": "missed_call",
         "sender_number": "+12034916798",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {"identityConfidence": "low"},
         "crm_context": {"usable": False, "status": "not_configured"},
@@ -1838,7 +1838,7 @@ def test_missed_call_demo_booked_includes_timing():
     event = {
         "event_type": "missed_call",
         "sender_number": "+12034916798",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {"identityConfidence": "high"},
         "crm_context": {
@@ -1861,7 +1861,7 @@ def test_missed_call_demo_recent_mentions_followup():
     event = {
         "event_type": "missed_call",
         "sender_number": "+12034916798",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {"identityConfidence": "high"},
         "crm_context": {
@@ -1882,7 +1882,7 @@ def test_missed_call_urgency_stamped_when_demo_within_2h():
     event = {
         "event_type": "missed_call",
         "sender_number": "+12034916798",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {"identityConfidence": "high"},
         "crm_context": {
@@ -1903,7 +1903,7 @@ def test_missed_call_no_urgency_when_demo_beyond_2h():
     event = {
         "event_type": "missed_call",
         "sender_number": "+12034916798",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "",
         "inbound_context": {"identityConfidence": "high"},
         "crm_context": {

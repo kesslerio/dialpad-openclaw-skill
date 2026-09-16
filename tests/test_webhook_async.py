@@ -37,7 +37,7 @@ def _inbound(message_id):
     return {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "text": "hi there",
         "message_id": message_id,
     }
@@ -116,7 +116,7 @@ class AckFirstIdempotencyTests(unittest.TestCase):
 
     def test_outbound_acks_once_without_claim(self):
         handler, status = _build_handler({
-            "direction": "outbound", "from_number": "+14155201316",
+            "direction": "outbound", "from_number": "+14155550140",
             "to_number": "+14155550123", "text": "hi", "message_id": "out-1",
         })
         with patch.object(ws, "sms_approval", None):
@@ -195,7 +195,7 @@ class MissedCallAckFirstTests(unittest.TestCase):
             "call_missed": True,
             "call_id": call_id,
             "from_number": "+14155550123",
-            "to_number": "+14155201316",
+            "to_number": "+14155550140",
             "date_started": 1760000000000,
         }
 
@@ -269,7 +269,7 @@ class MissedCallAckFirstTests(unittest.TestCase):
             "duration": 0,
             "date_started": 1760000000500,
             "external_number": "+14155550123",
-            "entry_point_target": {"phone": "+14155201316", "name": "Sales"},
+            "entry_point_target": {"phone": "+14155550140", "name": "Sales"},
         }
         lookup = MagicMock(return_value={
             "contact_name": None,

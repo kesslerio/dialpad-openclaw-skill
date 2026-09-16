@@ -106,7 +106,7 @@ class SmsDedupeKeyTests(unittest.TestCase):
         self.assertEqual(ws.sms_dedupe_key({"id": "X9"}), "X9")
 
     def test_synthesizes_stable_key_when_no_id(self):
-        payload = {"from_number": "+14155550123", "to_number": "+14155201316",
+        payload = {"from_number": "+14155550123", "to_number": "+14155550140",
                    "created_date": "2026-06-19T09:00:00Z", "text": "hello"}
         k1 = ws.sms_dedupe_key(payload)
         k2 = ws.sms_dedupe_key(dict(payload))

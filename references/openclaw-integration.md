@@ -84,7 +84,7 @@ Behavior:
 - `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=0` (default) omits `sessionKey` from the outbound request payload, allowing OpenClaw to run with `hooks.allowRequestSessionKey=false` without breaking Dialpad ingress; OpenClaw derives session keys server-side via trusted hook mapping or transform (`hooks/transforms/dialpad-hook-transform.mjs`). Set `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=1` only for legacy configurations requiring client-supplied session keys.
 - when OpenClaw hook delivery and the local Dialpad Telegram card resolve to the same Telegram target, the local card owns the visible operator notification by default; the hook request carries structured context with `deliver=false` and `operatorNotification.hookDelivery=context_only`
 - set `DIALPAD_ALLOW_DUPLICATE_OPERATOR_DELIVERY=1` only for intentional same-target fanout; a different hook target or Telegram topic remains independently deliverable
-- when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, eligible first-contact messages on the sales line `(415) 520-1316` create exact-text approval drafts instead of sending SMS directly, even when identity is low-confidence and the draft must stay generic
+- when `DIALPAD_AUTO_REPLY_ENABLED` is truthy, eligible first-contact messages on the sales line `(415) 555-0140` create exact-text approval drafts instead of sending SMS directly, even when identity is low-confidence and the draft must stay generic
 - eligible Sales SMS may create ShapeScale knowledge-backed approval drafts for obvious product, booking, link, and pricing questions; recent Dialpad SMS history resolves active-thread references, qmd-backed ShapeScale knowledge supplies factual answers, customer-facing SMS text stays citation-free, and unavailable or ambiguous knowledge fails closed to existing generic, no-draft, or human-only behavior
 - high-confidence fresh Sales SMS may create CRM-aware approval drafts from compact Attio context; targeted calendar lookup is only for obvious meeting logistics such as lateness, joining, rescheduling, meeting links, and demo-prospect availability requests, and ambiguous CRM/calendar context fails closed without unsupported claims
 - availability requests such as "Do you have anything today?" use calendar-aware approval drafts when bounded candidate windows are available; when availability cannot be verified, generic CRM follow-up copy is suppressed so the hook path does not create a competing scheduling suggestion
@@ -167,8 +167,8 @@ The webhook may include a `firstContact` object for first-time or otherwise unkn
   "keepBrief": false,
   "contactName": null,
   "senderNumber": "+14155550123",
-  "recipientNumber": "+14155201316",
-  "lineDisplay": "Sales (415) 520-1316",
+  "recipientNumber": "+14155550140",
+  "lineDisplay": "Sales (415) 555-0140",
   "eventType": "sms",
   "lookup": {
     "status": "not_found",
@@ -205,8 +205,8 @@ The webhook may include an `inboundContext` object for eligible inbound SMS and 
   "knownContact": true,
   "contactName": "Ann Harper",
   "senderNumber": "+14322083277",
-  "recipientNumber": "+14155201316",
-  "lineDisplay": "Sales (415) 520-1316",
+  "recipientNumber": "+14155550140",
+  "lineDisplay": "Sales (415) 555-0140",
   "eventType": "missed_call",
   "evidence": ["dialpad_contact_name", "exact_phone_match", "dialpad_call_history"],
   "recency": {
@@ -236,7 +236,7 @@ Interpretation:
 
 ```json
 {
-  "message": "📩 Dialpad SMS\nFrom: Jane Doe (+14155550123)\nTo: Sales (415) 520-1316\nTime: 1760000000000\n\nMessage: Need a callback",
+  "message": "📩 Dialpad SMS\nFrom: Jane Doe (+14155550123)\nTo: Sales (415) 555-0140\nTime: 1760000000000\n\nMessage: Need a callback",
   "name": "Dialpad SMS",
   "sessionKey": "hook:dialpad:sms:conv-123",
   "deliver": true,
@@ -252,8 +252,8 @@ Interpretation:
     "keepBrief": false,
     "contactName": null,
     "senderNumber": "+14155550123",
-    "recipientNumber": "+14155201316",
-    "lineDisplay": "Sales (415) 520-1316",
+    "recipientNumber": "+14155550140",
+    "lineDisplay": "Sales (415) 555-0140",
     "eventType": "sms",
     "lookup": {
       "status": "not_found",
@@ -267,8 +267,8 @@ Interpretation:
     "knownContact": false,
     "contactName": null,
     "senderNumber": "+14155550123",
-    "recipientNumber": "+14155201316",
-    "lineDisplay": "Sales (415) 520-1316",
+    "recipientNumber": "+14155550140",
+    "lineDisplay": "Sales (415) 555-0140",
     "eventType": "sms",
     "evidence": ["no_dialpad_contact_found"],
     "recency": {
@@ -301,7 +301,7 @@ Interpretation:
 
 ```json
 {
-  "message": "📞 Dialpad Missed Call\nFrom: Jane Doe (+14155550123)\nLine: Sales (415) 520-1316\nTime: 1760000000000\nCall ID: call-123",
+  "message": "📞 Dialpad Missed Call\nFrom: Jane Doe (+14155550123)\nLine: Sales (415) 555-0140\nTime: 1760000000000\nCall ID: call-123",
   "name": "Dialpad Missed Call",
   "sessionKey": "hook:dialpad:call:call-123",
   "deliver": true,
@@ -314,8 +314,8 @@ Interpretation:
     "keepBrief": false,
     "contactName": null,
     "senderNumber": "+14155550123",
-    "recipientNumber": "+14155201316",
-    "lineDisplay": "Sales (415) 520-1316",
+    "recipientNumber": "+14155550140",
+    "lineDisplay": "Sales (415) 555-0140",
     "eventType": "missed_call",
     "lookup": {
       "status": "not_found",
@@ -329,8 +329,8 @@ Interpretation:
     "knownContact": false,
     "contactName": null,
     "senderNumber": "+14155550123",
-    "recipientNumber": "+14155201316",
-    "lineDisplay": "Sales (415) 520-1316",
+    "recipientNumber": "+14155550140",
+    "lineDisplay": "Sales (415) 555-0140",
     "eventType": "missed_call",
     "evidence": ["no_dialpad_contact_found"],
     "recency": {
@@ -397,7 +397,7 @@ SMS:
   "eventType": "sms",
   "sessionKey": "hook:dialpad:sms:conv-123",
   "senderNumber": "+14155550123",
-  "line": "Sales (415) 520-1316",
+  "line": "Sales (415) 555-0140",
   "timestamp": 1760000000000,
   "body": "Need a callback",
   "callId": null,
@@ -411,8 +411,8 @@ SMS:
     "keepBrief": false,
     "contactName": null,
     "senderNumber": "+14155550123",
-    "recipientNumber": "+14155201316",
-    "lineDisplay": "Sales (415) 520-1316",
+    "recipientNumber": "+14155550140",
+    "lineDisplay": "Sales (415) 555-0140",
     "eventType": "sms",
     "lookup": {
       "status": "not_found",
@@ -444,7 +444,7 @@ Missed call:
   "eventType": "missed_call",
   "sessionKey": "hook:dialpad:call:call-123",
   "senderNumber": "+14155550123",
-  "line": "Sales (415) 520-1316",
+  "line": "Sales (415) 555-0140",
   "timestamp": 1760000000000,
   "body": null,
   "callId": "call-123",
@@ -458,8 +458,8 @@ Missed call:
     "keepBrief": true,
     "contactName": "Jane Doe",
     "senderNumber": "+14155550123",
-    "recipientNumber": "+14155201316",
-    "lineDisplay": "Sales (415) 520-1316",
+    "recipientNumber": "+14155550140",
+    "lineDisplay": "Sales (415) 555-0140",
     "eventType": "missed_call",
     "lookup": {
       "status": "resolved",
@@ -492,7 +492,7 @@ Instead, the payload includes structured `routing` metadata:
     "messageId": null,
     "callId": null,
     "senderNumber": "4155550123",
-    "recipientNumber": "4155201316",
+    "recipientNumber": "4155550140",
     "timestamp": 1760000000000,
     "derivedSessionKey": "hook:dialpad:sms:conv-123"
   }

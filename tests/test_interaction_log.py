@@ -12,7 +12,7 @@ def _message(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "provider_id": "msg-123",
         "direction": "outbound",
-        "from_number": "+14155201316",
+        "from_number": "+14155550140",
         "to_number": "+14155550111",
         "body": "The exact body",
         "timestamp": 1770000000000,
@@ -28,7 +28,7 @@ def _call(**overrides: object) -> dict[str, object]:
         "call_id": "call-123",
         "direction": "inbound",
         "from_number": "+14155550111",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "date_started": 1770000000000,
         "duration": 0,
         "call_missed": True,
@@ -166,7 +166,7 @@ def test_inbox_returns_inbound_messages_only(log_paths: tuple[Path, Path]) -> No
             provider_id="inbound-1",
             direction="inbound",
             from_number="+14155550111",
-            to_number="+14155201316",
+            to_number="+14155550140",
             body="Inbound body",
             source="webhook",
         )

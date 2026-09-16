@@ -22,31 +22,31 @@ Use this skill to:
 
 | Number | Purpose | Format |
 |--------|---------|--------|
-| (415) 520-1316 | Sales Team | Default for sales context |
-| (415) 360-2954 | Work/Personal | Default for work context |
-| (415) 991-7155 | Support SMS Only | SMS only (no voice) |
+| (415) 555-0140 | Sales Team | Default for sales context |
+| (415) 555-0100 | Work/Personal | Default for work context |
+| (415) 555-0141 | Support SMS Only | SMS only (no voice) |
 
 ## Quick Start
 
 **Send SMS (explicit sender recommended):**
 ```bash
-bin/send_sms.py --to "+14155551234" --from "+14155201316" --message 'Hello from OpenClaw!'
+bin/send_sms.py --to "+14155551234" --from "+14155550140" --message 'Hello from OpenClaw!'
 ```
 
 **Send an operator-approved SMS and close a shown approval draft (agent direct path):**
 ```bash
-bin/send_sms.py --to "+14155551234" --from "+14155201316" --message 'Exact approved text' --resolve-draft-id smsdraft_abc123 --approval-actor-id "telegram-user-123" --approval-actor-username "operator" --json
+bin/send_sms.py --to "+14155551234" --from "+14155550140" --message 'Exact approved text' --resolve-draft-id smsdraft_abc123 --approval-actor-id "telegram-user-123" --approval-actor-username "operator" --json
 ```
 
 **Create/approve an SMS draft (human approval path):**
 ```bash
-bin/create_sms_draft.py --thread-key "manual:thread" --to "+14155551234" --from "+14155201316" --message 'Exact draft text' --json
+bin/create_sms_draft.py --thread-key "manual:thread" --to "+14155551234" --from "+14155550140" --message 'Exact draft text' --json
 bin/approve_sms_draft.py smsdraft_abc123 --actor-id "telegram-user-123" --actor-username "operator" --approval-token "$DIALPAD_SMS_APPROVAL_TOKEN" --json
 ```
 
 **Group Intro (mirrored fallback):**
 ```bash
-bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14153602954"
+bin/send_group_intro.py --prospect "+14155550111" --reference "+14155559999" --confirm-share --from "+14155550100"
 ```
 
 **Make Call (TTS):**
@@ -162,11 +162,11 @@ export DIALPAD_TOKEN="${DIALPAD_TOKEN:-$DIALPAD_API_KEY}"
 **Optional:**
 ```bash
 export ELEVENLABS_API_KEY="your_key"
-export DIALPAD_USER_MAP='{"+14153602954": "5765607478525952"}'
-export DIALPAD_PROFILE_WORK_FROM="+14153602954"
-export DIALPAD_PROFILE_SALES_FROM="+14155201316"
+export DIALPAD_USER_MAP='{"+14155550100": "5765607478525952"}'
+export DIALPAD_PROFILE_WORK_FROM="+14155550100"
+export DIALPAD_PROFILE_SALES_FROM="+14155550140"
 export DIALPAD_DEFAULT_PROFILE="work"
-export DIALPAD_DEFAULT_FROM_NUMBER="+14155201316"
+export DIALPAD_DEFAULT_FROM_NUMBER="+14155550140"
 export DIALPAD_SMS_RECEIPT_LEDGER="/data/.openclaw/state/dialpad/sms-receipts.jsonl"
 export DIALPAD_DRAFT_CALLBACK_URL="http://host.docker.internal:8888/internal/draft-callback"
 ```

@@ -20,7 +20,7 @@ def test_inbound_telegram_uses_enriched_sender(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Inbound hello",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -35,7 +35,7 @@ def test_inbound_webhook_hook_uses_enriched_sender(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Inbound hello",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -71,7 +71,7 @@ def test_inbound_sms_same_target_local_success_makes_hook_context_only(inbound_d
     capture = inbound_driver.dispatch_sms({
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Inbound hello",
     })
 
@@ -102,7 +102,7 @@ def test_inbound_sms_same_target_local_failure_keeps_hook_visible(inbound_driver
     capture = inbound_driver.dispatch_sms({
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Inbound hello",
     })
 
@@ -116,7 +116,7 @@ def test_inbound_webhook_hook_marks_unknown_sender_first_contact_candidate(inbou
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Who is this?",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -134,7 +134,7 @@ def test_inbound_telegram_escapes_markdown_content(inbound_driver):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Need _bold_ *now* [check] `code`",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -164,7 +164,7 @@ def test_inbound_sms_hook_respects_disabled_config(inbound_driver, monkeypatch):
     payload = {
         "direction": "inbound",
         "from_number": "+14155550123",
-        "to_number": ["+14155201316"],
+        "to_number": ["+14155550140"],
         "text": "Inbound hello",
     }
     capture = inbound_driver.dispatch_sms(payload)
@@ -226,7 +226,7 @@ def test_hook_message_includes_callback_url_when_merged_flow_active():
         "event_type": "sms",
         "sender": "John Doe",
         "sender_number": "+15551234567",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "I want to know cost please",
         "timestamp": 1782322817023,
     }
@@ -249,7 +249,7 @@ def test_hook_message_unchanged_when_no_callback():
         "event_type": "sms",
         "sender": "John Doe",
         "sender_number": "+15551234567",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "Hello",
         "timestamp": 123,
     }
@@ -263,7 +263,7 @@ def test_hook_payload_deliver_false_when_merged_flow_active():
     event = {
         "event_type": "sms",
         "sender_number": "+15551234567",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "cost please",
         "operator_notification": {"deliver": True, "hookDelivery": "visible"},
         "callback_url": "http://127.0.0.1:8081/internal/draft-callback",
@@ -281,7 +281,7 @@ def test_hook_payload_deliver_respects_operator_notification_when_no_merge():
     event = {
         "event_type": "sms",
         "sender_number": "+15551234567",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "hello",
         "operator_notification": {"deliver": True, "hookDelivery": "visible"},
     }
@@ -317,7 +317,7 @@ def test_render_merged_card_sends_telegram(monkeypatch, tmp_path):
     event = {
         "event_type": "sms",
         "sender_number": "+15551234567",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "cost please",
         "contact_name": "John",
         "line_display": "Sales",
@@ -346,7 +346,7 @@ def test_hook_message_uses_submit_draft_tool_when_merged_flow_active():
         "event_type": "sms",
         "sender": "John",
         "sender_number": "+15551234567",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "text": "hello",
         "timestamp": 123,
     }

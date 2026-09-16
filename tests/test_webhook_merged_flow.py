@@ -171,13 +171,13 @@ def test_merged_sms_flow_does_not_send_immediate_telegram(monkeypatch):
         {
             "direction": "inbound",
             "from_number": "+14155550123",
-            "to_number": ["+14155201316"],
+            "to_number": ["+14155550140"],
             "text": "Need help",
             "id": "msg-1",
         },
         {"message": {}},
         "+14155550123",
-        ["+14155201316"],
+        ["+14155550140"],
         "Need help",
         "inbound",
         "sms",
@@ -214,13 +214,13 @@ def test_merged_sms_storage_failure_sends_local_card_without_callback(monkeypatc
         {
             "direction": "inbound",
             "from_number": "+14155550123",
-            "to_number": ["+14155201316"],
+            "to_number": ["+14155550140"],
             "text": "Need help",
             "id": "msg-1",
         },
         {"message": {}},
         "+14155550123",
-        ["+14155201316"],
+        ["+14155550140"],
         "Need help",
         "inbound",
         "sms",
@@ -254,13 +254,13 @@ def test_merged_sms_storage_failure_allows_hook_when_local_card_fails(monkeypatc
         {
             "direction": "inbound",
             "from_number": "+14155550123",
-            "to_number": ["+14155201316"],
+            "to_number": ["+14155550140"],
             "text": "Need help",
             "id": "msg-1",
         },
         {"message": {}},
         "+14155550123",
-        ["+14155201316"],
+        ["+14155550140"],
         "Need help",
         "inbound",
         "sms",
@@ -288,13 +288,13 @@ def test_merged_sms_without_approval_draft_sends_immediate_card(monkeypatch):
         {
             "direction": "inbound",
             "from_number": "+14155550123",
-            "to_number": ["+14155201316"],
+            "to_number": ["+14155550140"],
             "text": "Need help",
             "id": "msg-1",
         },
         {"message": {}},
         "+14155550123",
-        ["+14155201316"],
+        ["+14155550140"],
         "Need help",
         "inbound",
         "sms",
@@ -327,13 +327,13 @@ def test_merged_sms_hook_failure_renders_local_card_immediately(monkeypatch, tmp
         {
             "direction": "inbound",
             "from_number": "+14155550123",
-            "to_number": ["+14155201316"],
+            "to_number": ["+14155550140"],
             "text": "Need help",
             "id": "msg-1",
         },
         {"message": {}},
         "+14155550123",
-        ["+14155201316"],
+        ["+14155550140"],
         "Need help",
         "inbound",
         "sms",
@@ -360,7 +360,7 @@ def test_merged_missed_call_waiting_hook_stays_visible(monkeypatch):
         "resolve_missed_call_context",
         lambda *_args, **_kwargs: {
             "from_number": "+14155550123",
-            "to_number": "+14155201316",
+            "to_number": "+14155550140",
             "event_ts_ms": 1770000000000,
             "line_display": "Sales",
             "caller_resolution_path": "payload_direct",
@@ -398,7 +398,7 @@ def test_merged_missed_call_waiting_hook_stays_visible(monkeypatch):
             "call_missed": True,
             "duration": 0,
             "from_number": "+14155550123",
-            "to_number": "+14155201316",
+            "to_number": "+14155550140",
             "call_id": "call-1",
         }
     )
@@ -421,7 +421,7 @@ def test_merged_missed_call_without_approval_draft_sends_immediate_card(monkeypa
         "resolve_missed_call_context",
         lambda *_args, **_kwargs: {
             "from_number": "+14155550123",
-            "to_number": "+14155201316",
+            "to_number": "+14155550140",
             "event_ts_ms": 1770000000000,
             "line_display": "Sales",
             "caller_resolution_path": "payload_direct",
@@ -463,7 +463,7 @@ def test_merged_missed_call_without_approval_draft_sends_immediate_card(monkeypa
             "call_missed": True,
             "duration": 0,
             "from_number": "+14155550123",
-            "to_number": "+14155201316",
+            "to_number": "+14155550140",
             "call_id": "call-1",
         }
     )
@@ -488,13 +488,13 @@ def test_non_merged_sms_flow_sends_one_immediate_telegram(monkeypatch):
         {
             "direction": "inbound",
             "from_number": "+14155550123",
-            "to_number": ["+14155201316"],
+            "to_number": ["+14155550140"],
             "text": "Need help",
             "id": "msg-1",
         },
         {"message": {}},
         "+14155550123",
-        ["+14155201316"],
+        ["+14155550140"],
         "Need help",
         "inbound",
         "sms",
@@ -511,7 +511,7 @@ def test_hook_message_uses_context_aware_draft_guidance():
         {
             "sender": "Jane",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "Can I move my demo?",
             "conversation_id": "conv-1",
         },
@@ -541,7 +541,7 @@ def test_render_merged_card_includes_provenance_and_counters(monkeypatch, capsys
             "event": {
                 "event_type": "sms",
                 "sender_number": "+14155550123",
-                "recipient_number": "+14155201316",
+                "recipient_number": "+14155550140",
                 "text": "Hello",
                 "auto_reply_draft_id": "smsdraft_1",
                 "fallback_draft": "Fallback text",
@@ -723,7 +723,7 @@ def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path)
             draft_id="smsdraft_1",
             thread_key="thread-1",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Fallback text",
         )
     finally:
@@ -735,7 +735,7 @@ def test_draft_callback_persists_agent_text_before_render(monkeypatch, tmp_path)
         {
             "event_type": "sms",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "Hello",
             "auto_reply_draft_id": "smsdraft_1",
             "reply_policy": {"state": "eligible"},
@@ -785,7 +785,7 @@ def test_draft_callback_opt_out_blocks_existing_approval(monkeypatch, tmp_path):
             draft_id="smsdraft_1",
             thread_key="thread-1",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Fallback text",
         )
     finally:
@@ -797,7 +797,7 @@ def test_draft_callback_opt_out_blocks_existing_approval(monkeypatch, tmp_path):
         {
             "event_type": "sms",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "Hello",
             "auto_reply_draft_id": "smsdraft_1",
             "reply_policy": {"state": "eligible"},
@@ -824,7 +824,7 @@ def test_draft_callback_opt_out_blocks_existing_approval(monkeypatch, tmp_path):
             draft_id="smsdraft_1",
             actor_id="human",
             customer_number="+14155550123",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Fallback text",
         )
         opted_out = webhook_server.sms_approval.is_opted_out(conn, "+14155550123")
@@ -847,7 +847,7 @@ def test_draft_callback_persistence_failure_counts_callback_alive(monkeypatch, t
         {
             "event_type": "sms",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "Hello",
             "auto_reply_draft_id": "smsdraft_1",
             "reply_policy": {"state": "eligible"},
@@ -888,7 +888,7 @@ def test_draft_callback_rejects_unsafe_code_and_renders_fallback(monkeypatch, tm
         {
             "event_type": "sms",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "How much for 50 users?",
             "auto_reply_draft_id": "smsdraft_code_1",
             "reply_policy": {"state": "eligible"},
@@ -930,7 +930,7 @@ def test_draft_callback_rejects_markdown_code_fences_and_renders_fallback(monkey
         {
             "event_type": "sms",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "We have 100 clients a month.",
             "auto_reply_draft_id": "smsdraft_fence_1",
             "reply_policy": {"state": "eligible"},

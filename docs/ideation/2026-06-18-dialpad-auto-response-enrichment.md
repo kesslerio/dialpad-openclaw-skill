@@ -77,7 +77,7 @@ Once identity resolves, branch on Attio deal stage → {customer, prospect-with-
 ### S5 — Route by Dialpad *line*, not content; write enrichment back to Attio
 **Axis:** routing + contact write-back. **Leverage: medium-high. Effort: low-medium. Confidence: high. Semi-independent — can run in parallel with S2/S3.**
 Two clean wins:
-- **Routing:** key the sales-vs-work split on *which Dialpad number received the message* (sales line `+14155201316` vs your personal/work line), not on content classification. Deterministic, no misrouting. Sales line → sales topic + auto-responder; work line → work topic, responder off (or a different one). Create the two Telegram topics and map line→topic. This is the "create another Dialpad topic" idea, done the reliable way.
+- **Routing:** key the sales-vs-work split on *which Dialpad number received the message* (sales line `+14155550140` vs your personal/work line), not on content classification. Deterministic, no misrouting. Sales line → sales topic + auto-responder; work line → work topic, responder off (or a different one). Create the two Telegram topics and map line→topic. This is the "create another Dialpad topic" idea, done the reliable way.
 - **Write-back:** on enrichment, create/update the Dialpad contact (name/company/title) for caller-ID, but write the **canonical** enrichment + "inbound SMS received" event to **Attio** (Dialpad contacts have no metadata field). Attio becomes the source of truth; Dialpad just gets a readable name.
 
 ### S6 — Turn `sms_approvals.db` into an eval + weekly pulse

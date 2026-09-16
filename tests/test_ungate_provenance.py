@@ -288,7 +288,7 @@ class CalendarUngateTests(unittest.TestCase):
         event = {
             "event_type": "missed_call",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "What does it cost?",
         }
         with patch.object(ws, "lookup_recent_sms_thread", return_value=[]), \
@@ -306,7 +306,7 @@ class CalendarUngateTests(unittest.TestCase):
         event = {
             "event_type": "missed_call",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "What does it cost?",
         }
         with patch.object(ws, "lookup_recent_sms_thread", return_value=[]), \
@@ -330,7 +330,7 @@ class CalendarUngateTests(unittest.TestCase):
         event = {
             "event_type": "sms",
             "sender_number": "+14155550123",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "text": "I'm running late",
         }
         event["crm_context"] = {"usable": True, "status": "ok", "basis": "attio", "company": "Acme"}

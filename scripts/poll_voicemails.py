@@ -18,9 +18,9 @@ TELEGRAM_CHAT_ID = os.environ.get("DIALPAD_TELEGRAM_CHAT_ID", "")
 DIALPAD_LINE_NAMES = os.environ.get("DIALPAD_LINE_NAMES", "")
 
 DEFAULT_LINE_NAMES = {
-    "+14155201316": "Sales",
-    "+14153602954": "Work",
-    "+14159917155": "Support",
+    "+14155550140": "Sales",
+    "+14155550100": "Work",
+    "+14155550141": "Support",
 }
 
 LOOKBACK_HOURS_RAW = os.environ.get("POLL_LOOKBACK_HOURS", "2")

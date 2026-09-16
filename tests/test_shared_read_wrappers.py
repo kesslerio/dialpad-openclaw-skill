@@ -47,7 +47,7 @@ def test_sms_thread_uses_shared_log_url_and_preserves_envelope(monkeypatch) -> N
                 "messages": [{
                     "dialpad_id": "msg-1",
                     "direction": "outbound",
-                    "from_number": "+14155201316",
+                    "from_number": "+14155550140",
                     "to_number": "+14155550111",
                     "timestamp": 1770000000000,
                     "text": "shared",
@@ -85,7 +85,7 @@ def test_list_calls_defaults_to_shared_mode_when_log_url_is_set(monkeypatch) -> 
                     "duration_display": "0:00",
                     "status": "missed",
                     "disposition": "missed",
-                    "line": "+14155201316",
+                    "line": "+14155550140",
                 }],
             },
             {},

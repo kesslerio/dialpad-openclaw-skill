@@ -439,12 +439,12 @@ def test_build_missed_call_dedupe_key_prefers_entry_point_call_id():
         "call_id": "child-call",
         "entry_point_call_id": "root-call",
         "from_number": "+14155550123",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "date_started": 1760000000000,
     }
     resolved = {
         "from_number": "+14155550123",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "event_ts_ms": 1760000000000,
     }
 
@@ -455,12 +455,12 @@ def test_build_missed_call_dedupe_key_falls_back_to_call_id():
     payload = {
         "call_id": "call-1",
         "from_number": "+14155550123",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "date_started": 1760000000000,
     }
     resolved = {
         "from_number": "+14155550123",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "event_ts_ms": 1760000000000,
     }
 
@@ -470,17 +470,17 @@ def test_build_missed_call_dedupe_key_falls_back_to_call_id():
 def test_build_missed_call_dedupe_key_uses_stable_fingerprint_without_ids():
     resolved = {
         "from_number": "+1 (415) 555-0123",
-        "to_number": "+1 (415) 520-1316",
+        "to_number": "+1 (415) 555-0140",
         "event_ts_ms": 1760000000999,
     }
     equivalent = {
         "from_number": "+14155550123",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "event_ts_ms": 1760000001999,
     }
     later = {
         "from_number": "+14155550123",
-        "to_number": "+14155201316",
+        "to_number": "+14155550140",
         "event_ts_ms": 1760000060000,
     }
 
@@ -510,16 +510,16 @@ def test_claim_missed_call_notification_marks_duplicate(tmp_path):
 
 
 def test_build_missed_call_burst_key():
-    data = {"from_number": "+1 (415) 555-0123", "to_number": "+1 (415) 520-1316"}
-    resolved = {"from_number": "+14155550123", "to_number": "+14155201316"}
-    assert build_missed_call_burst_key(data, resolved) == "missed-call:burst:4155550123:4155201316"
+    data = {"from_number": "+1 (415) 555-0123", "to_number": "+1 (415) 555-0140"}
+    resolved = {"from_number": "+14155550123", "to_number": "+14155550140"}
+    assert build_missed_call_burst_key(data, resolved) == "missed-call:burst:4155550123:4155550140"
 
     # Digits extraction normalizes formatting
-    resolved_formatted = {"from_number": "+1-415-555-0123", "to_number": "(415) 520-1316"}
-    assert build_missed_call_burst_key({}, resolved_formatted) == "missed-call:burst:4155550123:4155201316"
+    resolved_formatted = {"from_number": "+1-415-555-0123", "to_number": "(415) 555-0140"}
+    assert build_missed_call_burst_key({}, resolved_formatted) == "missed-call:burst:4155550123:4155550140"
 
     # Missing or unknown numbers return None
-    assert build_missed_call_burst_key({}, {"from_number": "Unknown", "to_number": "+14155201316"}) is None
+    assert build_missed_call_burst_key({}, {"from_number": "Unknown", "to_number": "+14155550140"}) is None
     assert build_missed_call_burst_key({}, {"from_number": "+14155550123", "to_number": ""}) is None
 
 
@@ -527,7 +527,7 @@ def test_claim_missed_call_notification_burst_deduplication(tmp_path):
     db_path = tmp_path / "approvals.db"
     base_ts = 1760000000000
 
-    burst_key = "missed-call:burst:4155550123:4155201316"
+    burst_key = "missed-call:burst:4155550123:4155550140"
     leg1_dedupe = "missed-call:root:call-leg-1"
     leg2_dedupe = "missed-call:root:call-leg-2"
 
@@ -568,7 +568,7 @@ def test_claim_missed_call_notification_burst_deduplication(tmp_path):
 def test_claim_missed_call_notification_burst_window_expiry(tmp_path):
     db_path = tmp_path / "approvals.db"
     base_ts = 1760000000000
-    burst_key = "missed-call:burst:4155550123:4155201316"
+    burst_key = "missed-call:burst:4155550123:4155550140"
 
     first = claim_missed_call_notification(
         "missed-call:root:call-1",
@@ -595,7 +595,7 @@ def test_claim_missed_call_notification_distinct_lines_not_suppressed(tmp_path):
     db_path = tmp_path / "approvals.db"
     base_ts = 1760000000000
 
-    burst_line1 = "missed-call:burst:4155550123:4155201316"
+    burst_line1 = "missed-call:burst:4155550123:4155550140"
     burst_line2 = "missed-call:burst:4155550123:4155209999"
 
     first = claim_missed_call_notification(
@@ -709,7 +709,7 @@ def test_hook_payload_includes_inbound_context_for_known_recent_contact():
         "event_type": "missed_call",
         "sender": "Ann Harper",
         "sender_number": "+14322083277",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "line_display": "Sales",
         "timestamp": 1760000000000,
         "call_id": "call-123",
@@ -754,7 +754,7 @@ def test_inbound_context_blocks_stale_known_contact_draft():
         "event_type": "sms",
         "sender": "Ann Harper",
         "sender_number": "+14322083277",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "timestamp": 1760000000000,
     }
     sender_enrichment = {
@@ -798,7 +798,7 @@ def test_payload_contact_name_is_not_resolved_identity():
     normalized = {
         "event_type": "missed_call",
         "sender_number": "+14322083277",
-        "recipient_number": "+14155201316",
+        "recipient_number": "+14155550140",
         "timestamp": 1760000000000,
     }
     normalized["first_contact"] = webhook_server.build_first_contact_context(

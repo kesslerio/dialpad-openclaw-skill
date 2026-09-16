@@ -50,7 +50,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
                     conn,
                     thread_key="thread-1",
                     customer_number="+14155550111",
-                    sender_number="+14155201316",
+                    sender_number="+14155550140",
                     draft_text=draft_text,
                 )
             finally:
@@ -62,7 +62,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
             draft = self._create_draft(temp_dir)
 
             with patch("send_sms.require_generated_cli"), \
-                    patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                    patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                     patch("send_sms.run_generated_json", return_value={"id": "msg-audit", "message_status": "pending"}), \
                     patch("send_sms.require_api_key"):
                 code, out, err = self._run(
@@ -73,7 +73,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
                         "--message",
                         "hello",
                         "--from",
-                        "+14155201316",
+                        "+14155550140",
                         "--resolve-draft-id",
                         draft["draft_id"],
                         "--approval-actor-id",
@@ -109,7 +109,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
             draft = self._create_draft(temp_dir, draft_text="stored text")
 
             with patch("send_sms.require_generated_cli"), \
-                    patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                    patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                     patch("send_sms.run_generated_json") as run_generated_json, \
                     patch("send_sms.require_api_key") as require_api_key:
                 code, out, err = self._run(
@@ -120,7 +120,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
                         "--message",
                         "different text",
                         "--from",
-                        "+14155201316",
+                        "+14155550140",
                         "--resolve-draft-id",
                         draft["draft_id"],
                         "--approval-actor-id",
@@ -148,7 +148,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
             draft = self._create_draft(temp_dir, draft_text="stored text")
 
             with patch("send_sms.require_generated_cli"), \
-                    patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                    patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                     patch("send_sms.run_generated_json") as run_generated_json, \
                     patch("send_sms.require_api_key") as require_api_key:
                 code, out, err = self._run(
@@ -159,7 +159,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
                         "--message",
                         "stored text\n",
                         "--from",
-                        "+14155201316",
+                        "+14155550140",
                         "--resolve-draft-id",
                         draft["draft_id"],
                         "--approval-actor-id",
@@ -193,7 +193,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
             draft = self._create_draft(temp_dir)
 
             with patch("send_sms.require_generated_cli"), \
-                    patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                    patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                     patch(
                         "send_sms.run_generated_json",
                         side_effect=WrapperError("Dialpad unavailable", code="upstream_error", retryable=True),
@@ -207,7 +207,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
                         "--message",
                         "hello",
                         "--from",
-                        "+14155201316",
+                        "+14155550140",
                         "--resolve-draft-id",
                         draft["draft_id"],
                         "--approval-actor-id",
@@ -231,7 +231,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
 
     def test_audited_direct_send_requires_actor(self):
         with patch("send_sms.require_generated_cli"), \
-                patch("send_sms.resolve_sender", return_value=("+14155201316", "--from")), \
+                patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
                 patch("send_sms.run_generated_json") as run_generated_json, \
                 patch("send_sms.require_api_key") as require_api_key:
             code, out, err = self._run(
@@ -242,7 +242,7 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
                     "--message",
                     "hello",
                     "--from",
-                    "+14155201316",
+                    "+14155550140",
                     "--resolve-draft-id",
                     "smsdraft_missing",
                     "--json",

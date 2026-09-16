@@ -186,7 +186,7 @@ def category_for_row(row: sqlite3.Row | dict[str, Any]) -> str:
     """Derive the per-category label for a draft row.
 
     Primary dimension is the Dialpad line (``metadata.line_display``, e.g.
-    "Sales (415) 520-1316"). Falls back to the sender number, then to
+    "Sales (415) 555-0140"). Falls back to the sender number, then to
     "unknown". The label is a business line, never customer PII.
     """
     meta_raw = row["metadata_json"] if "metadata_json" in row.keys() else None

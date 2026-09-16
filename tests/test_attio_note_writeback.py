@@ -61,7 +61,7 @@ def _event(
         "event_type": "sms",
         "text": text,
         "sender_number": sender_number,
-        "recipient_number": "+14155201316",  # the Dialpad line — must NOT be used
+        "recipient_number": "+14155550140",  # the Dialpad line — must NOT be used
         "message_id": message_id,
         "inbound_context": {"identityConfidence": confidence},
         "first_contact": {"contactName": contact_name, "knownContact": True},
@@ -449,7 +449,7 @@ class CallSiteWiringTests(unittest.TestCase):
         payload = {
             "direction": "inbound",
             "from_number": ["+14155550123"],  # list form — must normalize via first_value
-            "to_number": "+14155201316",
+            "to_number": "+14155550140",
             "text": text,
             "message_id": "wire-1",
         }

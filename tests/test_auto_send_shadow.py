@@ -147,7 +147,7 @@ class DraftStampingIntegrationTests(unittest.TestCase):
         ev = {
             "event_type": "sms",
             "sender_number": "+14155550100",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "rich_reply": {"usable": True, "category": "link_issue"},
             "inbound_context": {"identityConfidence": "high"},
         }
@@ -177,7 +177,7 @@ class DraftStampingIntegrationTests(unittest.TestCase):
         ev = {
             "event_type": "sms",
             "sender_number": "+14155550100",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "inbound_context": {"identityConfidence": "high"},  # no rich_reply key
         }
         created, status, metadata = self._drive_create_draft(ev)
@@ -317,7 +317,7 @@ class PersistedOptOutShadowTests(unittest.TestCase):
         ev = {
             "event_type": "sms",
             "sender_number": "+14155550100",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "rich_reply": {"usable": True, "category": "link_issue"},
             "inbound_context": {"identityConfidence": "high"},
         }
@@ -346,7 +346,7 @@ class DraftPersistenceFailureShadowTests(unittest.TestCase):
         ev = {
             "event_type": "sms",
             "sender_number": "+14155550100",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "rich_reply": {"usable": True, "category": "link_issue"},
             "inbound_context": {"identityConfidence": "high"},
         }
@@ -378,7 +378,7 @@ class HookPayloadShadowContainmentTests(unittest.TestCase):
         ev = {
             "event_type": "sms",
             "sender_number": "+14155550100",
-            "recipient_number": "+14155201316",
+            "recipient_number": "+14155550140",
             "autoSendShadow": {"mode": "shadow", "wouldAutoSend": True},
             "auto_reply": {"status": "draft_created", "draftCreated": True,
                            "replyPolicy": {"state": "normal"}},

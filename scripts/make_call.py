@@ -4,7 +4,7 @@ Make voice calls via Dialpad API with optional ElevenLabs TTS.
 
 Usage:
     python3 scripts/make_call.py --to "+14155551234"
-    python3 scripts/make_call.py --to "+14155551234" --from "+14153602954"
+    python3 scripts/make_call.py --to "+14155551234" --from "+14155550100"
     python3 scripts/make_call.py --to "+14155551234" --elevenlabs "Hello, this is a call from..."
     python3 scripts/make_call.py --to "+14155551234" --user-id "5765607478525952" --text "Meeting reminder"
 """
@@ -27,7 +27,7 @@ DIALPAD_API_BASE = "https://dialpad.com/api/v2"
 
 # Known ShapeScale users (auto-populated from API)
 KNOWN_USERS = {
-    "+14153602954": "5765607478525952",  # Martin Kessler
+    "+14155550100": "5765607478525952",  # Martin Kessler
     "+14158701945": "5625110025338880",  # Lilla Laczo
     "+14152230323": "5964143916400640",  # Scott Sicz
 }

@@ -120,7 +120,7 @@ flowchart TD
 - Name fallback when phone misses but name matches.
 - Attio 401/500 → `{usable:false, status:"degraded"}`, no stack trace on stdout.
 - Network timeout → fails closed within the adapter's own timeout (< the 8s `DIALPAD_CONTEXT_LOOKUP_TIMEOUT_SECONDS`).
-- Phone normalization: `+1 (415) 520-1316` and `4155201316` resolve identically.
+- Phone normalization: `+1 (415) 555-0140` and `4155550140` resolve identically.
 - `summary` passes the customer-safe filter (no URLs/paths/metadata leakage).
 
 ### U3. Calendar context adapter (standalone CLI)

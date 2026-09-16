@@ -77,7 +77,7 @@ class SmsReceiptTests(unittest.TestCase):
             "--to",
             to_number,
             "--from",
-            "+14155201316",
+            "+14155550140",
             "--message",
             "Hello",
         ]
@@ -112,7 +112,7 @@ class SmsReceiptTests(unittest.TestCase):
                 "--reference",
                 "+14155559999",
                 "--from",
-                "+14155201316",
+                "+14155550140",
                 "--confirm-share",
                 "--json",
             ],
@@ -143,7 +143,7 @@ class SmsReceiptTests(unittest.TestCase):
         self.assertEqual(receipt["schema_version"], "1")
         self.assertEqual(receipt["message_id"], "msg-1")
         self.assertEqual(receipt["to"], ["+14155550111"])
-        self.assertEqual(receipt["from"], "+14155201316")
+        self.assertEqual(receipt["from"], "+14155550140")
         self.assertTrue(str(receipt["timestamp_utc"]).endswith("Z"))
         self.assertEqual(receipt["delivery_status"], "pending")
         self.assertEqual(receipt["source"], "send_sms")
@@ -198,7 +198,7 @@ class SmsReceiptTests(unittest.TestCase):
             conn,
             thread_key="thread-1",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Approved text",
         )
 
@@ -215,7 +215,7 @@ class SmsReceiptTests(unittest.TestCase):
         self.assertEqual(len(receipts), 1)
         self.assertEqual(receipts[0]["message_id"], "approval-msg")
         self.assertEqual(receipts[0]["to"], ["+15125550100"])
-        self.assertEqual(receipts[0]["from"], "+14155201316")
+        self.assertEqual(receipts[0]["from"], "+14155550140")
         self.assertEqual(receipts[0]["source"], "approval_lane")
 
     def test_approval_lane_append_failure_is_surfaced_in_payload(self):
@@ -232,7 +232,7 @@ class SmsReceiptTests(unittest.TestCase):
             conn,
             thread_key="thread-2",
             customer_number="+15125550100",
-            sender_number="+14155201316",
+            sender_number="+14155550140",
             draft_text="Approved text",
         )
 
@@ -282,7 +282,7 @@ class SmsReceiptTests(unittest.TestCase):
                         "sms",
                         "send",
                         "--data",
-                        json.dumps({"to_numbers": ["+14155550111"], "from_number": "+14155201316"}),
+                        json.dumps({"to_numbers": ["+14155550111"], "from_number": "+14155550140"}),
                     ],
                 )
 
@@ -292,7 +292,7 @@ class SmsReceiptTests(unittest.TestCase):
                     "sms",
                     "send",
                     "--data",
-                    json.dumps({"to_numbers": ["+14155550111"], "from_number": "+14155201316"}),
+                    json.dumps({"to_numbers": ["+14155550111"], "from_number": "+14155550140"}),
                 ],
             )
 
@@ -302,7 +302,7 @@ class SmsReceiptTests(unittest.TestCase):
                     "sms",
                     "send",
                     "--data",
-                    json.dumps({"to_numbers": ["+14155550111"], "from_number": "+14155201316"}),
+                    json.dumps({"to_numbers": ["+14155550111"], "from_number": "+14155550140"}),
                 ],
             )
 

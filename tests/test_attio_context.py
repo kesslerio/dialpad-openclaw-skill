@@ -43,8 +43,8 @@ def fake_request(method, path, body=None):
 
 class ParseQueryTests(unittest.TestCase):
     def test_extracts_e164_phone_as_first_token(self):
-        phone, rest = attio._parse_query("+14155201316 John Doe Acme Corp")
-        self.assertEqual(phone, "+14155201316")
+        phone, rest = attio._parse_query("+14155550140 John Doe Acme Corp")
+        self.assertEqual(phone, "+14155550140")
         self.assertEqual(rest, "John Doe Acme Corp")
 
     def test_no_phone_when_first_token_is_name(self):
@@ -127,7 +127,7 @@ class CrmContextFromRecordsTests(unittest.TestCase):
 class BuildCrmContextTests(unittest.TestCase):
     def test_happy_path(self):
         with patch.object(attio, "_request", side_effect=fake_request):
-            ctx = attio.build_crm_context("+14155201316 John Doe Acme")
+            ctx = attio.build_crm_context("+14155550140 John Doe Acme")
         self.assertTrue(ctx["usable"])
         self.assertEqual(ctx["basis"], "attio")
         self.assertEqual(ctx["company"], "Acme Corp")
@@ -159,7 +159,7 @@ class BuildCrmContextTests(unittest.TestCase):
         from contextlib import redirect_stdout
         buf = io.StringIO()
         with patch.object(attio, "_request", side_effect=fake_request), redirect_stdout(buf):
-            rc = attio.main(["+14155201316 John Doe Acme"])
+            rc = attio.main(["+14155550140 John Doe Acme"])
         self.assertEqual(rc, 0)
         payload = json.loads(buf.getvalue())
         self.assertTrue(payload["usable"])
@@ -167,8 +167,8 @@ class BuildCrmContextTests(unittest.TestCase):
 
 class HardeningTests(unittest.TestCase):
     def test_normalize_phone(self):
-        self.assertEqual(attio._normalize_phone("+1 (415) 520-1316"), "+14155201316")
-        self.assertEqual(attio._normalize_phone("4155201316"), "4155201316")
+        self.assertEqual(attio._normalize_phone("+1 (415) 555-0140"), "+14155550140")
+        self.assertEqual(attio._normalize_phone("4155550140"), "4155550140")
 
     def test_clean_strips_control_chars_and_collapses_whitespace(self):
         self.assertEqual(attio._clean("Acme\n\x00 Corp  Inc"), "Acme Corp Inc")
@@ -181,7 +181,7 @@ class HardeningTests(unittest.TestCase):
     def test_malformed_associated_deals_fails_closed(self):
         person = {"id": {"record_id": "p"}, "values": {"associated_deals": [None, "str", {"target_record_id": None}]}}
         with patch.object(attio, "_request", side_effect=lambda m, p, b=None: {"data": [person]}):
-            ctx = attio.build_crm_context("+14155201316 Name")
+            ctx = attio.build_crm_context("+14155550140 Name")
         self.assertFalse(ctx["usable"])  # no crash on non-dict refs
 
     def test_find_person_by_email_rejects_non_email(self):
@@ -203,7 +203,7 @@ class HardeningTests(unittest.TestCase):
         with patch.dict("os.environ", {"ATTIO_API_KEY": "SENTINEL-SECRET-123"}), \
              patch.object(attio, "_request", side_effect=attio.AttioError("http_403")), \
              redirect_stdout(buf):
-            attio.main(["+14155201316 Name"])
+            attio.main(["+14155550140 Name"])
         self.assertNotIn("SENTINEL-SECRET-123", buf.getvalue())
 
 

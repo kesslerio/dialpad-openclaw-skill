@@ -28,7 +28,7 @@ def test_supported_send_records_exact_successful_observation() -> None:
         return {"memory_sync": "pending", "memory_outbox": "/tmp/test-outbox.jsonl"}
 
     with patch.object(send_sms, "require_generated_cli"), \
-            patch.object(send_sms, "resolve_sender", return_value=("+14155201316", "--from")), \
+            patch.object(send_sms, "resolve_sender", return_value=("+14155550140", "--from")), \
             patch.object(send_sms, "run_generated_json", return_value={"id": "msg-send-1", "message_status": "pending"}), \
             patch.object(send_sms, "require_api_key"), \
             patch.object(send_sms, "record_outbound_observation", side_effect=record):
@@ -41,7 +41,7 @@ def test_supported_send_records_exact_successful_observation() -> None:
             "--message",
             "Exact $body",
             "--from",
-            "+14155201316",
+            "+14155550140",
             "--json",
         ]), redirect_stdout(stdout), redirect_stderr(stderr):
             code = send_sms.main()
@@ -53,6 +53,6 @@ def test_supported_send_records_exact_successful_observation() -> None:
     assert captured == {
         "result": {"id": "msg-send-1", "message_status": "pending"},
         "to_numbers": ["+14155550111"],
-        "from_number": "+14155201316",
+        "from_number": "+14155550140",
         "body": "Exact $body",
     }

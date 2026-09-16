@@ -157,21 +157,37 @@ def main() -> int:
             try:
                 shared_data, _remote_meta = get_data("/v1/calls", query=query)
             except LogApiError as exc:
-                raise WrapperError(str(exc), code=exc.code, retryable=exc.retryable) from exc
-            raw_calls = shared_data.get("calls") if isinstance(shared_data.get("calls"), list) else []
-            raw_calls = [call for call in raw_calls if isinstance(call, dict)]
-            rows = []
-            for call in raw_calls:
-                rows.append(
-                    {
-                        "started": str(call.get("started_at") or "-").replace("T", " ").replace("Z", "")[:16],
-                        "caller": str(call.get("contact") or call.get("contact_phone") or "-"),
-                        "direction": str(call.get("direction") or "unknown"),
-                        "duration": str(call.get("duration_display") or "0:00"),
-                        "status": str(call.get("status") or call.get("disposition") or "unknown"),
-                        "line": str(call.get("line") or "-"),
-                    }
-                )
+                # Shared log auth drift should not brick call history — fall back to live Dialpad.
+                if (
+                    not args.local_log
+                    and getattr(exc, "code", None) in {"auth_missing", "unauthorized"}
+                ):
+                    shared_mode = False
+                    require_api_key()
+                    try:
+                        raw_calls = fetch_calls(
+                            started_after, started_before, limit, missed_only=args.missed
+                        )
+                    except RuntimeError as live_exc:
+                        raise WrapperError(str(live_exc)) from live_exc
+                    rows = None  # filled below via to_row path
+                else:
+                    raise WrapperError(str(exc), code=exc.code, retryable=exc.retryable) from exc
+            else:
+                raw_calls = shared_data.get("calls") if isinstance(shared_data.get("calls"), list) else []
+                raw_calls = [call for call in raw_calls if isinstance(call, dict)]
+                rows = []
+                for call in raw_calls:
+                    rows.append(
+                        {
+                            "started": str(call.get("started_at") or "-").replace("T", " ").replace("Z", "")[:16],
+                            "caller": str(call.get("contact") or call.get("contact_phone") or "-"),
+                            "direction": str(call.get("direction") or "unknown"),
+                            "duration": str(call.get("duration_display") or "0:00"),
+                            "status": str(call.get("status") or call.get("disposition") or "unknown"),
+                            "line": str(call.get("line") or "-"),
+                        }
+                    )
         elif args.local:
             try:
                 from call_sqlite import list_stored_calls

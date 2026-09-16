@@ -31,6 +31,52 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import sms_receipts  # noqa: E402 - needs SCRIPTS_DIR on sys.path; module-top import so a broken deploy fails before any send, never after one
 
+
+def load_dialpad_env(*, override: bool = False) -> Path | None:
+    """Load ~/.config/dialpad.env into os.environ if present.
+
+    Handles `export KEY=` lines and single/double quotes. By default does not
+    override variables already set in the process environment so callers can
+    still inject values. Safe to call multiple times.
+    """
+    candidates: list[Path] = []
+    explicit = os.environ.get("DIALPAD_ENV_FILE", "").strip()
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    candidates.append(Path.home() / ".config" / "dialpad.env")
+    env_path = next((p for p in candidates if p.is_file()), None)
+    if env_path is None:
+        return None
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum():
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        if not override and key in os.environ and os.environ.get(key, "") != "":
+            continue
+        os.environ[key] = value
+
+    # Keep generated CLI / wrappers aligned on either name.
+    if os.environ.get("DIALPAD_API_KEY") and not os.environ.get("DIALPAD_TOKEN"):
+        os.environ["DIALPAD_TOKEN"] = os.environ["DIALPAD_API_KEY"]
+    elif os.environ.get("DIALPAD_TOKEN") and not os.environ.get("DIALPAD_API_KEY"):
+        os.environ["DIALPAD_API_KEY"] = os.environ["DIALPAD_TOKEN"]
+    return env_path
+
+
+load_dialpad_env()
+
 SCHEMA_VERSION = "1"
 PROFILE_ENV_KEYS = {
     "work": "DIALPAD_PROFILE_WORK_FROM",
@@ -188,6 +234,7 @@ def require_generated_cli() -> None:
 
 
 def require_api_key() -> None:
+    load_dialpad_env()
     if os.environ.get("DIALPAD_API_KEY") or os.environ.get("DIALPAD_TOKEN"):
         return
     raise WrapperError("DIALPAD_API_KEY environment variable not set", code="auth_missing", retryable=False)

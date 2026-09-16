@@ -5,10 +5,37 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+
+
+
+def _load_env_file() -> None:
+    """Best-effort load of ~/.config/dialpad.env for shared-log clients."""
+    explicit = os.environ.get("DIALPAD_ENV_FILE", "").strip()
+    path = Path(explicit).expanduser() if explicit else Path.home() / ".config" / "dialpad.env"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key not in os.environ or os.environ.get(key, "") == "":
+            os.environ[key] = value
 
 
 class LogApiError(RuntimeError):
@@ -19,6 +46,7 @@ class LogApiError(RuntimeError):
 
 
 def configured_log_url() -> str | None:
+    _load_env_file()
     value = os.environ.get("DIALPAD_LOG_URL", "").strip().rstrip("/")
     return value or None
 

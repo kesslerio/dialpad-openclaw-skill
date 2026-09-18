@@ -1,0 +1,14 @@
+# Runtime files that carry the interaction-log outbox behavior.
+#
+# Every line is a path relative to the repo root. A runtime copy needs exactly
+# these, named deliberately: the copies have drifted in both directions, so a
+# recursive copy would smuggle one copy's staleness into another. This list is
+# the reviewed set, and it is a regression risk if it silently goes stale.
+#
+# Compare a runtime copy with:
+#   python3 scripts/outbox_drift_probe.py --manifest references/outbox-runtime-files.txt --target <copy-root>
+scripts/log_outbox.py
+bin/send_sms.py
+bin/list_sms_inbox.py
+bin/list_sms_thread.py
+bin/list_calls.py

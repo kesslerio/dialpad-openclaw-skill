@@ -38,6 +38,7 @@ Dialpad OpenClaw Skill
 │   ├── log_api_client.py
 │   ├── log_api_server.py
 │   ├── log_outbox.py
+│   ├── outbox_drift_probe.py
 │   ├── call_sqlite.py
 │   ├── sms_sqlite.py
 │   ├── sms_storage.py
@@ -67,7 +68,11 @@ Scripts in `scripts/` are retained for compatibility and operational workflows (
 `interaction_log.py` is the canonical owner boundary for SMS and calls. The
 log API is a separate listener from provider webhook ingress, and
 `log_outbox.py` only replays successful-send observations; it never retries a
-provider send.
+provider send. It owns the outbox file end to end — the lock, the drain, and
+the queue's own visibility — because a caller that compacted the queue itself
+would be one lost entry away from silent data loss. Drain triggers live at the
+command edges, which call one bounded entrypoint rather than duplicating the
+policy.
 
 ## Regeneration
 

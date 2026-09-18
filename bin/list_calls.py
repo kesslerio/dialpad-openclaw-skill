@@ -18,6 +18,7 @@ from _dialpad_compat import (
     require_api_key,
 )
 from log_api_client import LogApiError, configured_log_url, get_data
+from log_outbox import drain_on_use  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "list_calls.py"
@@ -125,7 +126,7 @@ def _shared_call_summary(call: dict[str, object]) -> dict[str, object]:
     }
 
 
-def main() -> int:
+def _run() -> int:
     json_mode = "--json" in sys.argv
     command = COMMAND_IDS["list_calls.list"]
     wrapper = "list_calls.py"
@@ -290,6 +291,19 @@ def main() -> int:
             return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
+
+
+
+
+def main() -> int:
+    """Run the command, then opportunistically drain any pending interaction-log records.
+
+    After output, always: the caller's answer is already committed to, and
+    drain_on_use is a single stat call when there is nothing to do.
+    """
+    code = _run()
+    drain_on_use()
+    return code
 
 
 if __name__ == "__main__":

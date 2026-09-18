@@ -24,6 +24,7 @@ from _dialpad_compat import (  # noqa: E402
     print_wrapper_error,
 )
 from sms_sqlite import filter_messages, init_db  # noqa: E402
+from log_outbox import drain_on_use  # noqa: E402
 from log_api_client import LogApiError, configured_log_url, get_data  # noqa: E402
 
 
@@ -117,7 +118,7 @@ def load_thread_summary(conn: Any, phone: str, limit: int) -> dict[str, Any]:
     }
 
 
-def main() -> int:
+def _run() -> int:
     json_mode = "--json" in sys.argv
     command = COMMAND_IDS["list_sms_thread.list"]
     wrapper = "list_sms_thread.py"
@@ -177,6 +178,19 @@ def main() -> int:
             return handle_wrapper_exception(command, wrapper, err, True)
         print_wrapper_error(err)
         return 2
+
+
+
+
+def main() -> int:
+    """Run the command, then opportunistically drain any pending interaction-log records.
+
+    After output, always: the caller's answer is already committed to, and
+    drain_on_use is a single stat call when there is nothing to do.
+    """
+    code = _run()
+    drain_on_use()
+    return code
 
 
 if __name__ == "__main__":

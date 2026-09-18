@@ -110,6 +110,9 @@ python3 scripts/outbox_drift_probe.py \
 Exit `0` means every manifest entry matches. Run it before and after applying a
 fix, so delivery leaves a checkable record rather than a hope.
 
+`docs/reference/runtime-copies.md` holds the per-copy delivery record, including
+which copy was deliberately left alone and why.
+
 ### theshop deployment
 
 Install the example user unit from the skill root on theshop, populate the

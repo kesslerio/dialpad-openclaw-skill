@@ -51,13 +51,64 @@ provider and shared-log results.
 After a successful `bin/send_sms.py` provider send, the wrapper records the
 exact outbound observation. If the log API is unavailable, it writes a
 record-only JSONL item to `DIALPAD_LOG_OUTBOX`; it never retries the provider
-send. Replay pending observations after the log service is healthy:
+send.
+
+The outbox drains itself. Every `bin/send_sms.py` send and every
+`bin/list_sms_inbox.py`, `bin/list_sms_thread.py`, and `bin/list_calls.py`
+read drains it after committing its own output, bounded by an entry cap and a
+wall-clock budget so an unreachable log cannot delay anything the caller is
+waiting on:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DIALPAD_LOG_OUTBOX_DRAIN_LIMIT` | `5` | Maximum observations recorded per drain. |
+| `DIALPAD_LOG_OUTBOX_DRAIN_SECONDS` | `2.0` | Wall-clock budget, checked between entries. One in-flight request may overrun it by up to `DIALPAD_LOG_TIMEOUT`. |
+| `DIALPAD_LOG_OUTBOX_LOCK_SECONDS` | `2.0` | How long a drain waits for the outbox lock before declining. A declined drain reports `skipped`, never an empty queue. |
+| `DIALPAD_LOG_OUTBOX_ALERT_AFTER_SECONDS` | `21600` | Oldest-entry age at which a breach is reported. |
+| `DIALPAD_LOG_OUTBOX_NOTIFY_CMD` | unset | Command taking the alert as one argument, exiting 0 only on a confirmed send. Unset means no alert travels. |
+
+Manual replay still works, and is what to reach for after repairing the log
+service or when a large backlog needs draining in one go:
 
 ```bash
 python3 scripts/log_outbox.py replay --json
 ```
 
 Replay only records observations and does not send SMS or place calls.
+
+Three siblings sit beside the outbox, each derived from it; none is a second
+source of truth about what is pending:
+
+- `log-outbox-quarantine.jsonl` — lines the reader could not parse. One poison
+  line costs one line and no longer stalls the whole lane.
+- `log-outbox-drains.jsonl` — one append-only record per drain run, carrying its
+  own timestamp with attempted/succeeded/failed counts, remaining depth, and the
+  oldest age. This is what makes a host with no scheduler detectable to anything
+  that does have a clock; nothing on that host notices its own silence.
+- `log-outbox-alert.json` — the breach marker. Written undelivered before an
+  alert is attempted, and flipped to delivered only on a confirmed send, so a
+  run that dies mid-alert retries instead of swallowing the breach.
+
+Grok Bot has no `cron` and no systemd user scheduler, which is why the drain
+rides on skill use. The limit is worth stating plainly: an outbox on a host
+nobody uses stays put, and the run record is how long that has been true.
+
+### Runtime copies
+
+Three copies of this skill run in the world and only one is a repository. They
+have drifted in both directions, so no recursive copy is safe in either
+direction. `references/outbox-runtime-files.txt` names the runtime files that
+carry outbox behavior, and the probe compares one copy against this repo by
+content hash, restricted to that reviewed list:
+
+```bash
+python3 scripts/outbox_drift_probe.py \
+  --manifest references/outbox-runtime-files.txt \
+  --target ~/.ai/skills/dialpad
+```
+
+Exit `0` means every manifest entry matches. Run it before and after applying a
+fix, so delivery leaves a checkable record rather than a hope.
 
 ### theshop deployment
 

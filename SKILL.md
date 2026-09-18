@@ -78,7 +78,10 @@ reads use the authenticated theshop interaction log by default. Use
 `--local` for the legacy local calls database. After a successful
 `bin/send_sms.py`, the exact outbound observation is recorded through the
 shared log or queued in the record-only `DIALPAD_LOG_OUTBOX`; replaying that
-outbox never sends SMS or places calls.
+outbox never sends SMS or places calls. It drains itself on the next send or
+read, bounded so a dead log never delays the command that triggered it; see
+`references/sms-storage.md` for the drain knobs, the run record, and the
+breach alert.
 
 **Sync Direct Dialpad SMS Sends:**
 ```bash

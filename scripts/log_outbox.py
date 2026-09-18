@@ -18,6 +18,10 @@ from log_api_client import LogApiError, configured_log_url, record_message as re
 
 DEFAULT_OUTBOX = Path("~/.dialpad/log-outbox.jsonl")
 
+# Codes that mean the interaction log refused this specific observation, as opposed
+# to being unreachable. Retrying identical content against these will not help.
+_REJECTION_CODES = frozenset({"invalid_argument", "not_found"})
+
 
 def resolve_outbox_path(path: Path | str | None = None) -> Path:
     if path is not None:
@@ -29,10 +33,62 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def enqueue_observation(observation: dict[str, Any], *, path: Path | str | None = None) -> Path:
+def _redact_token(text: str) -> str:
+    token = os.environ.get("DIALPAD_LOG_TOKEN", "").strip()
+    if not token:
+        return text
+    return text.replace(token, "[redacted]")
+
+
+def _failure_class(code: str) -> str:
+    """Split infrastructure trouble from a rejection of this observation's own content.
+
+    Anything that is not a deliberate refusal of this payload counts as delivery
+    failure, so an outage or a misconfiguration can never be mistaken for bad data.
+    """
+    return "observation_rejected" if code in _REJECTION_CODES else "delivery_failed"
+
+
+def _failure_from_error(error: BaseException) -> dict[str, Any]:
+    code = getattr(error, "code", None)
+    code_text = str(code) if code else type(error).__name__
+    retryable = getattr(error, "retryable", None)
+    if not isinstance(retryable, bool):
+        retryable = isinstance(error, (OSError, TimeoutError))
+    message = _redact_token(str(error) or type(error).__name__)[:300]
+    return {
+        "at": _now(),
+        "code": code_text,
+        "error_type": type(error).__name__,
+        "retryable": retryable,
+        "failure_class": _failure_class(code_text),
+        "message": message,
+    }
+
+
+def _sanitised_failure(reason: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(reason, dict):
+        return None
+    safe = dict(reason)
+    if "message" in safe:
+        safe["message"] = _redact_token(str(safe["message"]))[:300]
+    if "failure_class" not in safe:
+        safe["failure_class"] = _failure_class(str(safe.get("code", "")))
+    return safe
+
+
+def enqueue_observation(
+    observation: dict[str, Any],
+    *,
+    path: Path | str | None = None,
+    reason: dict[str, Any] | None = None,
+) -> Path:
     target = resolve_outbox_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"queued_at": _now(), "observation": observation}
+    entry: dict[str, Any] = {"queued_at": _now(), "observation": observation}
+    failure = _sanitised_failure(reason)
+    if failure is not None:
+        entry["failure"] = failure
     with target.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
         handle.flush()
@@ -116,17 +172,21 @@ def record_outbound_observation(
     try:
         return _record_once(observation)
     except Exception as error:  # noqa: BLE001 - send already succeeded; queue record-only retry.
+        failure = _failure_from_error(error)
         try:
-            target = enqueue_observation(observation)
+            target = enqueue_observation(observation, reason=failure)
         except Exception:
             return {
                 "memory_sync": "failed",
                 "memory_error": type(error).__name__,
+                "memory_failure_code": failure["code"],
             }
         return {
             "memory_sync": "pending",
             "memory_outbox": str(target),
             "memory_error": type(error).__name__,
+            "memory_failure_code": failure["code"],
+            "memory_failure_class": failure["failure_class"],
         }
 
 
@@ -160,11 +220,23 @@ def _rewrite(path: Path, lines: list[str]) -> None:
     os.replace(temp_path, path)
 
 
+def _line_with_failure(line: str, failure: dict[str, Any]) -> str:
+    """Re-serialise one queued line with its newest failure, keeping every other field."""
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return line
+    if not isinstance(entry, dict):
+        return line
+    entry["failure"] = failure
+    return json.dumps(entry, separators=(",", ":")) + "\n"
+
+
 def replay_outbox(*, path: Path | str | None = None, limit: int = 100) -> dict[str, int]:
     target = resolve_outbox_path(path)
     entries = _read_entries(target)
     remaining: list[str] = []
-    attempted = succeeded = failed = 0
+    attempted = succeeded = failed = delivery_failed = observation_rejected = 0
     for index, (line, observation) in enumerate(entries):
         if observation is None or attempted >= limit:
             remaining.append(line)
@@ -172,13 +244,25 @@ def replay_outbox(*, path: Path | str | None = None, limit: int = 100) -> dict[s
         attempted += 1
         try:
             _record_once(observation)
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - keep the entry, record why it is still here.
             failed += 1
-            remaining.append(line)
+            failure = _failure_from_error(error)
+            if failure["failure_class"] == "observation_rejected":
+                observation_rejected += 1
+            else:
+                delivery_failed += 1
+            remaining.append(_line_with_failure(line, failure))
         else:
             succeeded += 1
     _rewrite(target, remaining)
-    return {"attempted": attempted, "succeeded": succeeded, "failed": failed, "remaining": len(remaining)}
+    return {
+        "attempted": attempted,
+        "succeeded": succeeded,
+        "failed": failed,
+        "delivery_failed": delivery_failed,
+        "observation_rejected": observation_rejected,
+        "remaining": len(remaining),
+    }
 
 
 def main() -> int:
@@ -194,9 +278,15 @@ def main() -> int:
     if args.json:
         print(json.dumps(result, indent=2))
     else:
+        breakdown = ""
+        if result["failed"]:
+            breakdown = (
+                f" ({result['delivery_failed']} delivery, "
+                f"{result['observation_rejected']} rejected)"
+            )
         print(
             "Interaction-log outbox replay: "
-            f"{result['succeeded']} succeeded, {result['failed']} failed, "
+            f"{result['succeeded']} succeeded, {result['failed']} failed{breakdown}, "
             f"{result['remaining']} remaining"
         )
     return 0 if result["failed"] == 0 else 1

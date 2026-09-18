@@ -180,8 +180,6 @@ def _run() -> int:
         return 2
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 def main() -> int:
@@ -193,3 +191,7 @@ def main() -> int:
     code = _run()
     drain_on_use()
     return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -116,3 +117,24 @@ def test_a_broken_outbox_never_changes_a_commands_exit_code(
 
     with patch.object(module, "_run", return_value=0):
         assert module.main() == 0
+
+
+@pytest.mark.parametrize("script", ["list_sms_inbox", "list_sms_thread", "list_calls"])
+def test_each_command_still_runs_as_a_real_script(script: str) -> None:
+    """The script path, not just the import path.
+
+    Wrapping main() to add a hook left the new definition below the
+    `if __name__ == "__main__"` guard, so importing worked and every mocked
+    test passed while the shipped command died on NameError. Importing a
+    module never executes that guard; only running the script does.
+    """
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / f"{script}.py"), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr[-500:]
+    assert "usage:" in completed.stdout
+    assert "NameError" not in completed.stderr

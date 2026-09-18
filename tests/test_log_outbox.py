@@ -453,3 +453,35 @@ def test_drain_on_use_reports_no_hook_error_on_a_normal_run(tmp_path: Path, monk
     result = drain_on_use(path=outbox)
 
     assert result["hook_error"] == 0
+
+
+def test_the_drain_does_not_hold_the_lock_while_it_is_trying(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The queue lock must be free during an attempt, not just between runs.
+
+    An attempt is a network call of up to DIALPAD_LOG_TIMEOUT with no retry
+    budget, so holding the lock across it means every sender behind us waits on
+    a host that is already unreachable. Worse, a sender whose wait expired
+    appends with no lock at all, and an append landing after the commit's
+    re-read but before its replace is written to a file that is about to be
+    unlinked. That is the loss this whole unit exists to close, so the
+    invariant is pinned rather than left to timing.
+    """
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    enqueue_observation(_observation(), path=outbox)
+    observed: list[bool] = []
+
+    def probe_and_record(observation: dict) -> dict:
+        with log_outbox.outbox_lock(outbox, timeout_seconds=0.0) as acquired:
+            observed.append(acquired)
+        return original_record(observation)
+
+    original_record = log_outbox._record_once
+    with patch("log_outbox._record_once", side_effect=probe_and_record):
+        result = replay_outbox(path=outbox, limit=5)
+
+    assert observed == [True], "the drain held the lock across a network attempt"
+    assert result["succeeded"] == 1

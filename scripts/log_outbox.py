@@ -378,32 +378,50 @@ def replay_outbox(
             if parsed is not None:
                 scheduled.append((_entry_identity(parsed), parsed["observation"]))
 
-        drained: set[tuple[Any, Any]] = set()
-        retries: dict[tuple[Any, Any], dict[str, Any]] = {}
-        deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
-        for identity, observation in scheduled:
-            if result["attempted"] >= limit:
-                break
-            if deadline is not None and time.monotonic() >= deadline:
-                # Only counts once work was actually possible, so a generous
-                # budget that never mattered is not reported as a breach.
-                if result["attempted"]:
-                    result["budget_hit"] = 1
-                break
-            result["attempted"] += 1
-            try:
-                _record_once(observation)
-            except Exception as error:  # noqa: BLE001 - keep the entry, record why it is still here.
-                failure = _failure_from_error(error)
-                retries[identity] = failure
-                result["failed"] += 1
-                if failure["failure_class"] == "observation_rejected":
-                    result["observation_rejected"] += 1
-                else:
-                    result["delivery_failed"] += 1
+    # Deliberately outside the lock. One attempt is a network call of up to
+    # DIALPAD_LOG_TIMEOUT with no retry budget of its own, so holding the queue
+    # lock across it would make every sender behind us wait on a host that is
+    # already unreachable - and a sender whose lock wait expired would then be
+    # free to append while we still held the file.
+    drained: set[tuple[Any, Any]] = set()
+    retries: dict[tuple[Any, Any], dict[str, Any]] = {}
+    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
+    for identity, observation in scheduled:
+        if result["attempted"] >= limit:
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            # Only counts once work was actually possible, so a generous
+            # budget that never mattered is not reported as a breach.
+            if result["attempted"]:
+                result["budget_hit"] = 1
+            break
+        result["attempted"] += 1
+        try:
+            _record_once(observation)
+        except Exception as error:  # noqa: BLE001 - keep the entry, record why it is still here.
+            failure = _failure_from_error(error)
+            retries[identity] = failure
+            result["failed"] += 1
+            if failure["failure_class"] == "observation_rejected":
+                result["observation_rejected"] += 1
             else:
-                drained.add(identity)
-                result["succeeded"] += 1
+                result["delivery_failed"] += 1
+        else:
+            drained.add(identity)
+            result["succeeded"] += 1
+
+    # The commit takes the lock back on its own. Everything in this block is
+    # local file work, so an enqueue waiting behind it clears in microseconds
+    # rather than behind a network timeout, and cannot be appending to the file
+    # we are about to replace.
+    with outbox_lock(target) as acquired:
+        if not acquired:
+            # Counts stay as they are: this run really did record those
+            # observations. The entries remain queued, and recording one twice
+            # merges rather than duplicates, so the next holder retries them.
+            result["skipped"] = 1
+            result["remaining"] = len(_read_lines(target))
+            return result
 
         keep: list[str] = []
         poison: list[str] = []

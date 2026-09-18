@@ -26,9 +26,19 @@ DEFAULT_OUTBOX = Path("~/.dialpad/log-outbox.jsonl")
 
 # Codes that mean the interaction log refused this specific observation, as opposed
 # to being unreachable. Retrying identical content against these will not help.
-_REJECTION_CODES = frozenset({"invalid_argument", "not_found"})
+# Only codes that mean this payload was refused. A 404 on the route is an
+# infrastructure fault: the identical queued observation becomes deliverable
+# once the destination is repaired, so classifying it as a rejection would
+# dead-letter data that is perfectly good.
+_REJECTION_CODES = frozenset({"invalid_argument"})
 
 DEFAULT_LOCK_TIMEOUT_SECONDS = 2.0
+
+# The drain wants a short wait so it can decline fast and never delay a
+# caller. An enqueue wants the opposite: appending without the lock can land on
+# an inode a concurrent commit is about to replace, so it waits long enough
+# that giving up means the lock is genuinely stuck rather than merely busy.
+DEFAULT_ENQUEUE_LOCK_SECONDS = 5.0
 
 # A drain may run on a path a caller is waiting on, and every request costs up to
 # DIALPAD_LOG_TIMEOUT (5s by default) with no retry budget of its own. These two
@@ -37,6 +47,18 @@ DEFAULT_LOCK_TIMEOUT_SECONDS = 2.0
 DEFAULT_DRAIN_LIMIT = 5
 DEFAULT_DRAIN_BUDGET_SECONDS = 2.0
 DEFAULT_ALERT_AFTER_SECONDS = 6 * 60 * 60
+
+# Alert delivery runs on the same hot path that just spent its drain budget.
+# An alert that cannot travel that fast stays undelivered and is retried on the
+# next use, which is the right trade when the alternative is every send paying
+# for a wedged notification command.
+DEFAULT_NOTIFY_TIMEOUT_SECONDS = 2.0
+
+# How long an unclaimed alert claim may sit before another process may take
+# it over. Small on purpose: the claim only covers the notifier call itself,
+# so a claim older than this means the process that took it died mid-alert and
+# must not keep the host silent.
+DEFAULT_ALERT_CLAIM_STALE_SECONDS = 15 * 60
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -63,10 +85,25 @@ def _lock_timeout_seconds() -> float:
     )
 
 
+def _enqueue_lock_timeout_seconds() -> float:
+    return _positive_float_env(
+        "DIALPAD_LOG_OUTBOX_ENQUEUE_LOCK_SECONDS", DEFAULT_ENQUEUE_LOCK_SECONDS
+    )
+
+
 def resolve_outbox_path(path: Path | str | None = None) -> Path:
     if path is not None:
         return Path(path).expanduser()
     return Path(os.environ.get("DIALPAD_LOG_OUTBOX", str(DEFAULT_OUTBOX))).expanduser()
+
+
+def resolve_rejects_path(outbox: Path) -> Path:
+    """Observations the interaction log refused on content.
+
+    Kept apart from the unreadable-line quarantine: these parsed fine and are
+    forensically interesting, they just can never succeed on retry.
+    """
+    return outbox.with_name(f"{outbox.stem}-rejected{outbox.suffix or '.jsonl'}")
 
 
 def resolve_quarantine_path(outbox: Path) -> Path:
@@ -173,9 +210,11 @@ def enqueue_observation(
     if failure is not None:
         entry["failure"] = failure
     line = json.dumps(entry, separators=(",", ":")) + "\n"
-    with outbox_lock(target):
-        # A lock timeout never drops a confirmed send's record; the drain's
-        # identity-based commit is what keeps a concurrent append alive.
+    with outbox_lock(target, timeout_seconds=_enqueue_lock_timeout_seconds()) as acquired:
+        # Appending without the lock is a last resort, not an outage path: an
+        # append that lands after a commit re-reads can be replaced out of
+        # existence. It stays available because losing a confirmed send's
+        # record is the worse failure.
         with target.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
@@ -301,7 +340,14 @@ def _entry_identity(parsed: dict[str, Any]) -> tuple[Any, Any]:
     twice is already a merge rather than a duplicate, so collapsing them is safe.
     """
     observation = parsed.get("observation") or {}
-    return (parsed.get("queued_at"), observation.get("provider_id"))
+    # Stringified so an array or object where a scalar belongs still yields a
+    # hashable key. An unhashable identity would raise mid-drain and stall
+    # every valid entry behind it, which is the failure quarantine exists to
+    # prevent.
+    return (
+        str(parsed.get("queued_at")),
+        str(observation.get("provider_id")) if observation.get("provider_id") is not None else None,
+    )
 
 
 def _rewrite(path: Path, lines: list[str]) -> None:
@@ -345,6 +391,7 @@ def _empty_result() -> dict[str, int]:
         "delivery_failed": 0,
         "observation_rejected": 0,
         "quarantined": 0,
+        "rejected": 0,
         "skipped": 0,
         "budget_hit": 0,
         "remaining": 0,
@@ -425,6 +472,7 @@ def replay_outbox(
 
         keep: list[str] = []
         poison: list[str] = []
+        rejected: list[str] = []
         for line in _read_lines(target):
             parsed = _parse_entry(line)
             if parsed is None:
@@ -434,17 +482,30 @@ def replay_outbox(
             if identity in drained:
                 continue
             if identity in retries:
-                keep.append(_line_with_failure(line, retries[identity]))
+                failure = retries[identity]
+                if failure.get("failure_class") == "observation_rejected":
+                    # Annotated on the way out: a line that leaves the queue
+                    # carries the reason it left, or it becomes unexplainable.
+                    rejected.append(_line_with_failure(line, failure))
+                else:
+                    keep.append(_line_with_failure(line, failure))
             else:
                 keep.append(line)
 
-        if poison:
+        for lines, destination, key in (
+            (poison, resolve_quarantine_path(target), "quarantined"),
+            (rejected, resolve_rejects_path(target), "rejected"),
+        ):
+            if not lines:
+                continue
             try:
-                _append_durable(resolve_quarantine_path(target), poison)
+                _append_durable(destination, lines)
             except OSError:
-                keep.extend(poison)  # never drop a line we failed to move somewhere else
+                # Never drop a line we failed to move somewhere else, even though
+                # keeping it means it costs another attempt next run.
+                keep.extend(lines)
             else:
-                result["quarantined"] = len(poison)
+                result[key] = len(lines)
 
         _rewrite(target, keep)
         result["remaining"] = len(keep)
@@ -541,6 +602,37 @@ def _deliver_alert(notifier: Callable[[str, dict[str, Any]], bool] | None, text:
         return False
 
 
+def _claim_alert(claim_path: Path, stale_after_seconds: float) -> bool:
+    """Take the one-shot right to notify, across processes.
+
+    An atomic marker replace does not make a read-check-send sequence atomic: two
+    commands draining the same breached outbox can both read an absent marker and
+    both notify. Exclusive create is the only primitive here that is atomic
+    between processes, so it is what guards the send.
+    """
+    claim_path.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in (0, 1):
+        try:
+            descriptor = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if attempt:
+                return False
+            try:
+                age = time.time() - claim_path.stat().st_mtime
+            except OSError:
+                return False
+            if age < stale_after_seconds:
+                return False
+            try:
+                claim_path.unlink(missing_ok=True)
+            except OSError:
+                return False
+            continue
+        os.close(descriptor)
+        return True
+    return False
+
+
 def notify_backlog_breach(
     outbox: Path,
     *,
@@ -565,18 +657,24 @@ def notify_backlog_breach(
         return {"alerted": False, "breach": bool(breach), "dry_run": True}
 
     marker = _read_marker(marker_path)
+    claim_path = marker_path.with_name(f".{marker_path.stem}.claim")
 
     if state["depth"] == 0:
         if marker is not None:
             marker_path.unlink(missing_ok=True)
+        # A cleared backlog is a new breach later, so the next one gets its own
+        # claim rather than inheriting a stale one.
+        claim_path.unlink(missing_ok=True)
         return {"alerted": False, "breach": False, "cleared": True}
 
     if state["oldest_age_seconds"] < threshold:
         return {"alerted": False, "breach": False}
 
-    # The dedupe key names the breaching entry, never its age: an age ticks on
-    # its own, and a key that ticks re-delivers an unchanged report.
-    breach_id = f"{state['oldest_queued_at']}:{state['depth']}"
+    # The dedupe key names the breaching entry and nothing else. An age ticks on
+    # its own, and depth is not stable either: during a long outage every new
+    # queued observation would mint a fresh key and re-send an alert for a breach
+    # that was already reported. The breaching entry is what defines the breach.
+    breach_id = str(state["oldest_queued_at"])
     if marker is not None and marker.get("breach_id") == breach_id and marker.get("delivered") is True:
         return {"alerted": False, "breach": True, "suppressed": True}
 
@@ -588,6 +686,14 @@ def notify_backlog_breach(
         "threshold_seconds": threshold,
         "seen_at": moment.isoformat().replace("+00:00", "Z"),
     }
+    if not _claim_alert(
+        claim_path,
+        _positive_float_env(
+            "DIALPAD_LOG_OUTBOX_ALERT_CLAIM_SECONDS", DEFAULT_ALERT_CLAIM_STALE_SECONDS
+        ),
+    ):
+        return {"alerted": False, "breach": True, "suppressed": True}
+
     _write_marker(marker_path, written)
 
     text = (
@@ -649,7 +755,9 @@ def _configured_notifier() -> Callable[[str, dict[str, Any]], bool] | None:
                 shlex.split(raw) + [text],
                 check=False,
                 capture_output=True,
-                timeout=15,
+                timeout=_positive_float_env(
+                    "DIALPAD_LOG_OUTBOX_NOTIFY_SECONDS", DEFAULT_NOTIFY_TIMEOUT_SECONDS
+                ),
             )
         except (OSError, subprocess.SubprocessError):
             return False

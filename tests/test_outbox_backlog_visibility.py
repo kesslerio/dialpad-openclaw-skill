@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -281,3 +283,124 @@ def test_the_observability_files_are_named_siblings_of_the_outbox(tmp_path: Path
     assert resolve_drain_log_path(outbox).name == "log-outbox-drains.jsonl"
     assert resolve_alert_marker_path(outbox).name == "log-outbox-alert.json"
     assert resolve_quarantine_path(outbox).name == "log-outbox-quarantine.jsonl"
+
+
+def test_a_growing_backlog_does_not_re_alert_the_same_breach(tmp_path: Path) -> None:
+    """Depth is not stable during an outage, so it cannot name the breach.
+
+    Every send that fails while a breach is open grows the queue, so a key
+    containing depth notifies again on every failed send of a long outage.
+    """
+    outbox = tmp_path / "log-outbox.jsonl"
+    _write_outbox(outbox, "2026-09-17T01:00:00Z")
+    sent: list[str] = []
+
+    def notifier(text: str, context: dict) -> bool:
+        sent.append(text)
+        return True
+
+    notify_backlog_breach(
+        outbox,
+        state=backlog_state(outbox, now=NOW),
+        notifier=notifier,
+        threshold_seconds=21600,
+        now=NOW,
+    )
+    with outbox.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "queued_at": "2026-09-17T02:30:00Z",
+                    "observation": {"provider_id": "msg-later"},
+                }
+            )
+            + "\n"
+        )
+
+    grown = backlog_state(outbox, now=NOW)
+    second = notify_backlog_breach(
+        outbox,
+        state=grown,
+        notifier=notifier,
+        threshold_seconds=21600,
+        now=NOW + timedelta(minutes=10),
+    )
+
+    assert grown["depth"] == 2, "the queue really did grow"
+    assert len(sent) == 1
+    assert second["suppressed"] is True
+
+
+def test_the_alert_claim_suppresses_a_rival_that_never_read_the_marker(
+    tmp_path: Path,
+) -> None:
+    """Two drains can both see no marker; the send still happens once.
+
+    An atomic marker replace does not make read-check-send atomic, so removing
+    the marker is exactly what a racing second process did: it looked first.
+    """
+    outbox = tmp_path / "log-outbox.jsonl"
+    marker_path = resolve_alert_marker_path(outbox)
+    _write_outbox(outbox, "2026-09-17T01:00:00Z")
+    sent: list[str] = []
+
+    def notifier(text: str, context: dict) -> bool:
+        sent.append(text)
+        return False
+
+    notify_backlog_breach(
+        outbox,
+        state=backlog_state(outbox, now=NOW),
+        notifier=notifier,
+        threshold_seconds=21600,
+        now=NOW,
+    )
+    assert json.loads(marker_path.read_text(encoding="utf-8"))["delivered"] is False
+
+    marker_path.unlink()
+    second = notify_backlog_breach(
+        outbox,
+        state=backlog_state(outbox, now=NOW),
+        notifier=notifier,
+        threshold_seconds=21600,
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert second["suppressed"] is True
+    assert len(sent) == 1
+
+
+def test_a_claim_left_by_a_dead_process_expires(tmp_path: Path) -> None:
+    """A claim must not outlive the process that took it, or it silences the host."""
+    outbox = tmp_path / "log-outbox.jsonl"
+    _write_outbox(outbox, "2026-09-17T01:00:00Z")
+    notify_backlog_breach(
+        outbox,
+        state=backlog_state(outbox, now=NOW),
+        notifier=lambda text, context: False,
+        threshold_seconds=21600,
+        now=NOW,
+    )
+    claim = resolve_alert_marker_path(outbox).with_name(
+        f".{resolve_alert_marker_path(outbox).stem}.claim"
+    )
+    assert claim.exists()
+    old = time.time() - 3600
+    os.utime(claim, (old, old))
+
+    sent: list[str] = []
+
+    def notifier(text: str, context: dict) -> bool:
+        sent.append(text)
+        return True
+
+    outcome = notify_backlog_breach(
+        outbox,
+        state=backlog_state(outbox, now=NOW),
+        notifier=notifier,
+        threshold_seconds=21600,
+        now=NOW + timedelta(hours=1),
+    )
+
+    assert outcome["alerted"] is True
+    assert len(sent) == 1

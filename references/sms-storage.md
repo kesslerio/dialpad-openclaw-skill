@@ -64,6 +64,9 @@ waiting on:
 | `DIALPAD_LOG_OUTBOX_DRAIN_LIMIT` | `5` | Maximum observations recorded per drain. |
 | `DIALPAD_LOG_OUTBOX_DRAIN_SECONDS` | `2.0` | Wall-clock budget, checked between entries. One in-flight request may overrun it by up to `DIALPAD_LOG_TIMEOUT`. |
 | `DIALPAD_LOG_OUTBOX_LOCK_SECONDS` | `2.0` | How long a drain waits for the outbox lock before declining. A declined drain reports `skipped`, never an empty queue. |
+| `DIALPAD_LOG_OUTBOX_ENQUEUE_LOCK_SECONDS` | `5.0` | How long a queued record waits for that same lock before appending regardless. Deliberately longer: a drain can decline and lose nothing, while dropping a confirmed send's record is the worse failure. |
+| `DIALPAD_LOG_OUTBOX_NOTIFY_SECONDS` | `2.0` | Alert delivery budget. It runs on the caller's hot path, so a wedged notification command costs at most this, and an alert that cannot travel stays undelivered and retries on the next use. |
+| `DIALPAD_LOG_OUTBOX_ALERT_CLAIM_SECONDS` | `900` | How long an alert claim may sit before another process may take it. Covers only the notifier call, so an older claim means that process died mid-alert. |
 | `DIALPAD_LOG_OUTBOX_ALERT_AFTER_SECONDS` | `21600` | Oldest-entry age at which a breach is reported. |
 | `DIALPAD_LOG_OUTBOX_NOTIFY_CMD` | unset | Command taking the alert as one argument, exiting 0 only on a confirmed send. Unset means no alert travels. |
 
@@ -81,11 +84,19 @@ source of truth about what is pending:
 
 - `log-outbox-quarantine.jsonl` — lines the reader could not parse. One poison
   line costs one line and no longer stalls the whole lane.
+- `log-outbox-rejected.jsonl` — observations the interaction log refused on
+  content, each carrying the failure that refused it. They leave the queue
+  because retrying a refusal identical can never succeed, and one left at the
+  head would spend the attempt cap on itself every run and starve everything
+  behind it.
 - `log-outbox-drains.jsonl` — one append-only record per drain run, carrying its
   own timestamp with attempted/succeeded/failed counts, remaining depth, and the
   oldest age. This is what makes a host with no scheduler detectable to anything
   that does have a clock; nothing on that host notices its own silence.
-- `log-outbox-alert.json` — the breach marker. Written undelivered before an
+- `log-outbox-alert.json` — the breach marker.
+- `.log-outbox-alert.claim` — the hidden one-shot taken before a notification
+  is sent. Two commands draining the same breach can both read an absent
+  marker, and only an exclusive create is atomic between processes. Written undelivered before an
   alert is attempted, and flipped to delivered only on a confirmed send, so a
   run that dies mid-alert retries instead of swallowing the breach.
 

@@ -65,6 +65,7 @@ def test_replay_records_once_and_removes_only_successful_observations(tmp_path: 
         "delivery_failed": 0,
         "observation_rejected": 0,
         "quarantined": 0,
+        "rejected": 0,
         "skipped": 0,
         "budget_hit": 0,
         "remaining": 0,
@@ -121,12 +122,22 @@ def test_a_transport_failure_and_a_content_rejection_are_counted_separately(
     assert result["failed"] == 2
     assert result["delivery_failed"] == 1
     assert result["observation_rejected"] == 1
-    assert result["remaining"] == 2
+    assert result["remaining"] == 1
+    assert result["rejected"] == 1
     codes = [
         json.loads(line)["failure"]["code"]
         for line in outbox.read_text(encoding="utf-8").splitlines()
     ]
-    assert codes == ["network_error", "invalid_argument"]
+    # Only the retryable one stays queued. A permanent refusal would otherwise
+    # retry from the head and spend the attempt cap on itself every run, so
+    # valid observations behind it could never reach the log.
+    assert codes == ["network_error"]
+    reject_lines = log_outbox.resolve_rejects_path(outbox).read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert [json.loads(line)["failure"]["code"] for line in reject_lines] == [
+        "invalid_argument"
+    ]
 
 
 def test_failed_replay_updates_the_reason_and_keeps_the_original_queued_at(
@@ -232,6 +243,7 @@ def test_a_second_drain_attempt_records_nothing_already_recorded(tmp_path: Path,
         "delivery_failed": 0,
         "observation_rejected": 0,
         "quarantined": 0,
+        "rejected": 0,
         "skipped": 0,
         "budget_hit": 0,
         "remaining": 0,
@@ -402,6 +414,7 @@ def test_drain_on_use_never_creates_an_outbox_that_is_not_there(
         "delivery_failed": 0,
         "observation_rejected": 0,
         "quarantined": 0,
+        "rejected": 0,
         "skipped": 0,
         "budget_hit": 0,
         "remaining": 0,
@@ -485,3 +498,95 @@ def test_the_drain_does_not_hold_the_lock_while_it_is_trying(
 
     assert observed == [True], "the drain held the lock across a network attempt"
     assert result["succeeded"] == 1
+
+
+def test_permanent_rejections_cannot_starve_the_entries_behind_them(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Five refusals at the head must not cost the queue everything after them.
+
+    The attempt cap is spent from the head, so refusals that can never succeed
+    would take the whole cap on every run and a valid observation behind them
+    would never reach the log. This is the one-poison-line rule.
+    """
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    monkeypatch.setenv("DIALPAD_LOG_URL", "http://127.0.0.1:18887")
+    monkeypatch.setenv("DIALPAD_LOG_TOKEN", "unit-token")
+    for index in range(5):
+        enqueue_observation(
+            {**_observation(), "provider_id": f"msg-bad-{index}"}, path=outbox
+        )
+    enqueue_observation({**_observation(), "provider_id": "msg-good"}, path=outbox)
+
+    def refuse_bad(observation: dict) -> dict:
+        if observation["provider_id"].startswith("msg-bad-"):
+            raise LogApiError("body is required", code="invalid_argument", retryable=False)
+        return {"ok": True}
+
+    with patch("log_outbox._record_once", side_effect=refuse_bad):
+        first = replay_outbox(path=outbox, limit=5)
+        assert first["rejected"] == 5
+        assert first["remaining"] == 1
+
+        second = replay_outbox(path=outbox, limit=5)
+
+    assert second["attempted"] == 1
+    assert second["succeeded"] == 1
+    assert second["remaining"] == 0
+
+
+def test_an_unhashable_identity_quarantines_rather_than_stalls_the_queue(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An array where a scalar belongs must cost one line, not the whole drain."""
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    monkeypatch.setenv("DIALPAD_LOG_URL", "http://127.0.0.1:18887")
+    monkeypatch.setenv("DIALPAD_LOG_TOKEN", "unit-token")
+    outbox.write_text(
+        json.dumps(
+            {"queued_at": "2026-09-17T01:00:00Z", "observation": {"provider_id": ["a"]}}
+        )
+        + "\n"
+        + json.dumps(
+            {"queued_at": "2026-09-17T01:01:00Z", "observation": {"provider_id": "msg-ok"}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with patch("log_outbox._record_once", return_value={"ok": True}):
+        result = replay_outbox(path=outbox, limit=5)
+
+    assert result["attempted"] == 2
+    assert result["succeeded"] == 2
+    assert not outbox.exists()
+
+
+def test_a_missing_route_is_an_infrastructure_fault_not_a_bad_observation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A 404 on the route is the destination being wrong, not the payload.
+
+    The same queued observation is deliverable once the destination is repaired,
+    so classifying it as a rejection would dead-letter perfectly good data.
+    """
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    enqueue_observation(_observation(), path=outbox)
+
+    with patch(
+        "log_outbox._record_once",
+        side_effect=LogApiError("no such route", code="not_found", retryable=True),
+    ):
+        result = replay_outbox(path=outbox, limit=5)
+
+    assert result["delivery_failed"] == 1
+    assert result["observation_rejected"] == 0
+    assert result["rejected"] == 0
+    assert result["remaining"] == 1
+    assert not log_outbox.resolve_rejects_path(outbox).exists()

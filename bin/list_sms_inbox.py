@@ -23,6 +23,7 @@ from _dialpad_compat import (  # noqa: E402
     print_wrapper_error,
 )
 from interaction_log import InteractionLog  # noqa: E402
+from log_outbox import drain_on_use  # noqa: E402
 from log_api_client import LogApiError, configured_log_url, get_data  # noqa: E402
 
 
@@ -64,7 +65,7 @@ def _summarize_message(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def main() -> int:
+def _run() -> int:
     json_mode = "--json" in sys.argv
     command = COMMAND_IDS["list_sms_inbox.list"]
     wrapper = "list_sms_inbox.py"
@@ -123,3 +124,14 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def main() -> int:
+    """Run the command, then opportunistically drain any pending interaction-log records.
+
+    After output, always: the caller's answer is already committed to, and
+    drain_on_use is a single stat call when there is nothing to do.
+    """
+    code = _run()
+    drain_on_use()
+    return code

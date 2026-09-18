@@ -8,6 +8,7 @@ import log_outbox
 from interaction_log import InteractionLog
 from log_api_client import LogApiError
 from log_outbox import (
+    drain_on_use,
     enqueue_observation,
     record_outbound_observation,
     replay_outbox,
@@ -65,7 +66,9 @@ def test_replay_records_once_and_removes_only_successful_observations(tmp_path: 
         "observation_rejected": 0,
         "quarantined": 0,
         "skipped": 0,
+        "budget_hit": 0,
         "remaining": 0,
+        "hook_error": 0,
     }
     assert not outbox.exists()
     assert InteractionLog(sms_db=sms_db, calls_db=tmp_path / "calls.db").thread(
@@ -230,7 +233,9 @@ def test_a_second_drain_attempt_records_nothing_already_recorded(tmp_path: Path,
         "observation_rejected": 0,
         "quarantined": 0,
         "skipped": 0,
+        "budget_hit": 0,
         "remaining": 0,
+        "hook_error": 0,
     }
     assert InteractionLog(sms_db=sms_db, calls_db=tmp_path / "calls.db").thread(
         "+14155550111", limit=10
@@ -302,3 +307,149 @@ def test_a_lock_file_left_behind_by_a_dead_process_does_not_block_the_next_drain
     assert result["skipped"] == 0
     assert result["succeeded"] == 1
     assert not outbox.exists()
+
+
+def test_drain_on_use_clears_a_reachable_backlog(tmp_path: Path, monkeypatch) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    enqueue_observation(_observation(), path=outbox)
+
+    result = drain_on_use(path=outbox)
+
+    assert result["succeeded"] == 1
+    assert result["skipped"] == 0
+    assert not outbox.exists()
+
+
+def test_drain_on_use_keeps_entries_with_reasons_when_the_log_is_unreachable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_LOG_URL", "http://127.0.0.1:18887")
+    monkeypatch.setenv("DIALPAD_LOG_TOKEN", "unit-token")
+    enqueue_observation(_observation(), path=outbox)
+
+    with patch(
+        "log_outbox._record_once",
+        side_effect=LogApiError("connection refused", code="network_error", retryable=True),
+    ):
+        result = drain_on_use(path=outbox)
+
+    assert result["succeeded"] == 0
+    assert result["delivery_failed"] == 1
+    assert result["remaining"] == 1
+    stored = json.loads(outbox.read_text(encoding="utf-8").splitlines()[0])
+    assert stored["failure"]["code"] == "network_error"
+
+
+def test_drain_on_use_returns_within_its_budget_against_a_black_holing_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    for index in range(4):
+        enqueue_observation({**_observation(), "provider_id": f"msg-{index}"}, path=outbox)
+
+    clock = iter([0.0, 0.0, 0.0, 100.0, 100.0, 100.0])
+    with patch("log_outbox.time.monotonic", side_effect=lambda: next(clock)), patch(
+        "log_outbox._record_once", side_effect=TimeoutError("black hold")
+    ):
+        result = replay_outbox(path=outbox, limit=10, budget_seconds=1.0)
+
+    assert result["budget_hit"] == 1
+    assert result["attempted"] < 4
+    assert result["remaining"] >= 1
+
+
+def test_drain_on_use_touches_nothing_without_a_configured_destination(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outbox = tmp_path / "outbox.jsonl"
+    for name in (
+        "DIALPAD_LOG_URL",
+        "DIALPAD_LOG_TOKEN",
+        "DIALPAD_SMS_DB",
+        "DIALPAD_LOG_OUTBOX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(log_outbox.sms_sqlite, "DB_PATH", str(tmp_path / "absent.db"))
+    outbox.write_text("queued\n", encoding="utf-8")
+
+    with patch("log_outbox.replay_outbox") as replay:
+        result = drain_on_use(path=outbox)
+
+    assert result["attempted"] == 0
+    replay.assert_not_called()
+    assert outbox.read_text(encoding="utf-8") == "queued\n"
+    assert not any(entry.name.endswith(".lock") for entry in tmp_path.iterdir())
+
+
+def test_drain_on_use_never_creates_an_outbox_that_is_not_there(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+
+    result = drain_on_use(path=outbox)
+
+    assert result == {
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "delivery_failed": 0,
+        "observation_rejected": 0,
+        "quarantined": 0,
+        "skipped": 0,
+        "budget_hit": 0,
+        "remaining": 0,
+        "hook_error": 0,
+    }
+    assert not outbox.exists()
+    assert not any(path.name.endswith(".lock") for path in tmp_path.iterdir())
+
+
+def test_drain_stops_at_the_entry_cap_and_keeps_the_remainder_in_append_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    monkeypatch.setenv("DIALPAD_LOG_OUTBOX_DRAIN_LIMIT", "2")
+    for index in range(4):
+        enqueue_observation({**_observation(), "provider_id": f"msg-{index}"}, path=outbox)
+
+    result = drain_on_use(path=outbox)
+
+    assert result["attempted"] == 2
+    assert result["succeeded"] == 2
+    assert result["remaining"] == 2
+    kept = [json.loads(line)["observation"]["provider_id"] for line in outbox.read_text(encoding="utf-8").splitlines()]
+    assert kept == ["msg-2", "msg-3"]
+
+
+def test_drain_on_use_never_raises_at_its_caller(tmp_path: Path, monkeypatch) -> None:
+    """A confirmed send must not be able to fail because of the drain hook."""
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    enqueue_observation(_observation(), path=outbox)
+
+    with patch("log_outbox.replay_outbox", side_effect=RuntimeError("outbox on fire")):
+        result = drain_on_use(path=outbox)
+
+    assert result["hook_error"] == 1
+    assert result["succeeded"] == 0
+    assert outbox.exists()
+
+
+def test_drain_on_use_reports_no_hook_error_on_a_normal_run(tmp_path: Path, monkeypatch) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+
+    result = drain_on_use(path=outbox)
+
+    assert result["hook_error"] == 0

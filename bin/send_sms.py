@@ -33,7 +33,7 @@ if SCRIPTS_DIR not in sys.path:
     sys.path.append(SCRIPTS_DIR)
 
 import sms_approval
-from log_outbox import record_outbound_observation
+from log_outbox import drain_on_use, record_outbound_observation
 from outbound_destination_policy import normalize_supported_outbound_destinations
 
 _DIRECT_SEND_SMS_SPEC = importlib.util.spec_from_file_location(
@@ -481,6 +481,12 @@ def main() -> int:
             if memory_sync.get("memory_sync") not in {None, "disabled"}:
                 print(f"   Memory sync: {memory_sync.get('memory_sync')}")
 
+        # Deferred on purpose: the receipt is already out, so an unreachable
+        # interaction log delays nothing the caller is waiting on.
+        try:
+            drain_on_use()
+        except Exception:  # noqa: BLE001 - a confirmed send never fails on a drain.
+            pass
         return 0
     except WrapperError as err:
         if json_mode:

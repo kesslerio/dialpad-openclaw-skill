@@ -28,13 +28,36 @@ _REJECTION_CODES = frozenset({"invalid_argument", "not_found"})
 
 DEFAULT_LOCK_TIMEOUT_SECONDS = 2.0
 
+# A drain may run on a path a caller is waiting on, and every request costs up to
+# DIALPAD_LOG_TIMEOUT (5s by default) with no retry budget of its own. These two
+# caps are what make that safe: without them 18 stale entries could add roughly
+# 90 seconds to a user-visible send.
+DEFAULT_DRAIN_LIMIT = 5
+DEFAULT_DRAIN_BUDGET_SECONDS = 2.0
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
 
 def _lock_timeout_seconds() -> float:
-    raw = os.environ.get("DIALPAD_LOG_OUTBOX_LOCK_SECONDS", "").strip()
-    try:
-        return float(raw) if raw else DEFAULT_LOCK_TIMEOUT_SECONDS
-    except ValueError:
-        return DEFAULT_LOCK_TIMEOUT_SECONDS
+    return _positive_float_env(
+        "DIALPAD_LOG_OUTBOX_LOCK_SECONDS", DEFAULT_LOCK_TIMEOUT_SECONDS
+    )
 
 
 def resolve_outbox_path(path: Path | str | None = None) -> Path:
@@ -320,11 +343,18 @@ def _empty_result() -> dict[str, int]:
         "observation_rejected": 0,
         "quarantined": 0,
         "skipped": 0,
+        "budget_hit": 0,
         "remaining": 0,
+        "hook_error": 0,
     }
 
 
-def replay_outbox(*, path: Path | str | None = None, limit: int = 100) -> dict[str, int]:
+def replay_outbox(
+    *,
+    path: Path | str | None = None,
+    limit: int = 100,
+    budget_seconds: float | None = None,
+) -> dict[str, int]:
     """Record queued observations, then compact the outbox against the live file.
 
     The commit re-reads rather than reusing the first read, so an observation
@@ -347,8 +377,15 @@ def replay_outbox(*, path: Path | str | None = None, limit: int = 100) -> dict[s
 
         drained: set[tuple[Any, Any]] = set()
         retries: dict[tuple[Any, Any], dict[str, Any]] = {}
+        deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
         for identity, observation in scheduled:
             if result["attempted"] >= limit:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                # Only counts once work was actually possible, so a generous
+                # budget that never mattered is not reported as a breach.
+                if result["attempted"]:
+                    result["budget_hit"] = 1
                 break
             result["attempted"] += 1
             try:
@@ -393,6 +430,34 @@ def replay_outbox(*, path: Path | str | None = None, limit: int = 100) -> dict[s
     return result
 
 
+def drain_on_use(*, path: Path | str | None = None) -> dict[str, int]:
+    """Drain opportunistically from a code path a caller is actually waiting on.
+
+    This is only acceptable on a hot path because it costs a single stat call when
+    no outbox exists, and defers to an entry cap and a wall-clock budget when one
+    does. Callers treat a non-zero ``skipped`` as "later", never as "empty".
+    """
+    try:
+        target = resolve_outbox_path(path)
+        if not target.exists():
+            return _empty_result()
+        if not _memory_sync_configured():
+            return _empty_result()
+        result = replay_outbox(
+            path=target,
+            limit=_positive_int_env("DIALPAD_LOG_OUTBOX_DRAIN_LIMIT", DEFAULT_DRAIN_LIMIT),
+            budget_seconds=_positive_float_env(
+                "DIALPAD_LOG_OUTBOX_DRAIN_SECONDS", DEFAULT_DRAIN_BUDGET_SECONDS
+            ),
+        )
+    except Exception:  # noqa: BLE001 - a best-effort drain must not break its caller.
+        reported = _empty_result()
+        reported["hook_error"] = 1
+        return reported
+    result.setdefault("hook_error", 0)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Replay record-only Dialpad interaction-log observations")
     parser.add_argument("replay", nargs="?", default="replay", choices=("replay",))
@@ -406,6 +471,9 @@ def main() -> int:
     if args.json:
         print(json.dumps(result, indent=2))
     else:
+        if result["skipped"]:
+            print("Interaction-log outbox replay: deferred, another drain holds the lock")
+            return 0
         breakdown = ""
         if result["failed"]:
             breakdown = (

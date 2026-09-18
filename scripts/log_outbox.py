@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
 
 import sms_sqlite
 from interaction_log import InteractionLog
@@ -22,11 +26,64 @@ DEFAULT_OUTBOX = Path("~/.dialpad/log-outbox.jsonl")
 # to being unreachable. Retrying identical content against these will not help.
 _REJECTION_CODES = frozenset({"invalid_argument", "not_found"})
 
+DEFAULT_LOCK_TIMEOUT_SECONDS = 2.0
+
+
+def _lock_timeout_seconds() -> float:
+    raw = os.environ.get("DIALPAD_LOG_OUTBOX_LOCK_SECONDS", "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_LOCK_TIMEOUT_SECONDS
+    except ValueError:
+        return DEFAULT_LOCK_TIMEOUT_SECONDS
+
 
 def resolve_outbox_path(path: Path | str | None = None) -> Path:
     if path is not None:
         return Path(path).expanduser()
     return Path(os.environ.get("DIALPAD_LOG_OUTBOX", str(DEFAULT_OUTBOX))).expanduser()
+
+
+def resolve_quarantine_path(outbox: Path) -> Path:
+    """Sibling of the active outbox, so a poison line costs one line and no more."""
+    return outbox.with_name(f"{outbox.stem}-quarantine{outbox.suffix or '.jsonl'}")
+
+
+def _lock_path(outbox: Path) -> Path:
+    return outbox.with_name(f".{outbox.stem}.lock")
+
+
+@contextmanager
+def outbox_lock(outbox: Path, *, timeout_seconds: float | None = None) -> Iterator[bool]:
+    """Best-effort exclusive lock across a whole outbox read, drain, and commit.
+
+    Held on a separate file because the active outbox is itself replaced on commit.
+    A caller that cannot get it within the timeout proceeds without it rather than
+    delaying a confirmed send; a drain instead declines to run.
+    """
+    timeout = _lock_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    path = _lock_path(outbox)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    handle = open(path, "a+", encoding="utf-8")
+    acquired = False
+    try:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+        yield acquired
+    finally:
+        try:
+            if acquired:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
 
 
 def _now() -> str:
@@ -89,10 +146,14 @@ def enqueue_observation(
     failure = _sanitised_failure(reason)
     if failure is not None:
         entry["failure"] = failure
-    with target.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    line = json.dumps(entry, separators=(",", ":")) + "\n"
+    with outbox_lock(target):
+        # A lock timeout never drops a confirmed send's record; the drain's
+        # identity-based commit is what keeps a concurrent append alive.
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
     return target
 
 
@@ -190,21 +251,31 @@ def record_outbound_observation(
         }
 
 
-def _read_entries(path: Path) -> list[tuple[str, dict[str, Any] | None]]:
+def _read_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
-    entries: list[tuple[str, dict[str, Any] | None]] = []
-    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
-        try:
-            parsed = json.loads(line)
-            observation = parsed.get("observation") if isinstance(parsed, dict) else None
-            if isinstance(observation, dict):
-                entries.append((line, observation))
-            else:
-                entries.append((line, None))
-        except json.JSONDecodeError:
-            entries.append((line, None))
-    return entries
+    return path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+
+def _parse_entry(line: str) -> dict[str, Any] | None:
+    """Return the entry dict, or None when the line carries no usable observation."""
+    try:
+        parsed = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed if isinstance(parsed.get("observation"), dict) else None
+
+
+def _entry_identity(parsed: dict[str, Any]) -> tuple[Any, Any]:
+    """Queue time plus provider id.
+
+    Two entries sharing an identity carry the same observation, and recording it
+    twice is already a merge rather than a duplicate, so collapsing them is safe.
+    """
+    observation = parsed.get("observation") or {}
+    return (parsed.get("queued_at"), observation.get("provider_id"))
 
 
 def _rewrite(path: Path, lines: list[str]) -> None:
@@ -220,6 +291,14 @@ def _rewrite(path: Path, lines: list[str]) -> None:
     os.replace(temp_path, path)
 
 
+def _append_durable(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.writelines(lines)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _line_with_failure(line: str, failure: dict[str, Any]) -> str:
     """Re-serialise one queued line with its newest failure, keeping every other field."""
     try:
@@ -232,37 +311,86 @@ def _line_with_failure(line: str, failure: dict[str, Any]) -> str:
     return json.dumps(entry, separators=(",", ":")) + "\n"
 
 
-def replay_outbox(*, path: Path | str | None = None, limit: int = 100) -> dict[str, int]:
-    target = resolve_outbox_path(path)
-    entries = _read_entries(target)
-    remaining: list[str] = []
-    attempted = succeeded = failed = delivery_failed = observation_rejected = 0
-    for index, (line, observation) in enumerate(entries):
-        if observation is None or attempted >= limit:
-            remaining.append(line)
-            continue
-        attempted += 1
-        try:
-            _record_once(observation)
-        except Exception as error:  # noqa: BLE001 - keep the entry, record why it is still here.
-            failed += 1
-            failure = _failure_from_error(error)
-            if failure["failure_class"] == "observation_rejected":
-                observation_rejected += 1
-            else:
-                delivery_failed += 1
-            remaining.append(_line_with_failure(line, failure))
-        else:
-            succeeded += 1
-    _rewrite(target, remaining)
+def _empty_result() -> dict[str, int]:
     return {
-        "attempted": attempted,
-        "succeeded": succeeded,
-        "failed": failed,
-        "delivery_failed": delivery_failed,
-        "observation_rejected": observation_rejected,
-        "remaining": len(remaining),
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "delivery_failed": 0,
+        "observation_rejected": 0,
+        "quarantined": 0,
+        "skipped": 0,
+        "remaining": 0,
     }
+
+
+def replay_outbox(*, path: Path | str | None = None, limit: int = 100) -> dict[str, int]:
+    """Record queued observations, then compact the outbox against the live file.
+
+    The commit re-reads rather than reusing the first read, so an observation
+    appended by a concurrent send during this run survives it instead of being
+    written back out of existence.
+    """
+    target = resolve_outbox_path(path)
+    result = _empty_result()
+    with outbox_lock(target) as acquired:
+        if not acquired:
+            result["skipped"] = 1
+            result["remaining"] = len(_read_lines(target))
+            return result
+
+        scheduled: list[tuple[tuple[Any, Any], dict[str, Any]]] = []
+        for line in _read_lines(target):
+            parsed = _parse_entry(line)
+            if parsed is not None:
+                scheduled.append((_entry_identity(parsed), parsed["observation"]))
+
+        drained: set[tuple[Any, Any]] = set()
+        retries: dict[tuple[Any, Any], dict[str, Any]] = {}
+        for identity, observation in scheduled:
+            if result["attempted"] >= limit:
+                break
+            result["attempted"] += 1
+            try:
+                _record_once(observation)
+            except Exception as error:  # noqa: BLE001 - keep the entry, record why it is still here.
+                failure = _failure_from_error(error)
+                retries[identity] = failure
+                result["failed"] += 1
+                if failure["failure_class"] == "observation_rejected":
+                    result["observation_rejected"] += 1
+                else:
+                    result["delivery_failed"] += 1
+            else:
+                drained.add(identity)
+                result["succeeded"] += 1
+
+        keep: list[str] = []
+        poison: list[str] = []
+        for line in _read_lines(target):
+            parsed = _parse_entry(line)
+            if parsed is None:
+                poison.append(line)
+                continue
+            identity = _entry_identity(parsed)
+            if identity in drained:
+                continue
+            if identity in retries:
+                keep.append(_line_with_failure(line, retries[identity]))
+            else:
+                keep.append(line)
+
+        if poison:
+            try:
+                _append_durable(resolve_quarantine_path(target), poison)
+            except OSError:
+                keep.extend(poison)  # never drop a line we failed to move somewhere else
+            else:
+                result["quarantined"] = len(poison)
+
+        _rewrite(target, keep)
+        result["remaining"] = len(keep)
+    return result
 
 
 def main() -> int:

@@ -4,9 +4,15 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import log_outbox
 from interaction_log import InteractionLog
 from log_api_client import LogApiError
-from log_outbox import enqueue_observation, record_outbound_observation, replay_outbox
+from log_outbox import (
+    enqueue_observation,
+    record_outbound_observation,
+    replay_outbox,
+    resolve_quarantine_path,
+)
 
 
 def _observation() -> dict[str, object]:
@@ -57,6 +63,8 @@ def test_replay_records_once_and_removes_only_successful_observations(tmp_path: 
         "failed": 0,
         "delivery_failed": 0,
         "observation_rejected": 0,
+        "quarantined": 0,
+        "skipped": 0,
         "remaining": 0,
     }
     assert not outbox.exists()
@@ -172,3 +180,125 @@ def test_stored_reason_never_carries_the_bearer_token(tmp_path: Path, monkeypatc
     written = outbox.read_text(encoding="utf-8")
     assert "super-secret-token" not in written
     assert "[redacted]" in written
+
+
+def test_entry_appended_during_a_drain_survives_it(tmp_path: Path, monkeypatch) -> None:
+    """A send appending mid-drain must not be silently deleted by the drain's commit."""
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    enqueue_observation(_observation(), path=outbox)
+
+    appended: list[bool] = []
+    original_record = log_outbox._record_once
+
+    def racy_record(observation: dict) -> dict:
+        result = original_record(observation)
+        if not appended:
+            appended.append(True)
+            enqueue_observation(
+                {**_observation(), "provider_id": "msg-interloper"}, path=outbox
+            )
+        return result
+
+    with patch("log_outbox._record_once", side_effect=racy_record):
+        result = replay_outbox(path=outbox, limit=10)
+
+    assert result["succeeded"] == 1
+    assert result["attempted"] == 1
+    assert result["failed"] == 0
+    lines = outbox.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["observation"]["provider_id"] == "msg-interloper"
+
+
+def test_a_second_drain_attempt_records_nothing_already_recorded(tmp_path: Path, monkeypatch) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    enqueue_observation(_observation(), path=outbox)
+
+    first = replay_outbox(path=outbox, limit=10)
+    second = replay_outbox(path=outbox, limit=10)
+
+    assert first["succeeded"] == 1
+    assert second == {
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "delivery_failed": 0,
+        "observation_rejected": 0,
+        "quarantined": 0,
+        "skipped": 0,
+        "remaining": 0,
+    }
+    assert InteractionLog(sms_db=sms_db, calls_db=tmp_path / "calls.db").thread(
+        "+14155550111", limit=10
+    )["count"] == 1
+
+
+def test_a_poison_line_is_quarantined_and_the_active_file_can_reach_zero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    outbox.write_text("this is not json\n", encoding="utf-8")
+    enqueue_observation(_observation(), path=outbox)
+
+    result = replay_outbox(path=outbox, limit=10)
+
+    assert result["succeeded"] == 1
+    assert result["quarantined"] == 1
+    assert result["remaining"] == 0
+    assert not outbox.exists()
+    quarantine = resolve_quarantine_path(outbox)
+    assert quarantine.read_text(encoding="utf-8") == "this is not json\n"
+
+
+def test_a_failed_quarantine_write_keeps_the_line_instead_of_dropping_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    outbox.write_text("this is not json\n", encoding="utf-8")
+
+    with patch("log_outbox._append_durable", side_effect=OSError("read-only")):
+        result = replay_outbox(path=outbox, limit=10)
+
+    assert result["quarantined"] == 0
+    assert result["remaining"] == 1
+    assert outbox.read_text(encoding="utf-8") == "this is not json\n"
+
+
+def test_a_held_lock_makes_the_drain_decline_rather_than_report_no_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_LOG_OUTBOX_LOCK_SECONDS", "0.05")
+    enqueue_observation(_observation(), path=outbox)
+
+    with log_outbox.outbox_lock(outbox):
+        result = replay_outbox(path=outbox, limit=10)
+
+    assert result["skipped"] == 1
+    assert result["attempted"] == 0
+    assert result["remaining"] == 1
+
+
+def test_a_lock_file_left_behind_by_a_dead_process_does_not_block_the_next_drain(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sms_db = tmp_path / "sms.db"
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("DIALPAD_SMS_DB", str(sms_db))
+    enqueue_observation(_observation(), path=outbox)
+    lock_file = outbox.parent / f".{outbox.stem}.lock"
+    lock_file.write_text("stale", encoding="utf-8")
+
+    result = replay_outbox(path=outbox, limit=10)
+
+    assert result["skipped"] == 0
+    assert result["succeeded"] == 1
+    assert not outbox.exists()

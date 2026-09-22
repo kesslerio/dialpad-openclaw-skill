@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-22
+
+- fix(send_sms): run the generated Dialpad CLI through a deterministic in-repo managed environment — the wrapper's own interpreter with `vendor/` (pinned `click`, `requests`, and their dependencies) on `PYTHONPATH` — instead of discovering an ambient `uv` on `PATH`, which the deployed gateway runtime does not carry. This closes the #89/#155 recurrence where the CLI failed with `ModuleNotFoundError: No module named 'click'` and every approved send needed the direct-API fallback.
+- fix(send_sms): release a claimed approval draft back to a retryable `pending`/`risk_pending` state after a local wrapper failure instead of marking it terminally `failed`; the error envelope carries sanitized recovery context, and no receipt or outbound observation is written for a send that never completed.
+- fix(dialpad): the `generated/dialpad` facade runs the raw CLI under the same vendored `PYTHONPATH` and drops its ambient `uv` probe (`DIALPAD_OPENAPI_PYTHON` still pins an explicit interpreter).
+- test(send_sms): add managed-environment regressions that fail if click is unavailable to the generated CLI path, plus draft-retryability coverage for local failures and `release_agent_direct_send_claim`.
+
 ## 2026-09-01
 
 - fix(webhook): verify and decode Dialpad JWT-encoded event bodies. When the Dialpad webhook has a signature secret configured, events arrive as HS256 JWTs with the event JSON inside the payload; `scripts/webhook_server.py` now verifies the signature against `DIALPAD_WEBHOOK_SECRET` and decodes the payload for the SMS, call, and voicemail handlers instead of rejecting every event with 401.

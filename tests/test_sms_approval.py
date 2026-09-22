@@ -505,6 +505,121 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertEqual(stored["status"], sms_approval.STATUS_SENDING)
         self.assertEqual(stored["approved_by"], "12345")
 
+    def test_release_agent_direct_send_claim_returns_normal_draft_to_pending(self):
+        draft = self._draft()
+
+        sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155550140",
+            draft_text="See you at 2:30 PM Central.",
+            claim=True,
+        )
+        result = sms_approval.release_agent_direct_send_claim(
+            self.conn,
+            draft_id=draft["draft_id"],
+            error="ModuleNotFoundError: No module named 'click'",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["released"])
+        self.assertTrue(result["retryable"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], sms_approval.STATUS_PENDING)
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+        self.assertIn("ModuleNotFoundError", stored["send_error"])
+        self.assertIsNone(stored["dialpad_sms_id"])
+        self.assertIsNone(stored["invalidated_at_ms"])
+
+        # The released draft is claimable again: local failure never loses it.
+        retry = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155550140",
+            draft_text="See you at 2:30 PM Central.",
+            claim=True,
+        )
+        self.assertTrue(retry["ok"])
+        self.assertEqual(retry["status"], "claimed")
+
+    def test_release_agent_direct_send_claim_restores_risky_draft_to_risk_pending(self):
+        draft = self._draft(
+            risk_state=sms_approval.RISK_RISKY,
+            risk_reason="unusual currency wording",
+        )
+        first_step = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+        )
+        self.assertTrue(first_step["ok"])
+        self.assertEqual(first_step["status"], "risky_confirmation_required")
+
+        claimed = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155550140",
+            draft_text="See you at 2:30 PM Central.",
+            confirm_risk=True,
+            claim=True,
+        )
+        self.assertTrue(claimed["ok"])
+
+        result = sms_approval.release_agent_direct_send_claim(
+            self.conn,
+            draft_id=draft["draft_id"],
+            error="local wrapper failure",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], sms_approval.STATUS_RISK_PENDING)
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_RISK_PENDING)
+        # The risky two-step evidence survives the release.
+        self.assertTrue(stored["first_confirmed_at_ms"])
+
+        retry = sms_approval.preflight_agent_direct_send(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            customer_number="+15125550100",
+            sender_number="+14155550140",
+            draft_text="See you at 2:30 PM Central.",
+            confirm_risk=True,
+            claim=True,
+        )
+        self.assertTrue(retry["ok"])
+        self.assertEqual(retry["status"], "claimed")
+
+    def test_release_agent_direct_send_claim_is_noop_unless_claimed(self):
+        draft = self._draft()
+
+        result = sms_approval.release_agent_direct_send_claim(
+            self.conn,
+            draft_id=draft["draft_id"],
+            error="nothing was claimed",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result.get("released", False))
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+        self.assertIsNone(stored["send_error"])
+
+        missing = sms_approval.release_agent_direct_send_claim(
+            self.conn,
+            draft_id="smsdraft_missing",
+            error="nothing was claimed",
+        )
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["status"], "not_found")
+
     def test_agent_direct_send_claim_failure_marks_draft_failed(self):
         draft = self._draft()
 

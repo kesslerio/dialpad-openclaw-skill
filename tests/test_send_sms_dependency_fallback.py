@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,7 +16,7 @@ BIN_DIR = Path(__file__).resolve().parent.parent / "bin"
 sys.path.insert(0, str(BIN_DIR))
 
 import _dialpad_compat
-from _dialpad_compat import WrapperError, is_missing_dependency_error, _find_uv
+from _dialpad_compat import WrapperError, is_missing_dependency_error
 
 SEND_SMS_SPEC = importlib.util.spec_from_file_location(
     "bin_send_sms",
@@ -40,17 +42,6 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
         self.assertTrue(is_missing_dependency_error("ImportError: cannot import name 'rich' from ..."))
         self.assertFalse(is_missing_dependency_error("Dialpad API error (HTTP 404): Contact not found"))
         self.assertFalse(is_missing_dependency_error("Connection timed out"))
-
-    def test_find_uv_discovers_path_or_fallbacks(self):
-        with patch("shutil.which", return_value="/custom/path/uv"):
-            self.assertEqual(_find_uv(), "/custom/path/uv")
-
-        with patch("shutil.which", return_value=None):
-            with patch.object(Path, "is_file", return_value=True):
-                with patch("os.access", return_value=True):
-                    found = _find_uv()
-                    self.assertIsNotNone(found)
-                    self.assertTrue(found.endswith("uv"))
 
     def test_send_sms_falls_back_to_direct_api_on_missing_dependency(self):
         fake_api_response = {
@@ -159,6 +150,139 @@ class SendSmsDependencyFallbackTests(unittest.TestCase):
                         self.assertFalse(parsed["ok"])
                         self.assertEqual(parsed["error"]["code"], "upstream_error")
                         self.assertIn("Direct SMS send failed", parsed["error"]["message"])
+
+
+class ManagedCliEnvironmentTests(unittest.TestCase):
+    """Regression for #155: the generated CLI path must get click from the repo's managed environment.
+
+    The deployed gateway runtime resolves the wrapper outside any login shell,
+    carries no `uv` on PATH or in the old discovery candidates, and its system
+    python cannot import click. The #89 fix relied on ambient `uv` discovery and
+    silently degraded to the bare CLI path there. These tests fail if the
+    generated CLI command, the PYTHONPATH injection, or the vendored
+    dependencies that keep click importable are removed or broken.
+    """
+
+    def test_generated_command_is_deterministic_without_uv_or_path_lookup(self):
+        # Simulates a runtime where no uv is discoverable anywhere.
+        with patch("shutil.which", return_value=None):
+            cmd = _dialpad_compat._generated_command(["--help"])
+
+        self.assertEqual(cmd[0], sys.executable)
+        self.assertEqual(cmd[1], str(_dialpad_compat.GENERATED_DIALPAD))
+        self.assertFalse(any(Path(part).name == "uv" for part in cmd), cmd)
+
+    def test_managed_env_resolves_click_and_requests_from_vendor(self):
+        # The vendored tree must exist and win over ambient site-packages, even
+        # on interpreters that happen to have click installed.
+        self.assertTrue(
+            (_dialpad_compat.VENDOR_DIR / "click" / "__init__.py").is_file(),
+            "vendored click is missing from vendor/",
+        )
+        self.assertTrue(
+            (_dialpad_compat.VENDOR_DIR / "requests" / "__init__.py").is_file(),
+            "vendored requests is missing from vendor/",
+        )
+
+        env = _dialpad_compat._env_with_auth()
+        pythonpath = env.get("PYTHONPATH", "")
+        self.assertTrue(pythonpath, "managed env must put vendor/ on PYTHONPATH")
+        self.assertEqual(
+            Path(pythonpath.split(os.pathsep)[0]).resolve(),
+            _dialpad_compat.VENDOR_DIR.resolve(),
+        )
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import click, requests; print(click.__file__); print(requests.__file__)",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        click_file, requests_file = proc.stdout.split()
+        vendor = _dialpad_compat.VENDOR_DIR.resolve()
+        self.assertTrue(Path(click_file).resolve().is_relative_to(vendor), click_file)
+        self.assertTrue(Path(requests_file).resolve().is_relative_to(vendor), requests_file)
+
+    def test_generated_cli_runs_under_managed_env_when_ambient_python_lacks_click(self):
+        # End-to-end facade -> dialpad.openapi under the wrapper's managed
+        # command. On an interpreter without click (the deployed-runtime
+        # failure mode: ModuleNotFoundError: No module named 'click'), any
+        # regression to the bare-path command fails here.
+        cmd = _dialpad_compat._generated_command(["--help"])
+        proc = subprocess.run(
+            cmd,
+            env=_dialpad_compat._env_with_auth(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Usage:", proc.stdout)
+        self.assertNotIn("No module named", proc.stderr)
+
+    def test_mocked_sms_send_through_managed_path_emits_no_missing_click_error(self):
+        # A real `sms send` invocation through the full managed chain (facade ->
+        # dialpad.openapi -> click parse -> requests POST), pointed at a
+        # loopback fake Dialpad API so nothing leaves the machine. The healthy
+        # managed path must surface the API answer, never the missing-click
+        # error that recurred in #155.
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        received = {}
+
+        class FakeDialpadHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                received["path"] = self.path
+                received["body"] = body
+                payload = b'{"error":{"message":"fake rejection"}}'
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):  # silence test output
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeDialpadHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            env = _dialpad_compat._env_with_auth()
+            env["DIALPAD_API_KEY"] = "test-key-155"
+            payload = json.dumps(
+                {
+                    "to_numbers": ["+14155550111"],
+                    "text": "managed path check",
+                    "infer_country_code": False,
+                    "from_number": "+14155550140",
+                }
+            )
+            cmd = _dialpad_compat._generated_command(
+                ["--base-url", f"http://127.0.0.1:{server.server_port}", "sms", "send", "--data", payload]
+            )
+            proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        # The request reached the fake API through click+requests: the CLI
+        # reports the 401, never an import failure.
+        self.assertIn("/sms", received.get("path", ""))
+        self.assertIn(b"managed path check", received.get("body", b""))
+        self.assertNotIn("No module named", proc.stderr)
+        self.assertNotIn("No module named", proc.stdout)
+        self.assertNotIn("ImportError", proc.stderr)
+        self.assertEqual(proc.returncode, 1, (proc.stdout, proc.stderr))
+        self.assertIn("401", proc.stderr)
 
 
 if __name__ == "__main__":

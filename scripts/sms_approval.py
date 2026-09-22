@@ -795,6 +795,57 @@ def fail_agent_direct_send(
     }
 
 
+def release_agent_direct_send_claim(
+    conn: sqlite3.Connection,
+    *,
+    draft_id: str,
+    error: str,
+) -> dict[str, Any]:
+    """Return a claimed draft to a retryable pre-claim status after a local failure.
+
+    A wrapper failure before any provider send completed is not a delivery
+    outcome: the draft goes back to `risk_pending` (risky drafts) or `pending`
+    with the local error kept in `send_error`, so the same approved draft can
+    be retried instead of being lost to a terminal `failed` state and no false
+    delivery record is written (#155).
+    """
+    draft = get_draft(conn, draft_id)
+    if not draft:
+        return {"ok": False, "status": "not_found", "sent": False, "error": error}
+
+    current_status = draft.get("status")
+    if current_status != STATUS_SENDING:
+        return {
+            "ok": False,
+            "status": current_status or STATUS_STALE,
+            "sent": False,
+            "reason": draft.get("invalidated_reason") or current_status or "not_claimed",
+            "error": error,
+            "draft": draft,
+        }
+
+    target_status = STATUS_RISK_PENDING if draft.get("risk_state") == RISK_RISKY else STATUS_PENDING
+    cursor = conn.execute(
+        """
+        UPDATE sms_approval_drafts
+        SET status = ?, send_error = ?
+        WHERE draft_id = ? AND status = ?
+        """,
+        (target_status, str(error), draft_id, STATUS_SENDING),
+    )
+    conn.commit()
+    current = get_draft(conn, draft_id)
+    return {
+        "ok": cursor.rowcount == 1,
+        "status": target_status if cursor.rowcount == 1 else (current or {}).get("status") or STATUS_STALE,
+        "released": cursor.rowcount == 1,
+        "retryable": True,
+        "sent": False,
+        "error": error,
+        "draft": current,
+    }
+
+
 def approve_draft(
     conn: sqlite3.Connection,
     *,

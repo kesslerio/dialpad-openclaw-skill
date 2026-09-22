@@ -12,7 +12,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -22,6 +21,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = ROOT / "bin"
 GENERATED_DIALPAD = ROOT / "generated" / "dialpad"
+VENDOR_DIR = ROOT / "vendor"
 SCRIPTS_DIR = ROOT / "scripts"
 
 if str(BIN_DIR) not in sys.path:
@@ -246,45 +246,34 @@ def _env_with_auth() -> dict[str, str]:
     api_key = env.get("DIALPAD_API_KEY")
     if api_key and not env.get("DIALPAD_TOKEN"):
         env["DIALPAD_TOKEN"] = api_key
+    env["PYTHONPATH"] = _managed_pythonpath(env)
     return env
 
 
 
-def _find_uv() -> str | None:
-    found = shutil.which("uv")
-    if found:
-        return found
-    candidates = [
-        Path.home() / ".cargo" / "bin" / "uv",
-        Path.home() / ".local" / "bin" / "uv",
-        Path("/usr/local/bin/uv"),
-        Path("/opt/homebrew/bin/uv"),
-    ]
-    for cand in candidates:
-        if cand.is_file() and os.access(cand, os.X_OK):
-            return str(cand)
-    return None
+def _managed_pythonpath(env: dict[str, str] | None = None) -> str:
+    """PYTHONPATH that resolves the generated CLI's dependencies from vendor/.
+
+    The vendored tree is this repo's managed environment for the generated CLI
+    (#89, #155): click/requests must import from it rather than from whatever
+    ambient site-packages a bare system python happens to carry, so it is
+    prepended, never appended.
+    """
+    existing = (env or os.environ).get("PYTHONPATH", "")
+    return str(VENDOR_DIR) + (os.pathsep + existing if existing else "")
 
 
 def _generated_command(args: list[str]) -> list[str]:
-    uv_bin = _find_uv()
-    if uv_bin:
-        return [
-            uv_bin,
-            "run",
-            "--quiet",
-            "--with",
-            "click>=8",
-            "--with",
-            "requests>=2",
-            "--with",
-            "rich>=13",
-            "python",
-            str(GENERATED_DIALPAD),
-            *args,
-        ]
+    """Build the deterministic managed command for the generated CLI.
 
-    return [str(GENERATED_DIALPAD), *args]
+    The wrapper's own interpreter runs the facade with vendor/ on PYTHONPATH
+    (injected by _env_with_auth), so click/requests import from the repo. No
+    ambient PATH, site-packages, or `uv` lookup is involved: non-interactive
+    runtimes (systemd unit, agent exec, cron) resolve the wrapper outside a
+    login shell and the deployed gateway runtime carries no usable `uv`, which
+    is how the #89 fix regressed in #155.
+    """
+    return [sys.executable or "python3", str(GENERATED_DIALPAD), *args]
 
 
 

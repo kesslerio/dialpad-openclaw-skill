@@ -48,6 +48,7 @@ Dialpad OpenClaw Skill
 │   ├── poll_voicemails.py
 │   └── parity-check.sh
 ├── references/                   # Deeper documentation
+├── vendor/                       # Managed Python deps for the generated CLI (click, requests, ...)
 ├── tests/
 └── openapi.json
 ```
@@ -58,7 +59,7 @@ Dialpad OpenClaw Skill
 
 1. Wrapper receives task-oriented arguments.
 2. Wrapper chooses the narrow backend needed for the task.
-3. Most wrappers execute `generated/dialpad` with auth from env. The SMS thread/inbox and calls wrappers use the authenticated shared interaction-log API when `DIALPAD_LOG_URL` is configured, while `bin/get_call_transcript.py` reuses proven `scripts/` HTTP/local helpers for transcripts.
+3. Most wrappers execute `generated/dialpad` with auth from env and `vendor/` (the repo's managed dependencies) on `PYTHONPATH`, so the generated CLI never depends on ambient site-packages or an `uv` on `PATH`. The SMS thread/inbox and calls wrappers use the authenticated shared interaction-log API when `DIALPAD_LOG_URL` is configured, while `bin/get_call_transcript.py` reuses proven `scripts/` HTTP/local helpers for transcripts.
 4. Wrapper normalizes output for downstream workflows.
 
 ## Script Layer

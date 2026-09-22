@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 import subprocess
 import sys
+import re
 import tempfile
 import unittest
 import importlib.util
@@ -25,6 +27,33 @@ SEND_SMS_SPEC = importlib.util.spec_from_file_location(
 assert SEND_SMS_SPEC is not None and SEND_SMS_SPEC.loader is not None
 send_sms = importlib.util.module_from_spec(SEND_SMS_SPEC)
 SEND_SMS_SPEC.loader.exec_module(send_sms)
+
+ROOT = Path(__file__).resolve().parent.parent
+REQUIREMENTS_FILE = ROOT / "requirements.txt"
+BUILD_SCRIPT = ROOT / "scripts" / "build_vendor.py"
+RAW_GENERATED_CLI = ROOT / "generated" / "dialpad.openapi"
+
+
+def setUpModule():
+    """vendor/ is untracked (#155 rework): construct it before the managed-env tests run.
+
+    Same entry point as the runtime-copy delivery step (scripts/build_vendor.py),
+    so a fresh checkout verifies the exact tree that ships.
+    """
+    marker = _dialpad_compat.VENDOR_DIR / "click" / "__init__.py"
+    if marker.is_file():
+        return
+    proc = subprocess.run(
+        [sys.executable, str(BUILD_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if proc.returncode != 0 or not marker.is_file():
+        raise RuntimeError(
+            "vendor/ build failed; run python3 scripts/build_vendor.py "
+            f"(see docs/reference/vendor-build.md):\n{proc.stderr.strip()}"
+        )
 
 
 class SendSmsDependencyFallbackTests(unittest.TestCase):
@@ -283,6 +312,164 @@ class ManagedCliEnvironmentTests(unittest.TestCase):
         self.assertNotIn("ImportError", proc.stderr)
         self.assertEqual(proc.returncode, 1, (proc.stdout, proc.stderr))
         self.assertIn("401", proc.stderr)
+
+
+class VendorPinListTests(unittest.TestCase):
+    """The tracked half of the managed environment: pins, hashes, provenance (#155 rework).
+
+    vendor/ is untracked, so requirements.txt plus docs/reference/vendor-build.md
+    are the delivery contract. These tests fail if the pin list, its hashes, or
+    the documented provenance drift apart.
+    """
+
+    def _pins(self) -> dict[str, tuple[str, list[str]]]:
+        pins: dict[str, tuple[str, list[str]]] = {}
+        name: str | None = None
+        for raw_line in REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("--hash=sha256:"):
+                self.assertIsNotNone(name, f"hash line before any requirement: {raw_line!r}")
+                digest = line.removeprefix("--hash=sha256:").rstrip(" \\")
+                self.assertRegex(digest, r"^[0-9a-f]{64}$")
+                pins[name][1].append(digest)
+                continue
+            match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)\s*\\?$", line)
+            self.assertIsNotNone(match, f"unpinned or unparsed requirement line: {raw_line!r}")
+            name = match.group(1).lower()
+            self.assertNotIn(name, pins, f"duplicate requirement: {name}")
+            pins[name] = (match.group(2), [])
+        return pins
+
+    def test_exactly_six_packages_pinned_with_hashes(self):
+        pins = self._pins()
+        self.assertEqual(
+            set(pins),
+            {"certifi", "charset-normalizer", "click", "idna", "requests", "urllib3"},
+        )
+        for package, (version, hashes) in pins.items():
+            self.assertTrue(version, package)
+            self.assertGreaterEqual(len(hashes), 1, package)
+
+    def test_requests_dependency_closure_is_complete(self):
+        # requests hard-requires these four; a gap breaks --require-hashes installs.
+        pins = self._pins()
+        for dependency in ("urllib3", "idna", "certifi", "charset-normalizer"):
+            self.assertIn(dependency, pins)
+
+    def test_pins_match_provenance_documentation(self):
+        doc = (ROOT / "docs" / "reference" / "vendor-build.md").read_text(encoding="utf-8")
+        for package, (version, _hashes) in self._pins().items():
+            self.assertRegex(
+                doc,
+                rf"\|\s*`?{re.escape(package)}`?\s*\|\s*{re.escape(version)}\s*\|",
+                f"{package}=={version} missing from the provenance table",
+            )
+
+
+class VendorBuildDeliveryTests(unittest.TestCase):
+    """The delivery-step build must yield the offline tree the runtime contract promises (#155).
+
+    Two independent reconstructions from requirements.txt via
+    scripts/build_vendor.py - the same command the runtime-copy delivery
+    step runs - verified on a click-less interpreter and against each other.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.first = Path(cls._tmp.name) / "vendor-1"
+        cls.second = Path(cls._tmp.name) / "vendor-2"
+        for target in (cls.first, cls.second):
+            proc = subprocess.run(
+                [sys.executable, str(BUILD_SCRIPT), str(target)],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    "delivery-step build failed (needs network plus uv or pip):\n"
+                    + proc.stderr.strip()
+                )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def _manifest(tree: Path) -> dict[str, str]:
+        return {
+            str(path.relative_to(tree)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(tree.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_constructed_tree_runs_generated_cli_on_click_less_interpreter(self):
+        # Bytecode writes are disabled so the verification itself cannot
+        # perturb the tree the byte-identical reconstruction check compares.
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(self.first),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        # click and requests must resolve FROM the constructed tree.
+        imports = subprocess.run(
+            [sys.executable, "-c", "import click, requests; print(click.__file__)"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(imports.returncode, 0, imports.stderr)
+        resolved = Path(imports.stdout.strip()).resolve()
+        self.assertTrue(
+            resolved.is_relative_to(self.first.resolve()),
+            f"click resolved to {resolved}, not from the constructed tree",
+        )
+
+        cli = subprocess.run(
+            [sys.executable, str(RAW_GENERATED_CLI), "--help"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+        self.assertIn("Usage:", cli.stdout)
+        self.assertNotIn("No module named", cli.stderr)
+
+        # Control: without the tree the same interpreter reproduces the #155 failure.
+        if importlib.util.find_spec("click") is not None:
+            self.skipTest("test interpreter has click; click-less control not provable here")
+        bare_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "PYTHONPATH"
+        }
+        bare_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        control = subprocess.run(
+            [sys.executable, str(RAW_GENERATED_CLI), "--help"],
+            env=bare_env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertNotEqual(control.returncode, 0)
+        self.assertIn("No module named", control.stderr)
+        self.assertIn("click", control.stderr)
+
+    def test_reconstruction_is_byte_identical(self):
+        first = self._manifest(self.first)
+        second = self._manifest(self.second)
+        self.assertTrue(first, "constructed tree is empty")
+        self.assertEqual(
+            sorted(first), sorted(second), "file sets differ between reconstructions"
+        )
+        differing = sorted(path for path in first if first[path] != second[path])
+        self.assertEqual(differing, [], "files differ between reconstructions")
 
 
 if __name__ == "__main__":

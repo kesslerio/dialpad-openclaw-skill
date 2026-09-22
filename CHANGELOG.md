@@ -2,10 +2,10 @@
 
 ## 2026-09-22
 
-- fix(send_sms): run the generated Dialpad CLI through a deterministic in-repo managed environment — the wrapper's own interpreter with `vendor/` (pinned `click`, `requests`, and their dependencies) on `PYTHONPATH` — instead of discovering an ambient `uv` on `PATH`, which the deployed gateway runtime does not carry. This closes the #89/#155 recurrence where the CLI failed with `ModuleNotFoundError: No module named 'click'` and every approved send needed the direct-API fallback.
+- fix(send_sms): run the generated Dialpad CLI through a deterministic managed environment — the wrapper's own interpreter with `vendor/`, constructed from the pinned, hash-verified `requirements.txt` by `scripts/build_vendor.py` (the tree itself is untracked; see `docs/reference/vendor-build.md`) — instead of discovering an ambient `uv` on `PATH`, which the deployed gateway runtime does not carry. This closes the #89/#155 recurrence where the CLI failed with `ModuleNotFoundError: No module named 'click'` and every approved send needed the direct-API fallback.
 - fix(send_sms): release a claimed approval draft back to a retryable `pending`/`risk_pending` state after a local wrapper failure instead of marking it terminally `failed`; the error envelope carries sanitized recovery context, and no receipt or outbound observation is written for a send that never completed.
 - fix(dialpad): the `generated/dialpad` facade runs the raw CLI under the same vendored `PYTHONPATH` and drops its ambient `uv` probe (`DIALPAD_OPENAPI_PYTHON` still pins an explicit interpreter).
-- test(send_sms): add managed-environment regressions that fail if click is unavailable to the generated CLI path, plus draft-retryability coverage for local failures and `release_agent_direct_send_claim`.
+- test(send_sms): add managed-environment regressions that fail if click is unavailable to the generated CLI path (including the delivery-step build and its click-less control), pin-list/hash assertions, a byte-identical reconstruction check, plus draft-retryability coverage for local failures and `release_agent_direct_send_claim`.
 
 ## 2026-09-01
 

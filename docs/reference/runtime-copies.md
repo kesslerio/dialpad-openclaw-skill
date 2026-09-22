@@ -21,6 +21,29 @@ The probe compares content hashes and is restricted to the reviewed manifest; it
 has no mode that walks a tree. A clean report means the manifest is clean, not
 that the copy is identical to the repo.
 
+## Delivery steps: build the managed dependency tree
+
+`vendor/` is not tracked in git (see `vendor-build.md`); every copy needs it
+constructed before that copy goes live. After the skill files are copied and
+**before** the copy is installed as the active skill, run from a machine with
+network and tooling:
+
+```bash
+# from a repo checkout; TARGET is the copy's skill root
+python3 scripts/build_vendor.py ~/.openclaw/skills/dialpad/vendor   # gateway (theshop)
+python3 scripts/build_vendor.py ~/.ai/skills/dialpad/vendor         # Grok Bot
+```
+
+The script builds from the pinned `requirements.txt` with `--require-hashes`,
+strips installer noise, and path-verifies `click`/`requests` import from the
+tree; build on linux x86_64 to match the runtimes. The deployed container
+never runs it: it receives the finished offline tree exactly as before — no
+`uv`, no `pip`, no network at runtime. Quick post-delivery check:
+
+```bash
+PYTHONPATH=<copy>/vendor python3 <copy>/generated/dialpad.openapi --help   # exit 0, prints usage
+```
+
 ## Delivery record — outbox self-drain (2026-09-18)
 
 PR #154, squashed as `1b1f297`. Applied set is

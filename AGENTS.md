@@ -13,7 +13,7 @@ SMS/call enrichment, and OpenClaw hook integration.
 
 ## Managed environment & test runner
 
-- `vendor/` is the repo's pinned Python dependency tree for the generated Dialpad CLI (`click`, `requests`, and transitive deps). `bin/_dialpad_compat.py` and the `generated/dialpad` facade put it on `PYTHONPATH` for every CLI subprocess; do not reintroduce ambient `uv`/`PATH` dependency discovery — the deployed gateway runtime carries no `uv` (#155). Upgrade procedure and constraints: `vendor/README.md`.
+- `vendor/` is the managed dependency tree for the generated Dialpad CLI — **built, not tracked**: it is constructed from the pinned, hash-verified `requirements.txt` by `scripts/build_vendor.py` during runtime-copy delivery (`docs/reference/runtime-copies.md`) and before test runs; provenance, upgrades, and verification: `docs/reference/vendor-build.md`. `bin/_dialpad_compat.py` and the `generated/dialpad` facade put it on `PYTHONPATH` for every CLI subprocess; do not reintroduce ambient `uv`/`PATH` dependency discovery — the deployed gateway runtime carries no `uv` (#155).
 - After a local wrapper failure in `bin/send_sms.py`, a claimed approval draft goes back to a retryable state via `scripts/sms_approval.py:release_agent_direct_send_claim` and is never terminally `failed`; only provider-result failures use `fail_agent_direct_send`/`record_agent_direct_send`.
 - Run tests with `uv run --with pytest python -m pytest tests/ -q` (system `python3` here has no pytest), and unset `DIALPAD_WEBHOOK_SECRET` first — an ambient secret makes the unsigned webhook-handler tests fail at baseline.
 

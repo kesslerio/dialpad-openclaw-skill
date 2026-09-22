@@ -48,8 +48,9 @@ Dialpad OpenClaw Skill
 │   ├── poll_voicemails.py
 │   └── parity-check.sh
 ├── references/                   # Deeper documentation
-├── vendor/                       # Managed Python deps for the generated CLI (click, requests, ...)
+├── vendor/                       # Built managed deps (untracked; constructed from requirements.txt)
 ├── tests/
+├── requirements.txt              # Pinned, hash-verified vendor/ build inputs
 └── openapi.json
 ```
 

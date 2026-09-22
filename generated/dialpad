@@ -8,7 +8,6 @@ openapi2cli-generated code in generated/dialpad.openapi.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +22,7 @@ from generated_outbound_preflight import (
 )
 
 RAW_CLI = Path(__file__).with_name("dialpad.openapi")
+VENDOR_DIR = Path(__file__).resolve().parent.parent / "vendor"
 ALIASES = {
     ("sms", "send"): ("sms", "sms.send"),
     ("sms", "export"): ("stats", "stats.create"),
@@ -80,25 +80,25 @@ def _auth_env() -> dict[str, str]:
     api_key = env.get("DIALPAD_API_KEY")
     if api_key and not env.get("DIALPAD_TOKEN"):
         env["DIALPAD_TOKEN"] = api_key
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(VENDOR_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
     return env
 
 
 def _raw_cli_runner() -> list[str]:
-    """Return a Python command that can import generated CLI dependencies."""
+    """Return a Python command that can import generated CLI dependencies.
 
+    DIALPAD_OPENAPI_PYTHON pins an explicit interpreter. Otherwise the facade's
+    own interpreter runs the raw CLI: _auth_env() puts the repo's vendored
+    managed dependencies (vendor/) on PYTHONPATH, so click/requests import from
+    the repo instead of an ambient interpreter, PATH lookup, or a `uv` binary
+    that non-interactive runtimes do not carry (#89, #155).
+    """
     explicit_python = os.environ.get("DIALPAD_OPENAPI_PYTHON")
     if explicit_python:
         return [explicit_python]
 
-    try:
-        import click  # noqa: F401
-        import requests  # noqa: F401
-    except ImportError:
-        uv = shutil.which("uv")
-        if uv:
-            return [uv, "run", "--quiet", "--with", "click", "--with", "requests", "python"]
-
-    return [sys.executable]
+    return [sys.executable or "python3"]
 
 
 def main() -> int:

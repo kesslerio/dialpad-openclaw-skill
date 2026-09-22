@@ -229,6 +229,112 @@ class SendSmsApprovalAuditTests(unittest.TestCase):
             self.assertEqual(stored["status"], send_sms.sms_approval.STATUS_FAILED)
             self.assertEqual(stored["send_error"], "Dialpad unavailable")
 
+    def test_local_dependency_failure_keeps_draft_retryable(self):
+        # #155: a local wrapper failure (missing managed dependency + failed
+        # direct fallback) must not mark the draft terminally failed, lose it,
+        # or write any delivery record - and the same draft must then be
+        # reclaimable for a successful retry.
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(send_sms.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"):
+            draft = self._create_draft(temp_dir)
+            ledger_file = Path(temp_dir) / "sms-receipts.jsonl"
+            argv = [
+                "bin/send_sms.py",
+                "--to",
+                "+14155550111",
+                "--message",
+                "hello",
+                "--from",
+                "+14155550140",
+                "--resolve-draft-id",
+                draft["draft_id"],
+                "--approval-actor-id",
+                "12345",
+                "--approval-actor-username",
+                "operator",
+                "--json",
+            ]
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "DIALPAD_API_KEY": "fake_token",
+                    "DIALPAD_SMS_RECEIPT_LEDGER": str(ledger_file),
+                },
+            ), \
+                    patch("send_sms.require_generated_cli"), \
+                    patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
+                    patch("send_sms.require_api_key"), \
+                    patch(
+                        "send_sms.run_generated_json",
+                        side_effect=WrapperError(
+                            "Generated CLI runtime dependencies missing: ModuleNotFoundError: No module named 'click'",
+                            code="missing_generated_cli",
+                            retryable=False,
+                        ),
+                    ), \
+                    patch.object(
+                        send_sms._direct_send_sms_module,
+                        "send_sms",
+                        side_effect=RuntimeError("Network error: connection refused"),
+                    ), \
+                    patch.object(send_sms, "record_outbound_observation") as observe:
+                code, out, err = self._run(argv)
+
+            # The direct-API safety net was attempted before the failure surfaced.
+            self.assertIn("using direct Dialpad API send fallback", err)
+            self.assertEqual(code, 2)
+            parsed = self._parse(out)
+            self._assert_error(parsed)
+
+            # The envelope says the draft was released, not failed.
+            audit = parsed["meta"]["approval_audit"]
+            self.assertEqual(audit["draft_id"], draft["draft_id"])
+            self.assertEqual(audit["status"], send_sms.sms_approval.STATUS_PENDING)
+            self.assertTrue(audit["retryable"])
+            self.assertNotIn("draft", audit)
+
+            # No misleading delivery noise: no observation, no receipt.
+            observe.assert_not_called()
+            self.assertFalse(ledger_file.exists())
+
+            conn = send_sms.sms_approval.init_db()
+            try:
+                stored = send_sms.sms_approval.get_draft(conn, draft["draft_id"])
+            finally:
+                conn.close()
+            self.assertEqual(stored["status"], send_sms.sms_approval.STATUS_PENDING)
+            self.assertIn("Network error", stored["send_error"])
+            self.assertIsNone(stored["dialpad_sms_id"])
+            self.assertIsNone(stored["invalidated_at_ms"])
+
+            # Retry with a healthy managed path reclaims the SAME draft and sends.
+            with patch("send_sms.require_generated_cli"), \
+                    patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \
+                    patch("send_sms.require_api_key"), \
+                    patch(
+                        "send_sms.run_generated_json",
+                        return_value={"id": "msg-retry", "message_status": "pending"},
+                    ), \
+                    patch.object(send_sms, "record_outbound_observation", return_value={"memory_sync": "disabled"}), \
+                    patch.object(send_sms, "drain_on_use"):
+                code, out, err = self._run(argv)
+
+            self.assertEqual(code, 0, err)
+            parsed = self._parse(out)
+            self._assert_success(parsed)
+            self.assertNotIn("dependency", err)
+            self.assertNotIn("No module named", err)
+            self.assertEqual(parsed["data"]["approval_audit"]["status"], "sent")
+
+            conn = send_sms.sms_approval.init_db()
+            try:
+                stored = send_sms.sms_approval.get_draft(conn, draft["draft_id"])
+            finally:
+                conn.close()
+            self.assertEqual(stored["status"], send_sms.sms_approval.STATUS_SENT)
+            self.assertEqual(stored["dialpad_sms_id"], "msg-retry")
+
     def test_audited_direct_send_requires_actor(self):
         with patch("send_sms.require_generated_cli"), \
                 patch("send_sms.resolve_sender", return_value=("+14155550140", "--from")), \

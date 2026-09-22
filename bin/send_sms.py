@@ -347,6 +347,43 @@ def fail_claimed_approval_audit(args: argparse.Namespace, error: Exception) -> N
         pass
 
 
+def recover_claimed_approval_audit(args: argparse.Namespace, error: Exception) -> dict[str, object] | None:
+    """Release a claimed draft back to a retryable status after a local wrapper failure.
+
+    A local failure (missing managed dependencies, direct-send fallback failure)
+    means no send completed: the draft must not become terminally `failed` or
+    be lost, and no delivery record may be written for it. Returns sanitized
+    audit context for the error envelope, or None when nothing was claimed or
+    the release itself failed.
+    """
+    if not args.resolve_draft_id:
+        return None
+
+    try:
+        conn = sms_approval.init_db()
+        try:
+            result = sms_approval.release_agent_direct_send_claim(
+                conn,
+                draft_id=args.resolve_draft_id,
+                error=str(error),
+            )
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - recovery must not mask the original failure.
+        return None
+
+    if not result.get("ok"):
+        return None
+    return {
+        "ok": True,
+        "status": result.get("status"),
+        "draft_id": args.resolve_draft_id,
+        "retryable": True,
+        "approval_source": sms_approval.APPROVAL_SOURCE_AGENT_DIRECT_SEND,
+        "approval_actor_trust": sms_approval.APPROVAL_ACTOR_TRUST_AGENT_ASSERTED,
+    }
+
+
 def attach_approval_audit(result: object, approval_audit: dict[str, object] | None) -> object:
     if approval_audit is None:
         return result
@@ -431,10 +468,22 @@ def main() -> int:
                     )
                     append_sms_send_receipt(payload, result, source="direct_sms_fallback")
                 except Exception as direct_err:
-                    fail_claimed_approval_audit(args, direct_err)
+                    # A local failure is not a delivery outcome: release the claimed
+                    # draft back to a retryable status instead of recording a
+                    # terminal `failed` send (#155).
+                    recovery = recover_claimed_approval_audit(args, direct_err)
                     if isinstance(direct_err, WrapperError):
+                        if recovery:
+                            direct_err.meta.setdefault("approval_audit", recovery)
                         raise
-                    raise WrapperError(f"Direct SMS send failed: {direct_err}", code="upstream_error", retryable=True) from direct_err
+                    wrapped = WrapperError(
+                        f"Direct SMS send failed: {direct_err}",
+                        code="upstream_error",
+                        retryable=True,
+                    )
+                    if recovery:
+                        wrapped.meta.setdefault("approval_audit", recovery)
+                    raise wrapped from direct_err
             else:
                 fail_claimed_approval_audit(args, err)
                 raise

@@ -14,6 +14,10 @@ venv/
 env/
 ENV/
 
+# Built managed dependency tree (constructed from requirements.txt by
+# scripts/build_vendor.py; see docs/reference/vendor-build.md)
+/vendor/
+
 # IDE
 .vscode/
 .idea/

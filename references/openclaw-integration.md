@@ -55,6 +55,8 @@ Set these on the Dialpad webhook server:
 ```bash
 export DIALPAD_API_KEY="your-dialpad-api-key"
 export DIALPAD_WEBHOOK_SECRET="your-dialpad-webhook-secret"
+export DIALPAD_BIND_HOSTS="127.0.0.1"
+export DIALPAD_STORE_TOKEN="replace-with-random-store-token"
 
 export OPENCLAW_GATEWAY_URL="http://127.0.0.1:18789"
 export OPENCLAW_HOOKS_TOKEN="your-openclaw-hooks-token"
@@ -67,6 +69,8 @@ export OPENCLAW_HOOKS_AGENT_ID="niemand-work"
 # numeric chat id.
 export OPENCLAW_HOOKS_CHANNEL="telegram"
 export OPENCLAW_HOOKS_TO="telegram:group:-1001234567890:topic:2"
+# Optional. Sent as X-Forwarded-For only when set. Placeholder only.
+export OPENCLAW_HOOKS_CLIENT_IP="203.0.113.10"
 export OPENCLAW_HOOKS_SMS_ENABLED="0"
 export OPENCLAW_HOOKS_CALL_ENABLED="0"
 export OPENCLAW_HOOKS_INCLUDE_SESSION_KEY="0"
@@ -79,6 +83,9 @@ export TELEGRAM_WEBHOOK_SECRET="telegram-secret-token"
 ```
 
 Behavior:
+- `DIALPAD_BIND_HOSTS` defaults to `127.0.0.1` because the webhook sits behind a local cloudflared tunnel. Extra comma-separated addresses are best-effort; add the Docker bridge gateway when the gateway container must reach `/internal/draft-callback`
+- `DIALPAD_STORE_TOKEN` gates legacy `POST /store`. The route accepts only localhost requests that carry no Cloudflare or proxy forwarding headers and an `X-Store-Token` or `Authorization: Bearer` value matching the token. An unset token makes `/store` return 403 for every request
+- `OPENCLAW_HOOKS_CLIENT_IP`, when set, is the only `X-Forwarded-For` value sent on OpenClaw hook forwards. When it is unset, hook requests omit that header
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound SMS forwarding still requires `OPENCLAW_HOOKS_SMS_ENABLED=1`
 - when `OPENCLAW_HOOKS_TOKEN` is configured, inbound missed-call forwarding still requires `OPENCLAW_HOOKS_CALL_ENABLED=1`
 - `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=0` (default) omits `sessionKey` from the outbound request payload, allowing OpenClaw to run with `hooks.allowRequestSessionKey=false` without breaking Dialpad ingress; OpenClaw derives session keys server-side via trusted hook mapping or transform (`hooks/transforms/dialpad-hook-transform.mjs`). Set `OPENCLAW_HOOKS_INCLUDE_SESSION_KEY=1` only for legacy configurations requiring client-supplied session keys.
@@ -651,6 +658,8 @@ Dialpad-side:
 - `OPENCLAW_HOOKS_TOKEN` configured
 - `OPENCLAW_HOOKS_PATH` points at a live OpenClaw receiver
 - `DIALPAD_WEBHOOK_SECRET` matches the sender expectations
+- `DIALPAD_BIND_HOSTS` is loopback unless an extra local address is required
+- `DIALPAD_STORE_TOKEN` is set before any legacy `/store` caller is enabled
 - Telegram button rollout preflight checks `getWebhookInfo` and confirms no conflicting `getUpdates` polling owner
 - `/webhook/telegram` validates `X-Telegram-Bot-Api-Secret-Token` and wrong-chat callbacks fail closed
 - test SMS and missed-call webhooks return HTTP 200
@@ -667,6 +676,7 @@ OpenClaw-side:
 Useful log/search terms from the Dialpad side:
 - `OpenClaw Hook`
 - `Unauthorized webhook request on /webhook/dialpad`
+- `/store rejected`
 - `Unauthorized webhook request on /webhook/dialpad-call`
 - `request_failed`
 - `token_missing`

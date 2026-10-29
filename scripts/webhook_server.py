@@ -25,6 +25,8 @@ Environment Variables:
 - TELEGRAM_WEBHOOK_SECRET - Telegram secret_token for inline approval callbacks
 - DIALPAD_API_KEY - Dialpad API key (required for contact lookup)
 - DIALPAD_WEBHOOK_SECRET - webhook auth secret (optional, enables signature/JWT verification)
+- DIALPAD_BIND_HOSTS (default: 127.0.0.1) - comma-separated listen addresses; the first is required and extra addresses are best-effort
+- DIALPAD_STORE_TOKEN - shared token for legacy POST /store; when unset, /store rejects every request
 - OPENCLAW_GATEWAY_URL (default: http://127.0.0.1:8080)
 - OPENCLAW_HOOKS_TOKEN (required for OpenClaw hook forwarding)
 - OPENCLAW_HOOKS_PATH (default: /hooks/agent)
@@ -36,6 +38,7 @@ Environment Variables:
 - OPENCLAW_HOOKS_SMS_ENABLED (default: disabled)
 - OPENCLAW_HOOKS_CALL_ENABLED (default: disabled)
 - OPENCLAW_HOOKS_INCLUDE_SESSION_KEY (default: disabled; set to 1 for legacy request-supplied sessionKey)
+- OPENCLAW_HOOKS_CLIENT_IP (optional) - sent as X-Forwarded-For on OpenClaw hook requests only when set
 """
 
 import json
@@ -53,7 +56,6 @@ import sqlite3
 import subprocess
 import threading
 import secrets
-import socket
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -137,6 +139,15 @@ def parse_bool_env(raw_value, default=True):
 
 # Environment configuration (NO HARDCODED SECRETS)
 PORT = int(os.environ.get("PORT", "8888"))
+# Bind addresses (HOR-1029-STORELOCK). First entry is required; extra entries
+# (e.g. the Docker bridge gateway for the OpenClaw draft callback) are best-effort.
+DIALPAD_BIND_HOSTS = [
+    h.strip() for h in os.environ.get("DIALPAD_BIND_HOSTS", "127.0.0.1").split(",") if h.strip()
+] or ["127.0.0.1"]
+# Shared token for the legacy /store endpoint. Unset => /store rejects everything.
+DIALPAD_STORE_TOKEN = os.environ.get("DIALPAD_STORE_TOKEN", "")
+_LOCAL_CLIENT_ADDRS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+_PROXY_HEADERS = ("Cf-Connecting-Ip", "Cf-Ray", "X-Forwarded-For", "Cdn-Loop")
 WEBHOOK_SECRET = os.environ.get("DIALPAD_WEBHOOK_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("DIALPAD_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("DIALPAD_TELEGRAM_CHAT_ID", "")
@@ -2544,6 +2555,9 @@ def _extract_call_history_row(call):
     }
 
 
+DIALPAD_HISTORY_SKEW_MARGIN_MS = 15 * 1000
+
+
 def _fetch_recent_calls_around(event_ts_ms, window_ms=30 * 60 * 1000, limit=25, now_ms=None):
     if not DIALPAD_API_KEY or event_ts_ms is None:
         return []
@@ -2551,7 +2565,9 @@ def _fetch_recent_calls_around(event_ts_ms, window_ms=30 * 60 * 1000, limit=25, 
     current_ms = _now_ms() if now_ms is None else now_ms
     started_after = max(0, event_ts_ms - window_ms)
     # Dialpad API rejects future timestamps with HTTP 400 "Timestamp range cannot be in the future."
-    started_before = min(current_ms, event_ts_ms + window_ms)
+    # Its check has no clock-skew tolerance (a bound even ~1-3s past Dialpad's clock fails),
+    # so stay a margin behind local "now".
+    started_before = min(current_ms - DIALPAD_HISTORY_SKEW_MARGIN_MS, event_ts_ms + window_ms)
     if started_after >= started_before:
         started_after = max(0, started_before - window_ms)
 
@@ -2574,6 +2590,14 @@ def _fetch_recent_calls_around(event_ts_ms, window_ms=30 * 60 * 1000, limit=25, 
     try:
         with urllib.request.urlopen(req, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(1024).decode("utf-8", "replace").strip()
+        except Exception:
+            body = ""
+        detail = f": {body[:300]}" if body else ""
+        print(f"⚠️  Missed-call history lookup failed: HTTP {e.code}{detail}")
+        return []
     except Exception as e:
         print(f"⚠️  Missed-call history lookup failed: {e}")
         return []
@@ -5548,25 +5572,6 @@ def build_openclaw_hook_payload(normalized_event, line_display=None):
     return payload
 
 
-def _resolve_openclaw_client_ip():
-    """Resolve client IP address for OpenClaw gateway proxy client attribution."""
-    configured = _clean_identifier(os.environ.get("OPENCLAW_HOOKS_CLIENT_IP") or OPENCLAW_HOOKS_CLIENT_IP)
-    if configured:
-        return configured
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("192.168.4.1", 80))
-            ip = s.getsockname()[0]
-            if ip and not ip.startswith("127."):
-                return ip
-        finally:
-            s.close()
-    except Exception:
-        pass
-    return "10.0.0.1"
-
-
 def send_to_openclaw_hooks(normalized_event, line_display=None):
     """
     Forward a normalized event payload to OpenClaw hooks.
@@ -5593,8 +5598,17 @@ def send_to_openclaw_hooks(normalized_event, line_display=None):
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENCLAW_HOOKS_TOKEN}",
-        "X-Forwarded-For": _resolve_openclaw_client_ip(),
     }
+    # OpenClaw 2026.10.x rejects forwarded-client headers from any peer outside
+    # gateway.trustedProxies with HTTP 403 proxy_attribution_required. This server
+    # reaches the gateway directly (Docker bridge peer), so it must not claim to be
+    # a proxy. Only send X-Forwarded-For when an operator explicitly configures
+    # OPENCLAW_HOOKS_CLIENT_IP for a deployment behind a trusted proxy.
+    explicit_client_ip = _clean_identifier(
+        os.environ.get("OPENCLAW_HOOKS_CLIENT_IP") or OPENCLAW_HOOKS_CLIENT_IP
+    )
+    if explicit_client_ip:
+        headers["X-Forwarded-For"] = explicit_client_ip
     req = urllib.request.Request(
         url,
         data=data,
@@ -5968,8 +5982,33 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _store_request_allowed(self):
+        """HOR-1029-STORELOCK: /store is localhost-only and token-gated.
+
+        Requests proxied by cloudflared also arrive from 127.0.0.1, so any
+        proxy header marks the request as external and it is rejected."""
+        client_ip = (self.client_address[0] if self.client_address else "") or ""
+        if client_ip not in _LOCAL_CLIENT_ADDRS:
+            return False
+        if any(self.headers.get(h) for h in _PROXY_HEADERS):
+            return False
+        if not DIALPAD_STORE_TOKEN:
+            return False
+        provided = self.headers.get("X-Store-Token", "")
+        if not provided:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                provided = auth[len("Bearer "):].strip()
+        return bool(provided) and hmac.compare_digest(
+            provided.encode("utf-8"), DIALPAD_STORE_TOKEN.encode("utf-8")
+        )
+
     def handle_store(self):
         """Handle /store endpoint - stores message in SQLite, called by OpenClaw plugin"""
+        if not self._store_request_allowed():
+            log_line(f"⛔ /store rejected from={self.client_address[0] if self.client_address else '?'}")
+            self.send_json_response(403, {"error": "forbidden"})
+            return
         # Limit request body size to prevent memory exhaustion (1MB max)
         MAX_BODY_SIZE = 1024 * 1024  # 1MB
         content_length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY_SIZE)
@@ -6001,15 +6040,19 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         try:
             result = handle_sms_webhook(data, event_type=event_type)
             stored = result.get("stored", False)
+            if not stored:
+                print(f"⚠️  /store failed to store: {result.get('error', 'unknown')}")
+                self.send_json_response(500, {"error": "internal error"})
+                return
 
-            self.send_response(200 if stored else 500)
+            self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
 
         except Exception as e:
-            print(f"❌ Storage error on /store: {e}")
-            self.send_error(500, f"Storage error: {e}")
+            print(f"❌ Storage error on /store: {e!r}")
+            self.send_json_response(500, {"error": "internal error"})
 
     def handle_webhook(self):
         """Handle /webhook/dialpad endpoint - main Dialpad webhook"""
@@ -6106,9 +6149,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 return
 
         except Exception as e:
-            print(f"❌ Storage error: {e}")
+            print(f"❌ Storage error: {e!r}")
             release_sms_webhook_event(inbound_dedupe_key)
-            self.send_error(500, f"Storage error: {e}")
+            self.send_json_response(500, {"error": "internal error"})
             return
 
         # ACK Dialpad now; the slow side-effect processing runs after this 200.
@@ -7056,12 +7099,23 @@ def main():
     # ThreadingHTTPServer: each request runs on its own thread so the ACK-first
     # handlers' post-ACK work (draft generation, hooks, Telegram) never blocks or
     # delays other inbound webhooks.
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), DialpadWebhookHandler)
+    server = ThreadingHTTPServer((DIALPAD_BIND_HOSTS[0], PORT), DialpadWebhookHandler)
+    extra_servers = []
+    for extra_host in DIALPAD_BIND_HOSTS[1:]:
+        try:
+            extra = ThreadingHTTPServer((extra_host, PORT), DialpadWebhookHandler)
+        except OSError as exc:
+            print(f"⚠️  Could not bind {extra_host}:{PORT}: {exc!r} (continuing)")
+            continue
+        threading.Thread(target=extra.serve_forever, name=f"bind-{extra_host}", daemon=True).start()
+        extra_servers.append(extra)
 
     log_line("=" * 60)
     print("🚀 Dialpad SMS Webhook Server (OpenClaw Hooks)")
     print("=" * 60)
     print(f"Port: {PORT}")
+    print(f"Bind: {', '.join([DIALPAD_BIND_HOSTS[0]] + [s.server_address[0] for s in extra_servers])}")
+    print(f"  - /store token: {'✓' if DIALPAD_STORE_TOKEN else '✗ (/store disabled)'}")
     print(f"Endpoints:")
     print(f"  - POST /webhook/dialpad (main webhook)")
     print(f"  - POST /webhook/telegram (Telegram approval callbacks)")

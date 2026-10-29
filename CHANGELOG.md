@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-29
+
+- fix(webhook): require localhost, no proxy forwarding headers, and `DIALPAD_STORE_TOKEN` (`X-Store-Token` or `Authorization: Bearer`, constant-time compare) on legacy `POST /store`. An unset token rejects every `/store` request.
+- fix(webhook): bind `DIALPAD_BIND_HOSTS`, defaulting to `127.0.0.1`, with best-effort extra addresses.
+- fix(webhook): storage exceptions on `/store` and `/webhook/dialpad`, and a failed `/store` write, return `{"error":"internal error"}` and log the underlying error on the server.
+- fix(webhook): omit `X-Forwarded-For` on OpenClaw hook forwards unless `OPENCLAW_HOOKS_CLIENT_IP` is set.
+- fix(webhook): clamp Dialpad call-history `started_before` to now minus 15 seconds, and log the status and body of history lookup HTTP errors.
+
 ## 2026-09-22
 
 - fix(send_sms): run the generated Dialpad CLI through a deterministic managed environment — the wrapper's own interpreter with `vendor/`, constructed from the pinned, hash-verified `requirements.txt` by `scripts/build_vendor.py` (the tree itself is untracked; see `docs/reference/vendor-build.md`) — instead of discovering an ambient `uv` on `PATH`, which the deployed gateway runtime does not carry. This closes the #89/#155 recurrence where the CLI failed with `ModuleNotFoundError: No module named 'click'` and every approved send needed the direct-API fallback.

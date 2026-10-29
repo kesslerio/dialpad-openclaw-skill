@@ -115,6 +115,16 @@ bin/update_contact.py --id "contact_123" --job-title "Director"
 # with a valid HMAC signature header or Bearer JWT.
 export DIALPAD_WEBHOOK_SECRET="your-dialpad-webhook-secret"
 
+# Listen addresses. Default is loopback because the server sits behind a local
+# cloudflared tunnel. Extra comma-separated addresses are best-effort, for
+# example the Docker bridge gateway when a container must reach this host.
+export DIALPAD_BIND_HOSTS="127.0.0.1"
+
+# Legacy POST /store (OpenClaw plugin). Leave unset to reject every /store
+# request. Callers send this value from localhost as X-Store-Token or
+# Authorization: Bearer. Placeholder only — generate a fresh random value.
+export DIALPAD_STORE_TOKEN="replace-with-random-store-token"
+
 # OpenClaw hook destination
 export OPENCLAW_GATEWAY_URL="http://127.0.0.1:18789"
 export OPENCLAW_HOOKS_TOKEN="your-openclaw-hooks-token"
@@ -130,13 +140,19 @@ export OPENCLAW_HOOKS_AGENT_ID="romeo-work"
 export OPENCLAW_HOOKS_CHANNEL="telegram"
 export OPENCLAW_HOOKS_TO="telegram:group:-1001234567890:topic:2"
 
+# Optional. Sent as X-Forwarded-For on OpenClaw hook requests only when set.
+# Leave unset when this server reaches the gateway directly. Placeholder only.
+export OPENCLAW_HOOKS_CLIENT_IP="203.0.113.10"
+
 # Optional per-event hook controls (disabled by default)
 export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
 export OPENCLAW_HOOKS_INCLUDE_SESSION_KEY="0" # 0 (default): server-derived; 1: legacy request-supplied
 
-# Optional merged-flow agent draft callback URL. The default is reachable from
-# the AlphaClaw/OpenClaw gateway container when the webhook binds 0.0.0.0:8888.
+# Optional merged-flow agent draft callback URL. The default targets the
+# AlphaClaw/OpenClaw gateway container via host.docker.internal. The webhook
+# listens on DIALPAD_BIND_HOSTS (default 127.0.0.1). Add the Docker bridge
+# gateway as an extra bind address when that container must reach this URL.
 export DIALPAD_DRAFT_CALLBACK_URL="http://host.docker.internal:8888/internal/draft-callback"
 
 # Optional sales-line first-contact auto-replies (disabled by default)
@@ -204,7 +220,8 @@ creates provider configuration only; it does not send an SMS.
 Notes:
 
 - `/webhook/dialpad` handles SMS storage plus optional OpenClaw/Telegram fan-out
-- `/store` remains the legacy full-message plugin path; it rejects sparse delivery-status mutation because it is not the authenticated Dialpad webhook
+- `/store` remains the legacy full-message plugin path. It accepts a request only from localhost, with no Cloudflare or proxy forwarding headers (`Cf-Connecting-Ip`, `Cf-Ray`, `X-Forwarded-For`, `Cdn-Loop`), and with `X-Store-Token` or `Authorization: Bearer` matching `DIALPAD_STORE_TOKEN` (constant-time compare). An unset token rejects every `/store` request with 403. Sparse delivery-status mutation stays on the authenticated `/webhook/dialpad` path
+- Storage exceptions on `/store` and `/webhook/dialpad`, and a failed `/store` write, return `{"error":"internal error"}`. The server logs the exception or store error
 - `/webhook/telegram` handles Telegram inline approval button callbacks; it requires `X-Telegram-Bot-Api-Secret-Token` and the configured Telegram chat id
 - `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, compact `inboundContext` briefs, plus optional OpenClaw hook forwarding
 - `/webhook/dialpad-voicemail` sends Telegram alerts and can create first-contact sales-line SMS approval drafts, but does not send SMS directly

@@ -305,16 +305,23 @@ class SmsDeliveryEventTests(unittest.TestCase):
         }
         raw = json.dumps(payload).encode("utf-8")
         handler = object.__new__(webhook_server.DialpadWebhookHandler)
-        handler.headers = {"Content-Length": str(len(raw))}
+        handler.headers = {
+            "Content-Length": str(len(raw)),
+            "X-Store-Token": "unit-test-store-token",
+        }
         handler.rfile = io.BytesIO(raw)
         handler.wfile = io.BytesIO()
+        handler.client_address = ("127.0.0.1", 12345)
         status = {"code": None}
         handler.send_response = lambda code: status.__setitem__("code", code)
         handler.send_header = lambda *_args: None
         handler.end_headers = lambda: None
         handler.send_error = lambda code, *_args: status.__setitem__("code", code)
 
-        handler.handle_store()
+        # Store-token auth is satisfied. /store still must not apply receipt
+        # mutation; that stays on the Dialpad-authenticated webhook.
+        with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", "unit-test-store-token"):
+            handler.handle_store()
 
         self.assertEqual(status["code"], 403)
         response = json.loads(handler.wfile.getvalue().decode("utf-8"))

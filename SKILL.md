@@ -172,8 +172,16 @@ export DIALPAD_DEFAULT_PROFILE="work"
 export DIALPAD_DEFAULT_FROM_NUMBER="+14155550140"
 export DIALPAD_SMS_RECEIPT_LEDGER="/data/.openclaw/state/dialpad/sms-receipts.jsonl"
 export DIALPAD_DRAFT_CALLBACK_URL="http://host.docker.internal:8888/internal/draft-callback"
+export DIALPAD_BIND_HOSTS="127.0.0.1"
+export DIALPAD_STORE_TOKEN="replace-with-random-store-token"
+export OPENCLAW_HOOKS_CLIENT_IP="203.0.113.10"
 ```
 
 For merged agent-draft flow, keep `DIALPAD_DRAFT_CALLBACK_URL` aligned with the
 OpenClaw `dialpad-draft-callback` plugin `callbackUrl` config. The default
 `host.docker.internal` URL is for gateway-container to host-webhook delivery.
+`DIALPAD_BIND_HOSTS` defaults to loopback; add the Docker bridge gateway as an
+extra address when that container must reach the callback. `DIALPAD_STORE_TOKEN`
+gates legacy `POST /store` (localhost only). Leave it unset to disable `/store`.
+`OPENCLAW_HOOKS_CLIENT_IP` is sent as `X-Forwarded-For` only when set. Leave it
+unset for a direct gateway connection. The value above is a placeholder.

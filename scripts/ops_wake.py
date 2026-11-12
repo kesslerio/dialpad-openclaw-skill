@@ -7,8 +7,8 @@ timer.
 
 Design invariants:
   * Opt-in. Nothing is sent unless OPS_WAKE_URL and OPS_WAKE_KEY are both set.
-  * Never breaks the receiver. Every public entry point swallows its own
-    errors, and the HTTP POST runs on a daemon thread after the caller returns.
+  * Never breaks or delays the receiver. Every public entry point swallows its own
+    errors, and the dedupe claim, rate check, and POST run on a daemon thread.
   * Minimal payload. Event kind, our line, Dialpad ids, and the event time. No
     message bodies, caller numbers, transcripts, or recording links: the
     receiving assistant re-reads the event from Dialpad itself.
@@ -353,50 +353,56 @@ def post_wake(payload, *, url=None, key=None, timeout=None):
     return False
 
 
-def _dispatch(wake, *, background=True):
-    if not wake:
+def _dispatch(wake):
+    """Claim, rate-check, and POST one wake synchronously. Never raises."""
+    try:
+        if not wake:
+            return False
+        payload = wake["payload"]
+        if not _line_watched(payload.get("line")):
+            return False
+        if not claim_event(wake["dedupe_key"]):
+            return False
+        allowed, suppressed = _take_rate_slot()
+        if not allowed:
+            _log(f"{payload.get('event')} rate-capped; will report on next wake")
+            return False
+        payload = dict(payload)
+        payload["sent_at"] = _now_iso()
+        payload["suppressed_since_last"] = suppressed
+        post_wake(payload, url=wake_url(), key=wake_key())
+        return True
+    except Exception as exc:  # noqa: BLE001 - never break the receiver.
+        _log(f"wake skipped ({type(exc).__name__})")
         return False
-    payload = wake["payload"]
-    if not _line_watched(payload.get("line")):
+
+
+def _run(builder, data, background):
+    """Build the wake on the caller thread (pure dict work), then do every
+    I/O step (dedupe claim, rate slot, POST) on a daemon thread so nothing
+    here can delay the caller's HTTP response."""
+    try:
+        if not is_enabled():
+            return False
+        wake = builder(data)
+        if not wake:
+            return False
+        if not background:
+            return _dispatch(wake)
+        threading.Thread(target=_dispatch, args=(wake,), daemon=True, name="ops-wake").start()
+        return True
+    except Exception as exc:  # noqa: BLE001 - never break the receiver.
+        _log(f"wake skipped ({type(exc).__name__})")
         return False
-    if not claim_event(wake["dedupe_key"]):
-        return False
-    allowed, suppressed = _take_rate_slot()
-    if not allowed:
-        _log(f"{payload.get('event')} rate-capped; will report on next wake")
-        return False
-    payload = dict(payload)
-    payload["sent_at"] = _now_iso()
-    payload["suppressed_since_last"] = suppressed
-    url, key = wake_url(), wake_key()
-    if background:
-        thread = threading.Thread(
-            target=post_wake, args=(payload,), kwargs={"url": url, "key": key}, daemon=True,
-            name="ops-wake",
-        )
-        thread.start()
-    else:
-        post_wake(payload, url=url, key=key)
-    return True
 
 
 def notify_call_event(data, *, background=True):
-    """Queue a wake for a Dialpad call event. Returns True if one was queued."""
-    try:
-        if not is_enabled():
-            return False
-        return _dispatch(build_call_wake(data), background=background)
-    except Exception as exc:  # noqa: BLE001 - never break the receiver.
-        _log(f"call wake skipped ({type(exc).__name__})")
-        return False
+    """Wake for a Dialpad call event. In background mode returns True when a
+    candidate wake was handed to the worker thread (dedupe and rate cap still
+    apply there); in foreground mode returns True only if a wake was posted."""
+    return _run(build_call_wake, data, background)
 
 
 def notify_sms_event(data, *, background=True):
-    """Queue a wake for an inbound Dialpad SMS. Returns True if one was queued."""
-    try:
-        if not is_enabled():
-            return False
-        return _dispatch(build_sms_wake(data), background=background)
-    except Exception as exc:  # noqa: BLE001 - never break the receiver.
-        _log(f"sms wake skipped ({type(exc).__name__})")
-        return False
+    """Wake for an inbound Dialpad SMS. Same return contract as notify_call_event."""
+    return _run(build_sms_wake, data, background)

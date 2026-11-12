@@ -226,3 +226,22 @@ def test_call_webhook_invokes_wake(monkeypatch, tmp_path):
     webhook_server.DialpadWebhookHandler.handle_call_webhook(handler)
     assert status["code"] == 200
     assert calls and calls[0]["call_id"] == "c1"
+
+
+def test_background_mode_does_no_io_on_caller_thread(wake_env, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    caller = threading.current_thread()
+    seen = []
+
+    def _slow_claim(key, **_kw):
+        seen.append(threading.current_thread() is caller)
+        started.set()
+        release.wait(5)
+        return True
+
+    monkeypatch.setattr(ops_wake, "claim_event", _slow_claim)
+    assert ops_wake.notify_call_event(_call()) is True  # returns while claim blocks
+    assert started.wait(5)
+    release.set()
+    assert seen == [False]

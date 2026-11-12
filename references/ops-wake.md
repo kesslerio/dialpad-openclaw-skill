@@ -53,8 +53,9 @@ OPS_WAKE_DEDUPE_DB=/home/art/niemand/logs/ops_wake.db   # optional
 
 ## Guarantees
 
-- Posts on a daemon thread after the Dialpad ACK path; a slow, failing, or
-  unreachable wake URL never delays or fails the webhook response.
+- The dedupe claim, rate check, and POST all run on a daemon thread; a slow,
+  locked, or failing store or wake URL never delays or fails the webhook
+  response.
 - One wake per Dialpad id and event kind (SQLite claim, 7-day retention), so
   Dialpad retries and repeated call-state events do not re-wake. If the claim
   store is unavailable the wake is skipped (fails closed).

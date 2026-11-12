@@ -1,3 +1,4 @@
+import importlib
 import io
 import json
 import os
@@ -2335,6 +2336,116 @@ class MissedCallHistoryFetchTests(unittest.TestCase):
         res_unresolved = webhook_server.resolve_missed_call_context(payload_unresolved, history_fetcher=mock_fetch)
         self.assertEqual(fetch_called, [1760000000000])
         self.assertEqual(res_unresolved["caller_resolution_path"], "unresolved")
+
+
+class StoreEndpointAccessTests(unittest.TestCase):
+    """Regression coverage for the localhost + token gate in front of /store."""
+
+    _TOKEN = "test-store-token"
+
+    def _handler(self, payload=None, headers=None, client_ip="127.0.0.1"):
+        handler, status = _build_handler(
+            payload if payload is not None else {"text": "store me"},
+            headers=headers,
+        )
+        handler.client_address = (client_ip, 43210)
+        return handler, status
+
+    def _assert_forbidden(self, handler, status):
+        handler.handle_store()
+        self.assertEqual(status["code"], 403)
+        self.assertEqual(
+            json.loads(handler.wfile.getvalue().decode("utf-8")),
+            {"error": "forbidden"},
+        )
+
+    def test_rejects_non_local_client(self):
+        handler, status = self._handler(
+            headers={"X-Store-Token": self._TOKEN},
+            client_ip="203.0.113.10",
+        )
+        with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", self._TOKEN):
+            self._assert_forbidden(handler, status)
+
+    def test_rejects_proxy_headers_from_local_client(self):
+        for header in ("Cf-Connecting-Ip", "Cf-Ray", "X-Forwarded-For", "Cdn-Loop"):
+            with self.subTest(header=header):
+                handler, status = self._handler(
+                    headers={"X-Store-Token": self._TOKEN, header: "present"}
+                )
+                with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", self._TOKEN):
+                    self._assert_forbidden(handler, status)
+
+    def test_rejects_when_store_token_unset(self):
+        handler, status = self._handler(headers={"X-Store-Token": self._TOKEN})
+        with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", ""):
+            self._assert_forbidden(handler, status)
+
+    def test_rejects_wrong_store_token(self):
+        handler, status = self._handler(headers={"X-Store-Token": "wrong-token"})
+        with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", self._TOKEN):
+            self._assert_forbidden(handler, status)
+
+    def test_allows_x_store_token_header(self):
+        handler, status = self._handler(headers={"X-Store-Token": self._TOKEN})
+        with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", self._TOKEN), \
+                patch.object(
+                    webhook_server,
+                    "handle_sms_webhook",
+                    return_value={"stored": True, "status": "success"},
+                ):
+            self.assertTrue(handler._store_request_allowed())
+            handler.handle_store()
+        self.assertEqual(status["code"], 200)
+
+    def test_allows_authorization_bearer_token(self):
+        handler, _status = self._handler(
+            headers={"Authorization": f"Bearer {self._TOKEN}"}
+        )
+        with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", self._TOKEN):
+            self.assertTrue(handler._store_request_allowed())
+
+    def test_ipv6_loopback_addresses_count_as_local(self):
+        for client_ip in ("::1", "::ffff:127.0.0.1"):
+            with self.subTest(client_ip=client_ip):
+                handler, _status = self._handler(
+                    headers={"X-Store-Token": self._TOKEN}, client_ip=client_ip
+                )
+                with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", self._TOKEN):
+                    self.assertTrue(handler._store_request_allowed())
+
+    def test_store_failure_returns_generic_500(self):
+        handler, status = self._handler(headers={"X-Store-Token": self._TOKEN})
+        with patch.object(webhook_server, "DIALPAD_STORE_TOKEN", self._TOKEN), \
+                patch.object(
+                    webhook_server,
+                    "handle_sms_webhook",
+                    side_effect=RuntimeError("private-db-detail"),
+                ):
+            handler.handle_store()
+        self.assertEqual(status["code"], 500)
+        body = handler.wfile.getvalue().decode("utf-8")
+        self.assertEqual(json.loads(body), {"error": "internal error"})
+        self.assertNotIn("private-db-detail", body)
+
+
+class BindHostsConfigTests(unittest.TestCase):
+    def test_dialpad_bind_hosts_parsing(self):
+        try:
+            with patch.dict(os.environ, {"DIALPAD_BIND_HOSTS": " 127.0.0.1 , 172.17.0.1 ,,"}):
+                importlib.reload(webhook_server)
+                self.assertEqual(
+                    webhook_server.DIALPAD_BIND_HOSTS, ["127.0.0.1", "172.17.0.1"]
+                )
+            with patch.dict(os.environ, {"DIALPAD_BIND_HOSTS": " , "}):
+                importlib.reload(webhook_server)
+                self.assertEqual(webhook_server.DIALPAD_BIND_HOSTS, ["127.0.0.1"])
+            with patch.dict(os.environ):
+                os.environ.pop("DIALPAD_BIND_HOSTS", None)
+                importlib.reload(webhook_server)
+                self.assertEqual(webhook_server.DIALPAD_BIND_HOSTS, ["127.0.0.1"])
+        finally:
+            importlib.reload(webhook_server)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,10 @@ try:
     from interaction_log import InteractionLog
 except Exception:
     InteractionLog = None
+try:
+    import ops_wake
+except Exception:  # noqa: BLE001 - the wake forward is optional.
+    ops_wake = None
 
 
 def record_stored_call(data):
@@ -6120,6 +6124,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             # the inbound still gets its side effects exactly once instead of being
             # silently suppressed by the retry's duplicate short-circuit.
             print("⚠️  ACK write failed (client disconnect); processing inbound anyway")
+        if ops_wake is not None and notification_type in {"sms", "blank_sms"}:
+            # Non-blocking, self-deduping, never raises.
+            ops_wake.notify_sms_event(data)
         try:
             self._process_inbound_post_ack(
                 data, result, from_num, to_num, text, direction, notification_type, timestamp, auth_source
@@ -6494,6 +6501,12 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
                 record_stored_call(data)
             except Exception as e:
                 print(f"⚠️  Failed to store call record in calls.db: {e}")
+
+        if ops_wake is not None:
+            # Covers inbound answered, missed, and voicemail calls. Runs before
+            # the missed-call branch so every state event is seen; the module
+            # dedupes per call and kind, posts on a daemon thread, never raises.
+            ops_wake.notify_call_event(data)
 
         direction = data.get("call_direction", data.get("direction", "unknown"))
         call_missed = data.get("call_missed", False)

@@ -2172,17 +2172,19 @@ class OpenClawHookErrorLoggingTests(unittest.TestCase):
         self.assertEqual(req.get_header("Authorization"), "Bearer tok")
         self.assertEqual(req.get_header("Content-type"), "application/json")
 
-    def test_send_to_openclaw_hooks_resolves_fallback_client_ip(self):
+    def test_send_to_openclaw_hooks_omits_forwarded_for_by_default(self):
+        # OpenClaw rejects unattributable proxy headers (403 proxy_attribution_required),
+        # so a direct connection must not invent an X-Forwarded-For value.
         recorded_request = []
 
         def capture_request(request, timeout=10):
             recorded_request.append(request)
             return io.BytesIO(b'{"ok":true}')
 
-        with patch.object(webhook_server, "OPENCLAW_HOOKS_SMS_ENABLED", True), \
+        with patch.dict(os.environ, {"OPENCLAW_HOOKS_CLIENT_IP": ""}), \
+                patch.object(webhook_server, "OPENCLAW_HOOKS_SMS_ENABLED", True), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_TOKEN", "tok"), \
                 patch.object(webhook_server, "OPENCLAW_HOOKS_CLIENT_IP", ""), \
-                patch.object(webhook_server, "_resolve_openclaw_client_ip", return_value="10.0.0.1"), \
                 patch.object(urllib.request, "urlopen", side_effect=capture_request):
             ok, status = webhook_server.send_to_openclaw_hooks(
                 {"event_type": "sms", "text": "hi", "sender_number": "+14155550000"}
@@ -2192,7 +2194,8 @@ class OpenClawHookErrorLoggingTests(unittest.TestCase):
         self.assertEqual(status, "http_200")
         self.assertEqual(len(recorded_request), 1)
         req = recorded_request[0]
-        self.assertEqual(req.get_header("X-forwarded-for"), "10.0.0.1")
+        self.assertIsNone(req.get_header("X-forwarded-for"))
+        self.assertEqual(req.get_header("Authorization"), "Bearer tok")
 
 
 class ClassifySmsReplyPolicyTests(unittest.TestCase):
@@ -2304,7 +2307,8 @@ class MissedCallHistoryFetchTests(unittest.TestCase):
         started_before = int(qs["started_before"][0])
         # Crucial check: started_before must NOT exceed now_ms (prevents Dialpad API 400 error)
         self.assertLessEqual(started_before, now_ms)
-        self.assertEqual(started_before, now_ms)
+        # Dialpad has no clock-skew tolerance, so stay a fixed margin behind local now.
+        self.assertEqual(started_before, now_ms - webhook_server.DIALPAD_HISTORY_SKEW_MARGIN_MS)
 
     def test_handle_call_webhook_skips_history_fetch_when_already_resolved(self):
         fetch_called = []

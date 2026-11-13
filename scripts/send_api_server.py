@@ -14,7 +14,6 @@ Access sit in front on the deploy host.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import ipaddress
 import json
 import os
@@ -29,6 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+import outbound_destination_policy
 import send_gate
 import sms_approval
 
@@ -56,7 +56,7 @@ SERVICE_META = {"schema_version": "1", "service": "dialpad-send-api"}
 
 ALLOWED_FIELDS = {"to", "from", "message", "dry_run"}
 REQUIRED_FIELDS = {"to", "from", "message"}
-E164_RE = re.compile(r"^\+\d{7,15}$")
+OUTCOME_UNKNOWN_MESSAGE = "send outcome unknown; check the thread before resending"
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUPPORT_LINE_NORMALIZED = sms_approval.normalize_phone_number(SUPPORT_LINE)
 
@@ -99,6 +99,8 @@ def validate_token_map(raw: Any, *, gate_config: Mapping[str, Any]) -> dict[str,
             raise SendApiConfigError("token map entry caller must be a non-empty string")
         if not isinstance(label, str) or not label.strip():
             raise SendApiConfigError("token map entry label must be a non-empty string")
+        caller = caller.strip()
+        label = label.strip()
         if caller == OPERATOR_CALLER:
             raise SendApiConfigError("the operator caller cannot be mapped to an API token")
         if not isinstance(callers, dict) or caller not in callers:
@@ -106,7 +108,7 @@ def validate_token_map(raw: Any, *, gate_config: Mapping[str, Any]) -> dict[str,
         if label in labels:
             raise SendApiConfigError(f"token map labels must be unique ({label!r})")
         labels.add(label)
-        normalized[digest] = {"caller": caller.strip(), "label": label.strip()}
+        normalized[digest] = {"caller": caller, "label": label}
     return normalized
 
 
@@ -174,11 +176,11 @@ def validate_send_body(payload: Mapping[str, Any]) -> tuple[str, str, str, bool]
     if missing:
         raise SendApiError(f"missing required field(s): {', '.join(missing)}", status=400, code="invalid_argument")
     to = payload["to"]
-    if not isinstance(to, str) or not E164_RE.fullmatch(to.strip()):
-        raise SendApiError("to must be a single E.164 number", status=400, code="invalid_argument")
+    if not isinstance(to, str) or not outbound_destination_policy.is_supported_outbound_destination(to.strip()):
+        raise SendApiError("to must be a single +1 E.164 number", status=400, code="invalid_argument")
     from_number = payload["from"]
-    if not isinstance(from_number, str) or not E164_RE.fullmatch(from_number.strip()):
-        raise SendApiError("from must be an E.164 number", status=400, code="invalid_argument")
+    if not isinstance(from_number, str) or not outbound_destination_policy.is_supported_outbound_destination(from_number.strip()):
+        raise SendApiError("from must be a +1 E.164 number", status=400, code="invalid_argument")
     message = payload["message"]
     if not isinstance(message, str) or not message.strip():
         raise SendApiError("message must be a non-empty string", status=400, code="invalid_argument")
@@ -200,9 +202,9 @@ def validate_bind_address(bind: str) -> str:
     try:
         address = ipaddress.ip_address(value)
     except ValueError as exc:
-        raise ValueError("DIALPAD_SEND_API_BIND must be a literal IP address") from exc
-    if not address.is_loopback:
-        raise ValueError("DIALPAD_SEND_API_BIND must be a loopback address (127.0.0.0/8 or ::1)")
+        raise ValueError("DIALPAD_SEND_API_BIND must be a literal IPv4 address") from exc
+    if not isinstance(address, ipaddress.IPv4Address) or not address.is_loopback:
+        raise ValueError("DIALPAD_SEND_API_BIND must be an IPv4 loopback address (127.0.0.0/8)")
     return value
 
 
@@ -360,14 +362,14 @@ class SendApiRequestHandler(BaseHTTPRequestHandler):
         ]
         if dry_run:
             argv.append("--dry-run")
-        env = {key: value for key, value in os.environ.items() if key != send_gate.CALLER_ENV}
+        env = {key: value for key, value in self.server.environ.items() if key != send_gate.CALLER_ENV}
         try:
             proc = self.server.send_runner(argv, message=message, env=env, timeout=SEND_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             self._finish(
                 504,
                 command,
-                _error_payload(command, "timeout", "send timed out", retryable=True),
+                _error_payload(command, "send_outcome_unknown", OUTCOME_UNKNOWN_MESSAGE),
                 caller=caller,
                 route=route,
                 dry_run=dry_run,
@@ -385,11 +387,11 @@ class SendApiRequestHandler(BaseHTTPRequestHandler):
                 to_tail=to_tail,
             )
             return
-        status, response = _map_child_result(proc, command)
+        status, response = _map_child_result(proc, command, dry_run=dry_run)
         self._finish(status, command, response, caller=caller, route=route, dry_run=dry_run, to_tail=to_tail)
 
 
-def _map_child_result(proc: subprocess.CompletedProcess, command: str) -> tuple[int, dict[str, Any]]:
+def _map_child_result(proc: subprocess.CompletedProcess, command: str, *, dry_run: bool) -> tuple[int, dict[str, Any]]:
     """Translate the gated CLI's JSON envelope into the service response.
 
     The child's stdout envelope is structured data; its stderr and exception
@@ -403,7 +405,9 @@ def _map_child_result(proc: subprocess.CompletedProcess, command: str) -> tuple[
     except (TypeError, ValueError):
         envelope = None
     if not isinstance(envelope, dict) or "ok" not in envelope:
-        return 502, _error_payload(command, "upstream_error", "upstream send failed")
+        if dry_run:
+            return 502, _error_payload(command, "upstream_error", "upstream send failed")
+        return 502, _error_payload(command, "send_outcome_unknown", OUTCOME_UNKNOWN_MESSAGE)
     if envelope.get("ok"):
         data = envelope.get("data")
         return 200, _success_payload(command, data if isinstance(data, dict) else {"result": data})
@@ -423,7 +427,8 @@ def _map_child_result(proc: subprocess.CompletedProcess, command: str) -> tuple[
         if gate.get("retry_after_seconds") is not None:
             error["retry_after_seconds"] = gate["retry_after_seconds"]
         return 422, {"ok": False, "command": command, "error": error, "meta": dict(SERVICE_META)}
-    return 502, _error_payload(command, code, "upstream send failed", retryable=retryable)
+    status = 400 if code == "invalid_argument" else 502
+    return status, _error_payload(command, code, "upstream send failed", retryable=retryable)
 
 
 # --------------------------------------------------------------------------
@@ -440,16 +445,37 @@ class SendApiServer(ThreadingHTTPServer):
         address: tuple[str, int],
         *,
         tokens_path: Path | str,
-        gate_config: Mapping[str, Any],
+        gate_config: Mapping[str, Any] | None = None,
         send_runner: Any = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
-        self.tokens_path = Path(tokens_path)
-        self.gate_config = gate_config
+        self.tokens_path = Path(tokens_path).expanduser()
+        self.environ = os.environ if environ is None else environ
         self.send_runner = send_runner or default_send_runner
+        self._gate_config_from_env = gate_config is None
+        if self._gate_config_from_env:
+            try:
+                gate_config = send_gate.load_config_from_env(self.environ)
+            except Exception as exc:  # noqa: BLE001 - any config failure fails closed.
+                raise SendApiConfigError(f"send gate config unavailable: {exc}") from exc
+        self.gate_config = gate_config
         self._tokens_lock = threading.Lock()
         self._token_map = load_token_map(self.tokens_path, gate_config=self.gate_config)
         self._token_mtime = os.stat(self.tokens_path).st_mtime_ns
+        self._gate_mtime = self._current_gate_mtime()
         super().__init__(address, SendApiRequestHandler)
+
+    def _current_gate_mtime(self) -> int | None:
+        """Mtime of the env-configured gate file; None when config was injected."""
+        if not self._gate_config_from_env:
+            return None
+        raw = (self.environ.get(send_gate.CONFIG_ENV) or "").strip()
+        if not raw:
+            return None
+        try:
+            return os.stat(Path(raw).expanduser()).st_mtime_ns
+        except OSError:
+            return None
 
     def tokens(self) -> dict[str, dict[str, str]]:
         """Current token map; re-reads on mtime change and fails closed."""
@@ -457,26 +483,31 @@ class SendApiServer(ThreadingHTTPServer):
             mtime = os.stat(self.tokens_path).st_mtime_ns
         except OSError:
             mtime = None
-        if mtime is not None and self._token_map is not None and mtime == self._token_mtime:
+        gate_mtime = self._current_gate_mtime()
+        if (
+            mtime is not None
+            and self._token_map is not None
+            and mtime == self._token_mtime
+            and gate_mtime == self._gate_mtime
+        ):
             return self._token_map
         with self._tokens_lock:
             if mtime is None:
                 self._token_map = {}
             else:
                 try:
+                    if self._gate_config_from_env:
+                        self.gate_config = send_gate.load_config_from_env(self.environ)
                     self._token_map = load_token_map(self.tokens_path, gate_config=self.gate_config)
                 except Exception:  # noqa: BLE001 - a failed reload refuses all requests.
                     self._token_map = {}
             self._token_mtime = mtime
+            self._gate_mtime = gate_mtime
             return self._token_map
 
     def entry_for_token(self, token: str) -> dict[str, str] | None:
-        presented = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        matched: dict[str, str] | None = None
-        for digest, entry in self.tokens().items():
-            if hmac.compare_digest(presented, digest):
-                matched = entry
-        return matched
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return self.tokens().get(digest)
 
 
 def create_server(
@@ -496,16 +527,12 @@ def create_server(
     resolved_tokens = tokens_path or (environ.get(TOKENS_ENV) or "").strip()
     if not resolved_tokens:
         raise SendApiConfigError(f"{TOKENS_ENV} is not set")
-    if gate_config is None:
-        try:
-            gate_config = send_gate.load_config_from_env(environ)
-        except Exception as exc:  # noqa: BLE001 - any config failure fails closed.
-            raise SendApiConfigError(f"send gate config unavailable: {exc}") from exc
     return SendApiServer(
         (resolved_bind, resolved_port),
         tokens_path=resolved_tokens,
         gate_config=gate_config,
         send_runner=send_runner,
+        environ=environ,
     )
 
 

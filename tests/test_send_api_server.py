@@ -219,6 +219,16 @@ def test_to_must_be_single_e164_not_list(server) -> None:
     assert server.send_runner.calls == []
 
 
+@pytest.mark.parametrize("field", ["to", "from"])
+def test_to_and_from_must_be_nanp_plus_one(server, field) -> None:
+    """E.164 but non-NANP numbers are a client error, not an upstream one."""
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        _request(server, "/v1/sms/send", body={**SEND_BODY, field: "+442071234567"})
+    assert raised.value.code == 400
+    assert _error_body(raised.value)["error"]["code"] == "invalid_argument"
+    assert server.send_runner.calls == []
+
+
 def test_message_must_be_nonempty_and_bounded(server) -> None:
     with pytest.raises(urllib.error.HTTPError) as raised:
         _request(server, "/v1/sms/send", body={**SEND_BODY, "message": "   "})
@@ -280,7 +290,7 @@ def test_message_goes_to_stdin_and_env_drops_caller(server, monkeypatch) -> None
     assert "DIALPAD_SEND_CALLER" not in call["env"]
 
 
-def test_runner_timeout_maps_to_504(make_server) -> None:
+def test_runner_timeout_maps_to_504_unknown_outcome(make_server) -> None:
     def slow_runner(argv, *, message, env, timeout):
         raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
 
@@ -289,8 +299,9 @@ def test_runner_timeout_maps_to_504(make_server) -> None:
         _request(server, "/v1/sms/send", body=dict(SEND_BODY))
     assert raised.value.code == 504
     body = _error_body(raised.value)
-    assert body["error"]["code"] == "timeout"
-    assert body["error"]["retryable"] is True
+    assert body["error"]["code"] == "send_outcome_unknown"
+    assert body["error"]["retryable"] is False
+    assert body["error"]["message"] == "send outcome unknown; check the thread before resending"
 
 
 def test_gate_refusal_maps_to_422_with_gate_details(make_server) -> None:
@@ -321,7 +332,7 @@ def test_gate_refusal_maps_to_422_with_gate_details(make_server) -> None:
     ]
 
 
-def test_unparseable_child_output_is_502_without_leakage(make_server) -> None:
+def test_unparseable_child_output_real_send_is_unknown_outcome(make_server) -> None:
     runner = RecordingRunner(stdout=b"Traceback: child-secret-traceback")
     server = make_server(runner=runner)
     with pytest.raises(urllib.error.HTTPError) as raised:
@@ -329,8 +340,38 @@ def test_unparseable_child_output_is_502_without_leakage(make_server) -> None:
     assert raised.value.code == 502
     raw = raised.value.read()
     body = json.loads(raw)
+    assert body["error"]["code"] == "send_outcome_unknown"
+    assert body["error"]["retryable"] is False
+    assert b"child-secret-traceback" not in raw
+
+
+def test_unparseable_child_output_dry_run_is_upstream_error(make_server) -> None:
+    runner = RecordingRunner(stdout=b"Traceback: child-secret-traceback")
+    server = make_server(runner=runner)
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        _request(server, "/v1/sms/send", body={**SEND_BODY, "dry_run": True})
+    assert raised.value.code == 502
+    raw = raised.value.read()
+    body = json.loads(raw)
     assert body["error"]["code"] == "upstream_error"
     assert b"child-secret-traceback" not in raw
+
+
+def test_child_invalid_argument_maps_to_400(make_server) -> None:
+    envelope = {
+        "ok": False,
+        "command": "send_sms.send",
+        "error": {"code": "invalid_argument", "message": "child detail not forwarded", "retryable": False},
+        "meta": {},
+    }
+    server = make_server(runner=RecordingRunner(envelope=envelope))
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        _request(server, "/v1/sms/send", body=dict(SEND_BODY))
+    assert raised.value.code == 400
+    body = _error_body(raised.value)
+    assert body["error"]["code"] == "invalid_argument"
+    assert body["error"]["retryable"] is False
+    assert "child detail" not in body["error"]["message"]
 
 
 def test_other_child_errors_pass_code_and_retryable(make_server) -> None:
@@ -355,7 +396,7 @@ def test_other_child_errors_pass_code_and_retryable(make_server) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bind", ["0.0.0.0", "10.0.0.5", "localhost", "::"])
+@pytest.mark.parametrize("bind", ["0.0.0.0", "10.0.0.5", "localhost", "::", "::1"])
 def test_create_server_refuses_non_loopback_bind(token_map_path, bind) -> None:
     with pytest.raises(ValueError):
         create_server(bind=bind, port=0, tokens_path=token_map_path, gate_config=GATE_CONFIG, send_runner=RecordingRunner())
@@ -390,12 +431,13 @@ def test_startup_refuses_missing_or_malformed_map(tmp_path) -> None:
     [
         {},
         {_digest("x"): {"caller": "team-scott", "label": "dup"}, _digest("y"): {"caller": "team-lilla", "label": "dup"}},
+        {_digest("x"): {"caller": "team-scott", "label": "dup"}, _digest("y"): {"caller": "team-lilla", "label": "  dup"}},
         {"nothex": {"caller": "team-scott", "label": "bad"}},
         {_digest("x").upper(): {"caller": "team-scott", "label": "upper"}},
         {_digest("x"): {"caller": "team-nobody", "label": "unknown"}},
         {_digest("x"): {"caller": "operator", "label": "op"}},
     ],
-    ids=["empty", "duplicate-label", "bad-digest", "uppercase-digest", "unknown-caller", "operator-caller"],
+    ids=["empty", "duplicate-label", "stripped-duplicate-label", "bad-digest", "uppercase-digest", "unknown-caller", "operator-caller"],
 )
 def test_startup_refuses_invalid_token_maps(tmp_path, entries) -> None:
     path = tmp_path / "tokens.json"
@@ -408,6 +450,21 @@ def test_startup_requires_gate_config(token_map_path, monkeypatch) -> None:
     monkeypatch.delenv("DIALPAD_SEND_GATE_CONFIG", raising=False)
     with pytest.raises(SendApiConfigError):
         create_server(bind="127.0.0.1", port=0, tokens_path=token_map_path, send_runner=RecordingRunner())
+
+
+def test_tilde_tokens_path_expands_at_startup(tmp_path, monkeypatch, make_server) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_map(tmp_path / "send-api-tokens.json", _map_entries())
+    server = make_server(tokens_path="~/send-api-tokens.json")
+    response = json.load(_request(server, "/health", method="GET"))
+    assert response["ok"] is True
+
+
+def test_child_env_built_from_injected_environ(make_server) -> None:
+    server = make_server(env={"DIALPAD_SEND_CALLER": "team-lilla", "SEND_API_MARKER": "yes"})
+    json.load(_request(server, "/v1/sms/send", body=dict(SEND_BODY)))
+    call = server.send_runner.calls[0]
+    assert call["env"] == {"SEND_API_MARKER": "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +502,85 @@ def test_corrupt_map_after_reload_refuses_everything(server, token_map_path) -> 
             _request(server, "/v1/sms/send", token=token, body=dict(SEND_BODY))
         assert raised.value.code == 401
     assert server.send_runner.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Env-sourced gate config: reload picks up new callers, fails closed
+# ---------------------------------------------------------------------------
+
+
+def _gate_config_for(*caller_names: str) -> dict:
+    return {
+        "shared_lines": {"office": "+14159065785"},
+        "teammates": {"scott": "+14152230323", "lilla": "+14158701945"},
+        "callers": {name: {"shared_lines": ["office"]} for name in caller_names},
+    }
+
+
+def _bump_mtime(path: Path) -> None:
+    stat_result = path.stat()
+    os.utime(path, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 10_000_000))
+
+
+def _env_server(tmp_path: Path, *caller_names: str):
+    gate_path = tmp_path / "send-gate.json"
+    gate_path.write_text(json.dumps(_gate_config_for(*caller_names)))
+    tokens_path = tmp_path / "send-api-tokens.json"
+    _write_map(tokens_path, {_digest(SCOTT_TOKEN): {"caller": "team-scott", "label": "scott-pipeline"}})
+    server = create_server(
+        bind="127.0.0.1",
+        port=0,
+        tokens_path=tokens_path,
+        send_runner=RecordingRunner(),
+        env={"DIALPAD_SEND_GATE_CONFIG": str(gate_path)},
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, gate_path, tokens_path
+
+
+def test_env_gate_config_reload_validates_against_current_file(tmp_path) -> None:
+    """A caller added to the gate config + token map works without restart."""
+    server, thread, gate_path, tokens_path = _env_server(tmp_path, "team-scott")
+    try:
+        assert json.load(_request(server, "/health", method="GET"))["ok"] is True
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            _request(server, "/health", method="GET", token=LILLA_TOKEN)
+        assert raised.value.code == 401
+
+        gate_path.write_text(json.dumps(_gate_config_for("team-scott", "team-lilla")))
+        _bump_mtime(gate_path)
+        _write_map(
+            tokens_path,
+            {
+                _digest(SCOTT_TOKEN): {"caller": "team-scott", "label": "scott-pipeline"},
+                _digest(LILLA_TOKEN): {"caller": "team-lilla", "label": "lilla-pipeline"},
+            },
+            bump_mtime=True,
+        )
+        response = json.load(_request(server, "/health", method="GET", token=LILLA_TOKEN))
+        assert response["data"]["caller"] == "team-lilla"
+        assert json.load(_request(server, "/health", method="GET"))["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_env_gate_config_corruption_fails_closed(tmp_path) -> None:
+    """A broken env-sourced gate config refuses every token on next reload."""
+    server, thread, gate_path, _tokens_path = _env_server(tmp_path, "team-scott")
+    try:
+        assert json.load(_request(server, "/health", method="GET"))["ok"] is True
+        gate_path.write_text("{corrupt")
+        _bump_mtime(gate_path)
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            _request(server, "/health", method="GET")
+        assert raised.value.code == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 # ---------------------------------------------------------------------------

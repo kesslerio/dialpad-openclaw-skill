@@ -62,37 +62,46 @@ def cmd_add(args: argparse.Namespace) -> int:
     token = sys.stdin.read().strip()
     if len(token) < MIN_TOKEN_CHARS:
         raise CliError(f"token must be at least {MIN_TOKEN_CHARS} characters")
+    caller = args.caller.strip()
+    label = args.label.strip()
+    if not label:
+        raise CliError("label must be a non-empty string")
     callers = _gate_callers()
-    if args.caller == send_api_server.OPERATOR_CALLER:
+    if caller == send_api_server.OPERATOR_CALLER:
         raise CliError("the operator caller cannot be mapped to an API token")
-    if args.caller not in callers:
-        raise CliError(f"caller {args.caller!r} is not defined in the send gate config")
+    if caller not in callers:
+        raise CliError(f"caller {caller!r} is not defined in the send gate config")
     path = _tokens_path()
     entries = _read_tokens(path)
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     for existing in entries.values():
-        if isinstance(existing, dict) and existing.get("label") == args.label:
-            raise CliError(f"label {args.label!r} is already in use")
+        if isinstance(existing, dict) and str(existing.get("label") or "").strip() == label:
+            raise CliError(f"label {label!r} is already in use")
     if digest in entries:
         raise CliError("token is already present in the map")
-    entries[digest] = {"caller": args.caller, "label": args.label}
+    entries[digest] = {"caller": caller, "label": label}
     send_api_server.write_token_map(path, entries)
-    print(f"stored token for caller {args.caller!r} as label {args.label!r}")
+    print(f"stored token for caller {caller!r} as label {label!r}")
     return 0
 
 
 def cmd_revoke(args: argparse.Namespace) -> int:
     path = _tokens_path()
     entries = _read_tokens(path)
+    label = args.label.strip()
     match = next(
-        (digest for digest, entry in entries.items() if isinstance(entry, dict) and entry.get("label") == args.label),
+        (
+            digest
+            for digest, entry in entries.items()
+            if isinstance(entry, dict) and str(entry.get("label") or "").strip() == label
+        ),
         None,
     )
     if match is None:
-        raise CliError(f"no token with label {args.label!r}")
+        raise CliError(f"no token with label {label!r}")
     del entries[match]
     send_api_server.write_token_map(path, entries)
-    print(f"revoked token label {args.label!r}")
+    print(f"revoked token label {label!r}")
     return 0
 
 

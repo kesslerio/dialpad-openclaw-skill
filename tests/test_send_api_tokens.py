@@ -126,3 +126,31 @@ def test_add_requires_tokens_env(cli_env, monkeypatch) -> None:
     monkeypatch.delenv("DIALPAD_SEND_API_TOKENS")
     rc = _run(["add", "--caller", "team-scott", "--label", "x"], TOKEN, monkeypatch)
     assert rc == 2
+
+
+def test_add_strips_label_and_caller(cli_env, monkeypatch, capsys) -> None:
+    rc = _run(["add", "--caller", "team-scott", "--label", "  scott-pipeline  "], TOKEN + "\n", monkeypatch)
+    assert rc == 0
+    data = json.loads(cli_env.read_text())
+    assert data["tokens"][_digest(TOKEN)] == {"caller": "team-scott", "label": "scott-pipeline"}
+    out = capsys.readouterr().out
+    assert "'scott-pipeline'" in out
+
+
+def test_add_rejects_blank_label(cli_env, monkeypatch) -> None:
+    rc = _run(["add", "--caller", "team-scott", "--label", "   "], TOKEN, monkeypatch)
+    assert rc == 2
+    assert not cli_env.exists()
+
+
+def test_add_refuses_label_duplicates_after_strip(cli_env, monkeypatch) -> None:
+    assert _run(["add", "--caller", "team-scott", "--label", "scott-pipeline"], TOKEN, monkeypatch) == 0
+    rc = _run(["add", "--caller", "team-lilla", "--label", "  scott-pipeline "], TOKEN2, monkeypatch)
+    assert rc == 2
+    assert len(json.loads(cli_env.read_text())["tokens"]) == 1
+
+
+def test_revoke_matches_label_after_strip(cli_env, monkeypatch) -> None:
+    assert _run(["add", "--caller", "team-scott", "--label", "scott-pipeline"], TOKEN, monkeypatch) == 0
+    assert _run(["revoke", "--label", "  scott-pipeline  "], "", monkeypatch) == 0
+    assert json.loads(cli_env.read_text())["tokens"] == {}

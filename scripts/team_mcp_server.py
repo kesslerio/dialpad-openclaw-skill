@@ -1034,16 +1034,18 @@ class TeamMcpServer(ThreadingHTTPServer):
             raise TeamMcpConfigError(f"team MCP config unreadable at {self._config.path}")
         if self.gate_config() is None:
             raise TeamMcpConfigError("send gate config unavailable")
+        resolved_tokens = tokens_path or (self.environ.get(TOKENS_ENV) or "").strip()
         self._tokens: _ReloadableJson | None = None
-        if self.bearer_fallback_allowed():
-            resolved_tokens = tokens_path or (self.environ.get(TOKENS_ENV) or "").strip()
-            if not resolved_tokens:
-                raise TeamMcpConfigError(f"{TOKENS_ENV} is not set")
+        if resolved_tokens:
+            # Built whenever a map is reachable so flipping
+            # allow_bearer_fallback on via a config reload needs no restart.
             self._tokens = _ReloadableJson(
                 resolved_tokens,
                 lambda path: send_api_server.load_token_map(path, gate_config=self.gate_config()),
                 extra_mtime=self._gate_mtime,
             )
+        elif self.bearer_fallback_allowed():
+            raise TeamMcpConfigError(f"{TOKENS_ENV} is not set")
         raw_db = (self.environ.get(SMS_DB_ENV) or "").strip()
         self.db_path = Path(raw_db).expanduser() if raw_db else sms_sqlite.resolve_db_path()
         self._jwks_fetcher = jwks_fetcher

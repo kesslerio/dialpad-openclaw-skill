@@ -80,6 +80,10 @@ try:
     import ops_wake
 except Exception:  # noqa: BLE001 - the wake forward is optional.
     ops_wake = None
+try:
+    import team_alerts
+except Exception:  # noqa: BLE001 - the alert forward is optional.
+    team_alerts = None
 
 
 def record_stored_call(data):
@@ -6179,6 +6183,9 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
         if ops_wake is not None and notification_type in {"sms", "blank_sms"}:
             # Non-blocking, self-deduping, never raises.
             ops_wake.notify_sms_event(data)
+        if team_alerts is not None and notification_type in {"sms", "blank_sms"}:
+            # Per-teammate alert URLs; same non-blocking guarantees.
+            team_alerts.notify_sms_event(data)
         try:
             self._process_inbound_post_ack(
                 data, result, from_num, to_num, text, direction, notification_type, timestamp, auth_source

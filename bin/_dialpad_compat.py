@@ -115,11 +115,13 @@ ERROR_CODES = {
     "network_error",
     "timeout",
     "partial_success",
+    "send_gate_refused",
     "internal_error",
 }
 E164_RE = re.compile(r"^\+\d{7,15}$")
 _RECEIPT_SOURCE: str | None = None
 _RECEIPT_STATUS: str | None = None
+_RECEIPT_CONTEXT: dict[str, Any] | None = None
 
 
 class WrapperError(Exception):
@@ -327,6 +329,16 @@ def take_receipt_meta() -> dict[str, object] | None:
     return None
 
 
+def set_receipt_context(context: dict[str, Any] | None) -> None:
+    """Caller attribution folded into the next send receipt, if it writes.
+
+    The canonical message schema cannot carry caller identity, so the send
+    gate's caller/acting_for travels on the receipt ledger line instead.
+    """
+    global _RECEIPT_CONTEXT
+    _RECEIPT_CONTEXT = dict(context) if context else None
+
+
 def append_sms_send_receipt(
     payload: dict[str, object],
     result: Any,
@@ -337,6 +349,7 @@ def append_sms_send_receipt(
         request_payload=payload,
         send_result=result,
         source=source or _RECEIPT_SOURCE or "direct_sms_fallback",
+        extra=_RECEIPT_CONTEXT,
     )
 
 

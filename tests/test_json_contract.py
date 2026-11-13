@@ -37,6 +37,7 @@ import list_sms_thread
 import lookup_contact
 import make_call
 import send_sms
+import send_gate
 import sync_sms_export
 import update_contact
 from _dialpad_compat import ERROR_CODES, WrapperError
@@ -60,7 +61,11 @@ GET_CALL_TRANSCRIPT_SPEC.loader.exec_module(get_call_transcript_wrapper)
 
 class JsonContractTests(unittest.TestCase):
     def _run(self, module, argv: list[str]) -> tuple[int, str, str]:
-        with patch.object(sys, "argv", argv):
+        with patch.object(sys, "argv", argv), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):

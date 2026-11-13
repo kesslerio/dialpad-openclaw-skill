@@ -12,13 +12,18 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import send_sms
+import send_gate
 from _dialpad_compat import WrapperError
 import send_group_intro
 
 
 class SendSmsWrapperTests(unittest.TestCase):
     def _run_main(self, module, args):
-        with patch.object(sys, "argv", ["bin/send_sms.py", *args]):
+        with patch.object(sys, "argv", ["bin/send_sms.py", *args]), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -348,7 +353,11 @@ class SendSmsWrapperTests(unittest.TestCase):
 
 class SendGroupIntroTests(unittest.TestCase):
     def _run_main(self, args):
-        with patch.object(sys, "argv", ["bin/send_group_intro.py", *args]):
+        with patch.object(sys, "argv", ["bin/send_group_intro.py", *args]), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):

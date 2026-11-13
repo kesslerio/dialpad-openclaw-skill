@@ -1295,10 +1295,14 @@ def build_telegram_callback_status_message(result, draft_id):
         )
 
     reason = result.get("reason") or result.get("error") or status
+    retry_hint = ""
+    if status == "send_gate_refused" and result.get("retry_after_seconds"):
+        retry_hint = f"\n*Retry:* in ~{result['retry_after_seconds']}s"
     return (
         "⛔ *SMS approval not sent*\n"
         f"*Draft ID:* `{escaped_draft_id}`\n"
         f"*Reason:* {escape_telegram_markdown(reason)}"
+        f"{retry_hint}"
     )
 
 
@@ -1314,6 +1318,12 @@ def callback_answer_text(result):
         return "Rejected. Not sent."
     if status == "already_resolved":
         return "Already resolved."
+    if status == "send_gate_refused":
+        reason = result.get("reason") or "send gate refused"
+        retry_after = result.get("retry_after_seconds")
+        if retry_after:
+            return f"Send gate refused: {reason} Retry in ~{retry_after}s."
+        return f"Send gate refused: {reason}"
     reason = result.get("reason") or result.get("error") or status or "Not sent."
     return f"Not sent: {reason}"
 

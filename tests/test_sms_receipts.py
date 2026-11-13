@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "bin"))
 
 import _dialpad_compat
+import send_gate
 import send_group_intro
 import send_sms
 import sms_approval
@@ -87,6 +88,10 @@ class SmsReceiptTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), \
                 patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ), \
                 patch("_dialpad_compat.run_generated", side_effect=fake_run_generated):
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -119,6 +124,10 @@ class SmsReceiptTests(unittest.TestCase):
         ), \
                 patch("send_group_intro.require_generated_cli"), \
                 patch("send_group_intro.require_api_key"), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ), \
                 patch("_dialpad_compat.run_generated", side_effect=fake_run_generated):
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -202,13 +211,18 @@ class SmsReceiptTests(unittest.TestCase):
             draft_text="Approved text",
         )
 
-        result = sms_approval.approve_draft(
-            conn,
-            draft_id=draft["draft_id"],
-            actor_id="12345",
-            actor_username="operator",
-            send_func=lambda *_args, **_kwargs: {"id": "approval-msg", "message_status": "pending"},
-        )
+        with patch.object(
+            send_gate,
+            "evaluate_from_environment",
+            return_value=send_gate.Decision(allowed=True),
+        ):
+            result = sms_approval.approve_draft(
+                conn,
+                draft_id=draft["draft_id"],
+                actor_id="12345",
+                actor_username="operator",
+                send_func=lambda *_args, **_kwargs: {"id": "approval-msg", "message_status": "pending"},
+            )
 
         self.assertTrue(result["sent"])
         receipts = self._read_receipts()
@@ -217,6 +231,42 @@ class SmsReceiptTests(unittest.TestCase):
         self.assertEqual(receipts[0]["to"], ["+15125550100"])
         self.assertEqual(receipts[0]["from"], "+14155550140")
         self.assertEqual(receipts[0]["source"], "approval_lane")
+
+    def test_approval_lane_receipt_carries_gate_caller(self):
+        db_path = Path(self.temp_dir.name) / "approvals-caller.db"
+        original_db_path = sms_approval.DB_PATH
+        sms_approval.DB_PATH = db_path
+        self.addCleanup(lambda: setattr(sms_approval, "DB_PATH", original_db_path))
+        conn = sms_approval.init_db()
+        self.addCleanup(conn.close)
+        draft = sms_approval.create_draft(
+            conn,
+            thread_key="thread-caller",
+            customer_number="+15125550100",
+            sender_number="+14155550140",
+            draft_text="Approved text",
+        )
+
+        with patch.object(
+            send_gate,
+            "evaluate_from_environment",
+            return_value=send_gate.Decision(
+                allowed=True, caller="team-scott", acting_for="scott"
+            ),
+        ):
+            result = sms_approval.approve_draft(
+                conn,
+                draft_id=draft["draft_id"],
+                actor_id="12345",
+                actor_username="operator",
+                send_func=lambda *_args, **_kwargs: {"id": "approval-msg-3", "message_status": "pending"},
+            )
+
+        self.assertTrue(result["sent"])
+        receipts = self._read_receipts()
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["caller"], "team-scott")
+        self.assertEqual(receipts[0]["acting_for"], "scott")
 
     def test_approval_lane_append_failure_is_surfaced_in_payload(self):
         self.ledger_path.parent.mkdir(parents=True)
@@ -236,13 +286,18 @@ class SmsReceiptTests(unittest.TestCase):
             draft_text="Approved text",
         )
 
-        result = sms_approval.approve_draft(
-            conn,
-            draft_id=draft["draft_id"],
-            actor_id="12345",
-            actor_username="operator",
-            send_func=lambda *_args, **_kwargs: {"id": "approval-msg-2", "message_status": "pending"},
-        )
+        with patch.object(
+            send_gate,
+            "evaluate_from_environment",
+            return_value=send_gate.Decision(allowed=True),
+        ):
+            result = sms_approval.approve_draft(
+                conn,
+                draft_id=draft["draft_id"],
+                actor_id="12345",
+                actor_username="operator",
+                send_func=lambda *_args, **_kwargs: {"id": "approval-msg-2", "message_status": "pending"},
+            )
 
         self.assertTrue(result["sent"])
         self.assertEqual(result["receipt_ledger"], "append_failed")

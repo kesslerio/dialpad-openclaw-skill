@@ -13,12 +13,17 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import send_sms
+import send_gate
 from _dialpad_compat import ERROR_CODES, WrapperError
 
 
 class SendSmsApprovalAuditTests(unittest.TestCase):
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
-        with patch.object(sys, "argv", argv):
+        with patch.object(sys, "argv", argv), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):

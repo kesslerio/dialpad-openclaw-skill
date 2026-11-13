@@ -18,6 +18,7 @@ BIN_DIR = Path(__file__).resolve().parent.parent / "bin"
 sys.path.insert(0, str(BIN_DIR))
 
 import _dialpad_compat
+import send_gate
 from _dialpad_compat import WrapperError, is_missing_dependency_error
 
 SEND_SMS_SPEC = importlib.util.spec_from_file_location(
@@ -58,7 +59,11 @@ def setUpModule():
 
 class SendSmsDependencyFallbackTests(unittest.TestCase):
     def _run_send_sms(self, argv: list[str]) -> tuple[int, str, str]:
-        with patch.object(sys, "argv", argv):
+        with patch.object(sys, "argv", argv), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):

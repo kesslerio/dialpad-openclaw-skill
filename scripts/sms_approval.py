@@ -855,6 +855,7 @@ def approve_draft(
     action: str = ACTION_APPROVE,
     actor_is_bot: bool = False,
     send_func: Callable[..., Any] | None = None,
+    send_gate_evaluate: Callable[..., Any] | None = None,
     approved_at_ms: int | None = None,
 ) -> dict[str, Any]:
     if _is_bot_actor(actor_id, actor_is_bot=actor_is_bot):
@@ -924,6 +925,43 @@ def approve_draft(
                 "draft": get_draft(conn, draft_id) if cursor.rowcount == 1 else draft,
             }
 
+    if send_gate_evaluate is None:
+        # Lazy import: send_gate imports this module at top level, so a
+        # module-level import here would be circular. The single patch point
+        # for tests is send_gate.evaluate_from_environment, the same one the
+        # direct-send paths stub.
+        import send_gate
+
+        send_gate_evaluate = send_gate.evaluate_approved_send
+    try:
+        gate = send_gate_evaluate(
+            from_number=draft["sender_number"],
+            to_numbers=[draft["customer_number"]],
+        )
+    except Exception as exc:  # noqa: BLE001 - a gate failure fails closed.
+        gate = None
+        gate_reasons = [f"send gate: evaluation failed: {exc}"]
+    else:
+        gate_reasons = list(gate.reasons)
+    if gate is None or not gate.allowed:
+        # The claim was never taken: the draft keeps its pending status so a
+        # later approval (for example after the send window opens) can retry.
+        result = {
+            "ok": False,
+            "status": "send_gate_refused",
+            "code": "send_gate_refused",
+            "sent": False,
+            "reason": "; ".join(gate_reasons),
+            "retryable": bool(gate.retryable) if gate is not None else False,
+            "send_gate": gate.public()
+            if gate is not None
+            else {"allowed": False, "reasons": gate_reasons, "retryable": False},
+            "draft": draft,
+        }
+        if gate is not None and gate.retry_after_seconds is not None:
+            result["retry_after_seconds"] = gate.retry_after_seconds
+        return result
+
     expected_status = STATUS_RISK_PENDING if draft.get("risk_state") == RISK_RISKY else STATUS_PENDING
     cursor = conn.execute(
         """
@@ -988,6 +1026,7 @@ def approve_draft(
             },
             send_result=result,
             source="approval_lane",
+            extra=gate.receipt_context(),
         )
         conn.execute(
             """

@@ -3,9 +3,9 @@
 Send SMS via Dialpad API.
 
 Usage:
-    python3 scripts/send_sms.py --to "+14155551234" --message 'Hello!'
-    python3 scripts/send_sms.py --to "+14155551234" "+14155555678" --message 'Group message'
-    python3 scripts/send_sms.py --to "+14155551234" --message 'Test' --from "+14155550000"
+    python3 scripts/send_sms.py --to "+14155551234" --message 'Hello!' --from "+14155550000" --caller team-name
+    python3 scripts/send_sms.py --to "+14155551234" "+14155555678" --message 'Group message' --from "+14155550000" --caller team-name
+    python3 scripts/send_sms.py --to "+14155551234" --message 'Test' --from "+14155550000" --caller team-name
 """
 
 import argparse
@@ -15,6 +15,8 @@ import sys
 import urllib.request
 import urllib.error
 
+import send_gate
+import sms_receipts
 from outbound_destination_policy import normalize_supported_outbound_destinations
 from log_outbox import record_outbound_observation
 
@@ -106,12 +108,23 @@ def main():
     parser.add_argument(
         "--from",
         dest="from_number",
-        help="Sender phone number (optional, must be assigned to your Dialpad account)"
+        required=True,
+        help="Sender phone number in E.164 format (required by the send gate; "
+        "must be an approved line for the caller)"
     )
     parser.add_argument(
         "--infer-country-code",
         action="store_true",
         help="Assume recipient numbers are from sender's country"
+    )
+    parser.add_argument(
+        "--caller",
+        help="Send-gate caller identity (default: DIALPAD_SEND_CALLER env)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Evaluate the send gate and print the request without sending"
     )
     parser.add_argument(
         "--json",
@@ -122,8 +135,72 @@ def main():
     args = parser.parse_args()
 
     try:
+        normalized_to = normalize_supported_outbound_destinations(
+            args.to,
+            allow_nanp_national=args.infer_country_code,
+        )
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    caller = (args.caller or os.environ.get(send_gate.CALLER_ENV) or "").strip() or None
+    gate = send_gate.evaluate_from_environment(
+        caller=caller,
+        from_number=args.from_number,
+        to_numbers=normalized_to,
+    )
+
+    if args.dry_run:
+        report = {
+            "mode": "dry_run",
+            "send_gate": gate.public(),
+            "payload": {
+                "to_numbers": normalized_to,
+                "text": args.message,
+                "from_number": args.from_number,
+                "infer_country_code": args.infer_country_code,
+            },
+        }
+        if args.json:
+            if gate.allowed:
+                print(json.dumps(report, indent=2))
+            else:
+                print(json.dumps({
+                    **report,
+                    "ok": False,
+                    "error": {
+                        "code": "send_gate_refused",
+                        "message": "; ".join(gate.reasons),
+                        "retryable": gate.retryable,
+                        "send_gate": gate.public(),
+                    },
+                }, indent=2))
+        else:
+            print("Dry run: SMS not sent")
+            print(f"   Caller: {caller}")
+            print(f"   Send gate: {'allowed' if gate.allowed else 'refused: ' + '; '.join(gate.reasons)}")
+            print(f"   From: {args.from_number}")
+            print(f"   To: {', '.join(normalized_to)}")
+        sys.exit(0 if gate.allowed else 2)
+
+    if not gate.allowed:
+        if args.json:
+            print(json.dumps({
+                "ok": False,
+                "error": {
+                    "code": "send_gate_refused",
+                    "message": "; ".join(gate.reasons),
+                    "retryable": gate.retryable,
+                    "send_gate": gate.public(),
+                },
+            }, indent=2))
+        else:
+            print(f"Send gate refused: {'; '.join(gate.reasons)}", file=sys.stderr)
+        sys.exit(2)
+
+    try:
         result = send_sms(
-            to_numbers=args.to,
+            to_numbers=normalized_to,
             message=args.message,
             from_number=args.from_number,
             infer_country_code=args.infer_country_code
@@ -131,11 +208,21 @@ def main():
         if isinstance(result, dict):
             memory_sync = record_outbound_observation(
                 result,
-                to_numbers=list(args.to),
+                to_numbers=list(normalized_to),
                 from_number=args.from_number or str(result.get("from_number") or ""),
                 body=args.message,
             )
             result = {**result, **{key: value for key, value in memory_sync.items() if key.startswith("memory_")}}
+            sms_receipts.append_receipt(
+                request_payload={
+                    "to_numbers": normalized_to,
+                    "from_number": args.from_number or result.get("from_number"),
+                    "text": args.message,
+                },
+                send_result=result,
+                source="direct_sms_cli",
+                extra=gate.receipt_context(),
+            )
 
         if args.json:
             print(json.dumps(result, indent=2))

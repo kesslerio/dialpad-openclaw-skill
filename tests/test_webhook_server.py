@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
+import send_gate
 import webhook_server
 from webhook_server import (
     assess_inbound_sms_alert_eligibility,
@@ -709,6 +710,11 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
                 patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
                 patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
                 patch.object(
+                    send_gate,
+                    "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ), \
+                patch.object(
                     webhook_server,
                     "dialpad_send_sms",
                     side_effect=lambda to_numbers, message, from_number=None: send_calls.append(
@@ -747,6 +753,89 @@ class TelegramCallbackHandlerTests(unittest.TestCase):
         self.assertIn("answerCallbackQuery", [method for method, _payload in telegram_api_calls])
         self.assertIn("editMessageReplyMarkup", [method for method, _payload in telegram_api_calls])
         self.assertIn("sendMessage", [method for method, _payload in telegram_api_calls])
+
+    def test_telegram_callback_approve_gate_refusal_keeps_draft_retryable(self):
+        send_calls = []
+        telegram_api_calls = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.object(webhook_server.sms_approval, "DB_PATH", Path(temp_dir) / "approvals.db"), \
+                patch.object(webhook_server, "TELEGRAM_WEBHOOK_SECRET", "secret"), \
+                patch.object(webhook_server, "TELEGRAM_CHAT_ID", "-100123"), \
+                patch.object(webhook_server, "TELEGRAM_BOT_TOKEN", "bot-token"), \
+                patch.object(
+                    send_gate,
+                    "evaluate_from_environment",
+                    return_value=send_gate.Decision(
+                        allowed=False,
+                        reasons=[
+                            "send gate: from number '+14155550140' is not an "
+                            "approved line for caller 'operator'"
+                        ],
+                        retryable=True,
+                        retry_after_seconds=600,
+                    ),
+                ), \
+                patch.object(
+                    webhook_server,
+                    "dialpad_send_sms",
+                    side_effect=lambda *_args, **_kwargs: send_calls.append(True) or {"id": "sms-1"},
+                ), \
+                patch.object(
+                    webhook_server,
+                    "call_telegram_api",
+                    side_effect=lambda method, payload, timeout=10: telegram_api_calls.append(
+                        (method, payload)
+                    ) or True,
+                ):
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                draft = webhook_server.sms_approval.create_draft(
+                    conn,
+                    thread_key="thread-1",
+                    customer_number="+15125550100",
+                    sender_number="+14155550140",
+                    draft_text="Stored exact text.",
+                )
+            finally:
+                conn.close()
+
+            handler, status = _build_handler(
+                _telegram_callback_payload(draft["draft_id"], action="a"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+            )
+            webhook_server.DialpadWebhookHandler.handle_telegram_webhook(handler)
+
+            conn = webhook_server.sms_approval.init_db()
+            try:
+                stored = webhook_server.sms_approval.get_draft(conn, draft["draft_id"])
+            finally:
+                conn.close()
+
+        response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(status["code"], 200)
+        self.assertFalse(response["sent"])
+        self.assertEqual(response["approval_status"], "send_gate_refused")
+        self.assertEqual(send_calls, [])
+        self.assertEqual(stored["status"], webhook_server.sms_approval.STATUS_PENDING)
+
+        answers = [
+            payload for method, payload in telegram_api_calls if method == "answerCallbackQuery"
+        ]
+        self.assertEqual(len(answers), 1)
+        self.assertIn("not an approved line", answers[0]["text"])
+        self.assertIn("Retry in ~600s", answers[0]["text"])
+        messages = [
+            payload for method, payload in telegram_api_calls if method == "sendMessage"
+        ]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("not an approved line", messages[0]["text"])
+        self.assertIn("~600s", messages[0]["text"])
+        # A retryable refusal keeps the approval buttons in place.
+        edits = [
+            payload for method, payload in telegram_api_calls if method == "editMessageReplyMarkup"
+        ]
+        self.assertEqual(edits, [])
 
     def test_telegram_callback_risky_first_click_replaces_markup_without_send(self):
         send_calls = []

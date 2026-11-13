@@ -110,6 +110,7 @@ def append_receipt(
     request_payload: dict[str, Any],
     send_result: Any,
     source: str,
+    extra: dict[str, Any] | None = None,
 ) -> AppendReceiptStatus:
     """Append a receipt for a successful send.
 
@@ -136,6 +137,9 @@ def append_receipt(
             "delivery_status": delivery_status or "unknown",
             "source": source,
         }
+        for key, value in (extra or {}).items():
+            if value is not None:
+                payload[key] = value
 
         _append_jsonl(_ledger_path(), payload)
     except Exception as exc:  # noqa: BLE001 - receipt persistence is observational only.

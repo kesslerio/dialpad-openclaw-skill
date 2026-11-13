@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from _dialpad_compat import (
     require_api_key,
     resolve_sender,
     run_generated_json,
+    set_receipt_context,
     set_receipt_source,
     take_receipt_meta,
     WrapperError,
@@ -26,6 +28,8 @@ from _dialpad_compat import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "scripts"))
 
+import send_gate
+from log_outbox import record_outbound_observation
 from outbound_destination_policy import require_supported_outbound_destinations
 
 
@@ -35,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference", required=True, help="Reference phone number (E.164)")
     parser.add_argument("--from", dest="from_number", help="Sender number")
     parser.add_argument("--profile", choices=("work", "sales"), help="Sender profile")
+    parser.add_argument(
+        "--caller",
+        help="Send-gate caller identity (default: DIALPAD_SEND_CALLER env)",
+    )
     parser.add_argument(
         "--allow-profile-mismatch",
         action="store_true",
@@ -91,8 +99,13 @@ def _send_single_sms(sender: str, to_number: str, message: str) -> dict[str, obj
     return run_generated_json(["sms", "send", "--data", json.dumps(payload)])
 
 
+def _memory_meta(memory_sync: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in memory_sync.items() if key.startswith("memory_")}
+
+
 def main() -> int:
     set_receipt_source("send_group_intro")
+    set_receipt_context(None)
     take_receipt_meta()
     command = COMMAND_IDS["send_group_intro.send"]
     wrapper = "send_group_intro.py"
@@ -112,6 +125,21 @@ def main() -> int:
         sender_number, sender_source = resolve_sender(
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch
         )
+
+        gate_caller = (args.caller or os.environ.get(send_gate.CALLER_ENV) or "").strip() or None
+        gate = send_gate.evaluate_from_environment(
+            caller=gate_caller,
+            from_number=sender_number,
+            to_numbers=[args.prospect, args.reference],
+        )
+        set_receipt_context(gate.receipt_context())
+        if not gate.allowed:
+            raise WrapperError(
+                "Send gate refused: " + "; ".join(gate.reasons),
+                code="send_gate_refused",
+                retryable=gate.retryable,
+                meta={"send_gate": gate.public()},
+            )
 
         prospect_name = _label_for_party(args.prospect_name, "the prospect")
         reference_name = _label_for_party(args.reference_name, "the reference")
@@ -149,6 +177,7 @@ def main() -> int:
                     "status": "pending",
                 },
                 "dry_run": True,
+                "send_gate": gate.public(),
             }
             if json_mode:
                 emit_success(command, wrapper, summary)
@@ -156,6 +185,11 @@ def main() -> int:
                 print("Dry run: no messages sent")
                 print(f"Mode: {summary['mode']}")
                 print(f"Selected sender: {summary['sender_number']} ({summary['sender_source']})")
+                gate_label = f"allowed (caller: {gate.caller}"
+                if gate.acting_for:
+                    gate_label += f", acting for: {gate.acting_for}"
+                gate_label += ")"
+                print(f"Send gate: {gate_label}")
                 print(f"Prospect: {summary['prospect']['to']} -> length {len(summary['prospect']['message'])}")
                 print(f"Reference: {summary['reference']['to']} -> length {len(summary['reference']['message'])}")
             return 0
@@ -163,6 +197,12 @@ def main() -> int:
         require_api_key()
         prospect_result = _send_single_sms(sender_number, args.prospect, prospect_message)
         prospect_receipt_meta = take_receipt_meta()
+        prospect_memory = record_outbound_observation(
+            prospect_result,
+            to_numbers=[args.prospect],
+            from_number=sender_number,
+            body=prospect_message,
+        )
         prospect_id = prospect_result.get("id") or "N/A"
 
         try:
@@ -175,8 +215,14 @@ def main() -> int:
                 f"Reference message failed: {err}. This is a partial success state.",
                 code="partial_success",
                 retryable=False,
-                meta=prospect_receipt_meta,
+                meta={**(prospect_receipt_meta or {}), **_memory_meta(prospect_memory)},
             ) from err
+        reference_memory = record_outbound_observation(
+            reference_result,
+            to_numbers=[args.reference],
+            from_number=sender_number,
+            body=reference_message,
+        )
 
         if json_mode:
             emit_success(
@@ -197,7 +243,13 @@ def main() -> int:
                         "status": reference_result.get("message_status"),
                     },
                 },
-                meta_extra=prospect_receipt_meta or reference_receipt_meta,
+                meta_extra={
+                    **(prospect_receipt_meta or {}),
+                    **(reference_receipt_meta or {}),
+                    **_memory_meta(prospect_memory),
+                    **_memory_meta(reference_memory),
+                }
+                or None,
             )
         else:
             print("Mode: mirrored_fallback")

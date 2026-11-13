@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from _dialpad_compat import (
     require_api_key,
     resolve_sender,
     run_generated_json,
+    set_receipt_context,
     set_receipt_source,
     take_receipt_meta,
     WrapperError,
@@ -26,6 +28,7 @@ from _dialpad_compat import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "scripts"))
 
+import send_gate
 from outbound_destination_policy import require_supported_outbound_destinations
 
 
@@ -35,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference", required=True, help="Reference phone number (E.164)")
     parser.add_argument("--from", dest="from_number", help="Sender number")
     parser.add_argument("--profile", choices=("work", "sales"), help="Sender profile")
+    parser.add_argument(
+        "--caller",
+        help="Send-gate caller identity (default: DIALPAD_SEND_CALLER env)",
+    )
     parser.add_argument(
         "--allow-profile-mismatch",
         action="store_true",
@@ -93,6 +100,7 @@ def _send_single_sms(sender: str, to_number: str, message: str) -> dict[str, obj
 
 def main() -> int:
     set_receipt_source("send_group_intro")
+    set_receipt_context(None)
     take_receipt_meta()
     command = COMMAND_IDS["send_group_intro.send"]
     wrapper = "send_group_intro.py"
@@ -112,6 +120,21 @@ def main() -> int:
         sender_number, sender_source = resolve_sender(
             args.from_number, args.profile, allow_profile_mismatch=args.allow_profile_mismatch
         )
+
+        gate_caller = (args.caller or os.environ.get(send_gate.CALLER_ENV) or "").strip() or None
+        gate = send_gate.evaluate_from_environment(
+            caller=gate_caller,
+            from_number=sender_number,
+            to_numbers=[args.prospect, args.reference],
+        )
+        set_receipt_context(gate.receipt_context())
+        if not gate.allowed:
+            raise WrapperError(
+                "Send gate refused: " + "; ".join(gate.reasons),
+                code="send_gate_refused",
+                retryable=gate.retryable,
+                meta={"send_gate": gate.public()},
+            )
 
         prospect_name = _label_for_party(args.prospect_name, "the prospect")
         reference_name = _label_for_party(args.reference_name, "the reference")
@@ -149,6 +172,7 @@ def main() -> int:
                     "status": "pending",
                 },
                 "dry_run": True,
+                "send_gate": gate.public(),
             }
             if json_mode:
                 emit_success(command, wrapper, summary)
@@ -156,6 +180,11 @@ def main() -> int:
                 print("Dry run: no messages sent")
                 print(f"Mode: {summary['mode']}")
                 print(f"Selected sender: {summary['sender_number']} ({summary['sender_source']})")
+                gate_label = f"allowed (caller: {gate.caller}"
+                if gate.acting_for:
+                    gate_label += f", acting for: {gate.acting_for}"
+                gate_label += ")"
+                print(f"Send gate: {gate_label}")
                 print(f"Prospect: {summary['prospect']['to']} -> length {len(summary['prospect']['message'])}")
                 print(f"Reference: {summary['reference']['to']} -> length {len(summary['reference']['message'])}")
             return 0

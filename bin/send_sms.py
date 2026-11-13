@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import importlib.util
@@ -22,6 +23,7 @@ from _dialpad_compat import (
     require_api_key,
     resolve_sender,
     run_generated_json,
+    set_receipt_context,
     set_receipt_source,
     take_receipt_meta,
     WrapperError,
@@ -32,6 +34,7 @@ SCRIPTS_DIR = str(ROOT / "scripts")
 if SCRIPTS_DIR not in sys.path:
     sys.path.append(SCRIPTS_DIR)
 
+import send_gate
 import sms_approval
 from log_outbox import drain_on_use, record_outbound_observation
 from outbound_destination_policy import normalize_supported_outbound_destinations
@@ -61,6 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--from", dest="from_number", help="Sender number")
     parser.add_argument("--profile", choices=("work", "sales"), help="Sender profile")
+    parser.add_argument(
+        "--caller",
+        help="Send-gate caller identity (default: DIALPAD_SEND_CALLER env)",
+    )
     parser.add_argument(
         "--allow-profile-mismatch",
         action="store_true",
@@ -206,6 +213,31 @@ def annotate_message_status(result: object) -> object:
         annotated["status"] = normalized_status
         annotated["status_raw"] = raw_status
     return annotated
+
+
+def evaluate_send_gate(
+    *,
+    caller: str | None,
+    from_number: str,
+    to_numbers: list[str],
+) -> "send_gate.Decision":
+    """Evaluate the send gate for this send; no provider call may precede it."""
+    return send_gate.evaluate_from_environment(
+        caller=caller,
+        from_number=from_number,
+        to_numbers=to_numbers,
+    )
+
+
+def _require_send_gate(gate: "send_gate.Decision") -> None:
+    if gate.allowed:
+        return
+    raise WrapperError(
+        "Send gate refused: " + "; ".join(gate.reasons),
+        code="send_gate_refused",
+        retryable=gate.retryable,
+        meta={"send_gate": gate.public()},
+    )
 
 
 def _audit_args_present(args: argparse.Namespace) -> bool:
@@ -396,6 +428,7 @@ def attach_approval_audit(result: object, approval_audit: dict[str, object] | No
 
 def main() -> int:
     set_receipt_source("send_sms")
+    set_receipt_context(None)
     take_receipt_meta()
     json_mode = "--json" in sys.argv
     command = COMMAND_IDS["send_sms.send"]
@@ -417,6 +450,10 @@ def main() -> int:
         )
         message_text, message_source = resolve_message_text(args)
         validate_message_text(message_text, args.allow_suspicious_currency)
+        gate_caller = (args.caller or os.environ.get(send_gate.CALLER_ENV) or "").strip() or None
+        gate = evaluate_send_gate(caller=gate_caller, from_number=sender_number, to_numbers=args.to)
+        set_receipt_context(gate.receipt_context())
+        _require_send_gate(gate)
         approval_preflight = preflight_approval_audit(args, sender_number=sender_number, message_text=message_text)
         payload = _build_payload(args.to, message_text, args.infer_country_code, sender_number)
 
@@ -428,6 +465,7 @@ def main() -> int:
                     "sender_source": sender_source,
                     "message_source": message_source,
                     "payload": payload,
+                    "send_gate": gate.public(),
                 }
                 if approval_preflight is not None:
                     data["approval_audit"] = approval_preflight
@@ -442,6 +480,11 @@ def main() -> int:
                 print(f"Message source: {message_source}")
                 print(f"To: {', '.join(args.to)}")
                 print(f"Message length: {len(message_text)}")
+                gate_label = f"allowed (caller: {gate.caller}"
+                if gate.acting_for:
+                    gate_label += f", acting for: {gate.acting_for}"
+                gate_label += ")"
+                print(f"Send gate: {gate_label}")
                 if approval_preflight:
                     print(f"Approval audit: ready ({approval_preflight['draft_id']})")
                 print("Message preview:")

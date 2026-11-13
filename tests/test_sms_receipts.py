@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "bin"))
 
 import _dialpad_compat
+import send_gate
 import send_group_intro
 import send_sms
 import sms_approval
@@ -87,6 +88,10 @@ class SmsReceiptTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), \
                 patch("send_sms.require_generated_cli"), \
                 patch("send_sms.require_api_key"), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ), \
                 patch("_dialpad_compat.run_generated", side_effect=fake_run_generated):
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -119,6 +124,10 @@ class SmsReceiptTests(unittest.TestCase):
         ), \
                 patch("send_group_intro.require_generated_cli"), \
                 patch("send_group_intro.require_api_key"), \
+                patch.object(
+                    send_gate, "evaluate_from_environment",
+                    return_value=send_gate.Decision(allowed=True),
+                ), \
                 patch("_dialpad_compat.run_generated", side_effect=fake_run_generated):
             stdout = io.StringIO()
             stderr = io.StringIO()

@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 
 import send_sms  # noqa: E402
+import send_gate  # noqa: E402
+
+_GATE_ALLOW = send_gate.Decision(allowed=True)
 
 
 def test_supported_send_records_exact_successful_observation() -> None:
@@ -31,6 +34,7 @@ def test_supported_send_records_exact_successful_observation() -> None:
             patch.object(send_sms, "resolve_sender", return_value=("+14155550140", "--from")), \
             patch.object(send_sms, "run_generated_json", return_value={"id": "msg-send-1", "message_status": "pending"}), \
             patch.object(send_sms, "require_api_key"), \
+            patch.object(send_gate, "evaluate_from_environment", return_value=_GATE_ALLOW), \
             patch.object(send_sms, "record_outbound_observation", side_effect=record):
         stdout = io.StringIO()
         stderr = io.StringIO()

@@ -1,0 +1,30 @@
+{
+  "shared_lines": {
+    "office": "+14159065785",
+    "sales": "+14155201316"
+  },
+  "teammates": {
+    "scott": "+14152230323",
+    "lilla": "+14158701945",
+    "alexandre": "+14153291662"
+  },
+  "callers": {
+    "team-scott": {
+      "shared_lines": ["office", "sales"],
+      "acts_for": "scott"
+    },
+    "team-lilla": {
+      "shared_lines": ["office", "sales"],
+      "acts_for": "lilla"
+    },
+    "team-alexandre": {
+      "shared_lines": ["office", "sales"],
+      "acts_for": "alexandre"
+    },
+    "operator": {
+      "shared_lines": ["office", "sales"],
+      "extra_allowed_lines": ["+14155550140"],
+      "time_restricted": false
+    }
+  }
+}

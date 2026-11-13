@@ -1,0 +1,31 @@
+[Unit]
+Description=Dialpad Team Send API (loopback only; fronted by cloudflared + Access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/skills/work/dialpad
+EnvironmentFile=%h/projects/skills/work/dialpad/.env
+# The network path must never inherit a caller: caller ids come only from the token map.
+UnsetEnvironment=DIALPAD_SEND_CALLER
+# Fail before Python starts if the token map or gate config path is missing.
+ExecStartPre=/bin/sh -c 'test -n "$DIALPAD_SEND_API_TOKENS" && test -n "$DIALPAD_SEND_GATE_CONFIG"'
+Environment=DIALPAD_SEND_API_BIND=127.0.0.1
+Environment=DIALPAD_SEND_API_PORT=18889
+# Adjust Python path to your installation if needed.
+ExecStart=%h/.linuxbrew/bin/python3 %h/projects/skills/work/dialpad/scripts/send_api_server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=default.target

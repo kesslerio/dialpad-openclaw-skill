@@ -272,6 +272,50 @@ def test_set_and_clear_registration(tmp_path):
     assert team_alerts.load_alert_store(store) == {}
 
 
+def test_concurrent_registrations_all_survive(tmp_path):
+    """Unlocked read-modify-write dropped callers; every writer must win."""
+    store = tmp_path / "alerts.json"
+    workers = 8
+    rounds = 20
+    barrier = threading.Barrier(workers)
+    errors = []
+
+    def register(index):
+        try:
+            barrier.wait(10)
+            for round_ in range(rounds):
+                team_alerts.set_alert_registration(
+                    store, f"caller-{index}", f"https://h{index}.example.com/{round_}", f"k{index}"
+                )
+        except Exception as exc:  # noqa: BLE001 - surfaced below.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=register, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert errors == []
+    entries = team_alerts.load_alert_store(store)
+    assert set(entries) == {f"caller-{index}" for index in range(workers)}
+    for index in range(workers):
+        assert entries[f"caller-{index}"]["url"] == f"https://h{index}.example.com/{rounds - 1}"
+
+
+def test_alert_store_mode_is_checked(tmp_path):
+    """The key-bearing store is refused when group/world-readable."""
+    store = tmp_path / "alerts.json"
+    store.write_text(json.dumps({"team-scott": {"url": "https://x.example.com/h", "key": "k"}}))
+    os.chmod(store, 0o644)
+    assert team_alerts.load_alert_store(store) == {}
+    with pytest.raises(ValueError):
+        team_alerts.load_alert_store(store, strict=True)
+    with pytest.raises(ValueError):
+        team_alerts.set_alert_registration(store, "team-lilla", "https://y.example.com/h", "k2")
+    os.chmod(store, 0o600)
+    assert "team-scott" in team_alerts.load_alert_store(store)
+
+
 def test_validate_alerts_section_rejects_out_of_scope_lines():
     with pytest.raises(ValueError):
         team_alerts.validate_alerts_section(

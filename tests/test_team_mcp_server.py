@@ -641,6 +641,38 @@ def test_bearer_fallback_can_be_disabled(make_server, tmp_path) -> None:
     assert raised.value.code == 401
 
 
+def test_bearer_fallback_enabled_by_config_reload(tmp_path, token_map_path, sms_db) -> None:
+    """allow_bearer_fallback false->true via the mtime reload needs no restart."""
+    config_path = tmp_path / "team-mcp.json"
+    config_path.write_text(json.dumps(_mcp_config(tmp_path, allow_bearer_fallback=False)))
+    os.chmod(config_path, 0o600)
+    server = create_server(
+        bind="127.0.0.1",
+        port=0,
+        config_path=config_path,
+        gate_config=GATE_CONFIG,
+        tokens_path=token_map_path,
+        send_runner=RecordingRunner(),
+        env={"DIALPAD_SMS_DB": str(sms_db)},
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            _request(server, "/health", method="GET")
+        assert raised.value.code == 401
+
+        config_path.write_text(json.dumps(_mcp_config(tmp_path, allow_bearer_fallback=True)))
+        stat_result = config_path.stat()
+        os.utime(config_path, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 10_000_000))
+        response = json.load(_request(server, "/health", method="GET"))
+        assert response["caller"] == "team-scott"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 # ---------------------------------------------------------------------------
 # Identity: Cloudflare Access JWT
 # ---------------------------------------------------------------------------

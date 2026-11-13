@@ -23,8 +23,7 @@
     },
     "operator": {
       "shared_lines": ["office", "sales"],
-      "extra_allowed_lines": ["+14155550140"],
-      "time_restricted": false
+      "extra_allowed_lines": ["+1XXXXXXXXXX"]
     }
   }
 }

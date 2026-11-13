@@ -3,9 +3,9 @@
 Send SMS via Dialpad API.
 
 Usage:
-    python3 scripts/send_sms.py --to "+14155551234" --message 'Hello!'
-    python3 scripts/send_sms.py --to "+14155551234" "+14155555678" --message 'Group message'
-    python3 scripts/send_sms.py --to "+14155551234" --message 'Test' --from "+14155550000"
+    python3 scripts/send_sms.py --to "+14155551234" --message 'Hello!' --from "+14155550000" --caller team-name
+    python3 scripts/send_sms.py --to "+14155551234" "+14155555678" --message 'Group message' --from "+14155550000" --caller team-name
+    python3 scripts/send_sms.py --to "+14155551234" --message 'Test' --from "+14155550000" --caller team-name
 """
 
 import argparse
@@ -108,7 +108,9 @@ def main():
     parser.add_argument(
         "--from",
         dest="from_number",
-        help="Sender phone number (optional, must be assigned to your Dialpad account)"
+        required=True,
+        help="Sender phone number in E.164 format (required by the send gate; "
+        "must be an approved line for the caller)"
     )
     parser.add_argument(
         "--infer-country-code",
@@ -160,7 +162,19 @@ def main():
             },
         }
         if args.json:
-            print(json.dumps(report, indent=2))
+            if gate.allowed:
+                print(json.dumps(report, indent=2))
+            else:
+                print(json.dumps({
+                    **report,
+                    "ok": False,
+                    "error": {
+                        "code": "send_gate_refused",
+                        "message": "; ".join(gate.reasons),
+                        "retryable": gate.retryable,
+                        "send_gate": gate.public(),
+                    },
+                }, indent=2))
         else:
             print("Dry run: SMS not sent")
             print(f"   Caller: {caller}")

@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "scripts"))
 
 import send_gate
+from log_outbox import record_outbound_observation
 from outbound_destination_policy import require_supported_outbound_destinations
 
 
@@ -96,6 +97,10 @@ def _build_payload(sender: str, to_number: str, message: str) -> dict[str, objec
 def _send_single_sms(sender: str, to_number: str, message: str) -> dict[str, object]:
     payload = _build_payload(sender, to_number, message)
     return run_generated_json(["sms", "send", "--data", json.dumps(payload)])
+
+
+def _memory_meta(memory_sync: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in memory_sync.items() if key.startswith("memory_")}
 
 
 def main() -> int:
@@ -192,6 +197,12 @@ def main() -> int:
         require_api_key()
         prospect_result = _send_single_sms(sender_number, args.prospect, prospect_message)
         prospect_receipt_meta = take_receipt_meta()
+        prospect_memory = record_outbound_observation(
+            prospect_result,
+            to_numbers=[args.prospect],
+            from_number=sender_number,
+            body=prospect_message,
+        )
         prospect_id = prospect_result.get("id") or "N/A"
 
         try:
@@ -204,8 +215,14 @@ def main() -> int:
                 f"Reference message failed: {err}. This is a partial success state.",
                 code="partial_success",
                 retryable=False,
-                meta=prospect_receipt_meta,
+                meta={**(prospect_receipt_meta or {}), **_memory_meta(prospect_memory)},
             ) from err
+        reference_memory = record_outbound_observation(
+            reference_result,
+            to_numbers=[args.reference],
+            from_number=sender_number,
+            body=reference_message,
+        )
 
         if json_mode:
             emit_success(
@@ -226,7 +243,13 @@ def main() -> int:
                         "status": reference_result.get("message_status"),
                     },
                 },
-                meta_extra=prospect_receipt_meta or reference_receipt_meta,
+                meta_extra={
+                    **(prospect_receipt_meta or {}),
+                    **(reference_receipt_meta or {}),
+                    **_memory_meta(prospect_memory),
+                    **_memory_meta(reference_memory),
+                }
+                or None,
             )
         else:
             print("Mode: mirrored_fallback")

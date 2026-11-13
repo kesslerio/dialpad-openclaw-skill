@@ -76,7 +76,8 @@ When `DIALPAD_LOG_URL` is configured, SMS thread/inbox reads and call-list
 reads use the authenticated theshop interaction log by default. Use
 `bin/list_calls.py --live` only for an explicit live Dialpad query and
 `--local` for the legacy local calls database. After a successful
-`bin/send_sms.py`, the exact outbound observation is recorded through the
+`bin/send_sms.py` or `bin/send_group_intro.py` send (each confirmed leg), the
+exact outbound observation is recorded through the
 shared log or queued in the record-only `DIALPAD_LOG_OUTBOX`; replaying that
 outbox never sends SMS or places calls. It drains itself on the next send or
 read, bounded so a dead log never delays the command that triggered it; see

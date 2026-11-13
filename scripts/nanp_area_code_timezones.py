@@ -62,8 +62,8 @@ _register(
     # Georgia
     "229", "404", "470", "478", "678", "706", "762", "770", "912", "943",
     # Florida (all except the panhandle codes below)
-    "239", "305", "321", "352", "386", "407", "561", "645", "689", "727", "728",
-    "754", "772", "786", "813", "863", "904", "941", "954",
+    "239", "305", "321", "324", "352", "386", "407", "561", "645", "656", "689",
+    "727", "728", "754", "772", "786", "813", "863", "904", "941", "954",
     # Indiana (Eastern portion)
     "260", "317", "463", "765",
     # Kentucky (Eastern portion)
@@ -81,8 +81,9 @@ _register(
     # New Jersey
     "201", "551", "609", "640", "732", "848", "856", "862", "908", "973",
     # New York
-    "212", "315", "329", "332", "347", "363", "516", "518", "607", "624", "631",
-    "646", "680", "716", "718", "838", "845", "914", "917", "929", "934",
+    "212", "315", "329", "332", "347", "363", "465", "516", "518", "585", "607",
+    "624", "631", "646", "680", "716", "718", "838", "845", "914", "917", "929",
+    "934",
     # North Carolina
     "252", "336", "472", "704", "743", "828", "910", "919", "980", "984",
     # Ohio
@@ -107,8 +108,8 @@ _register(
 
 _register(
     (CENTRAL,),
-    # Alabama
-    "205", "251", "256", "334", "659", "938",
+    # Alabama (334/483 are multi-zone: Phenix City observes Eastern)
+    "205", "251", "256", "659", "938",
     # Arkansas
     "479", "501", "870",
     # Illinois
@@ -121,11 +122,11 @@ _register(
     # Kansas (fully Central codes only)
     "316", "913",
     # Louisiana
-    "225", "318", "337", "504", "985",
+    "225", "318", "337", "457", "504", "985",
     # Minnesota
     "218", "320", "507", "612", "651", "763", "924", "952",
     # Mississippi
-    "228", "601", "662", "769",
+    "228", "471", "601", "662", "769",
     # Missouri
     "314", "417", "557", "573", "636", "660", "816", "975",
     # Nebraska (eastern)
@@ -145,7 +146,7 @@ _register(
 _register(
     (MOUNTAIN,),
     # Colorado
-    "303", "719", "720", "970", "983",
+    "303", "719", "720", "748", "970", "983",
     # Montana
     "406",
     # New Mexico
@@ -167,10 +168,10 @@ _register(
 _register(
     (PACIFIC,),
     # California
-    "209", "213", "279", "310", "323", "341", "350", "369", "408", "415", "424",
-    "442", "510", "530", "559", "562", "619", "626", "628", "650", "657", "661",
-    "669", "707", "714", "747", "760", "805", "818", "831", "837", "840", "858",
-    "909", "916", "925", "949", "951",
+    "209", "213", "279", "310", "323", "341", "350", "357", "369", "408", "415",
+    "424", "442", "510", "530", "559", "562", "619", "626", "628", "650", "657",
+    "661", "669", "707", "714", "738", "747", "760", "805", "818", "820", "831",
+    "837", "840", "858", "909", "916", "925", "949", "951",
     # Nevada (southern)
     "702", "725",
     # Oregon (Portland metro only; 541/458 cover Mountain-observing Malheur)
@@ -192,8 +193,10 @@ _register((HAWAII,), "808")
 
 _register(
     (CENTRAL, EASTERN),
+    # Alabama: Phenix City area observes Eastern inside a Central overlay
+    "334", "483",
     # Florida panhandle: Pensacola Central, Tallahassee Eastern
-    "324", "448", "850",
+    "448", "850",
     # Indiana southwest: Evansville Central, rest of 812/930 Eastern
     "812", "930",
     # Indiana north-central: Starke/Pulaski Central inside an Eastern overlay
@@ -203,7 +206,7 @@ _register(
     # Michigan Upper Peninsula: four western counties are Central
     "906",
     # Tennessee Chattanooga: Marion County is Central
-    "423",
+    "423", "729",
 )
 
 _register(
@@ -253,6 +256,10 @@ _register(
     (CA_EASTERN, CA_ATLANTIC),
     # Quebec 418-family reaches the Atlantic-observing Magdalen Islands
     "367", "418", "581",
+)
+
+_register(
+    (CA_EASTERN, CA_CENTRAL),
     # Ontario 807: Thunder Bay Eastern, Kenora/Rainy River Central
     "807",
 )
@@ -280,7 +287,7 @@ _register((CA_ATLANTIC,), "782", "902")
 _register(
     (CA_NEWFOUNDLAND, CA_ATLANTIC),
     # Newfoundland time with Atlantic-observing Labrador coast communities
-    "709",
+    "709", "879",
 )
 
 _register(

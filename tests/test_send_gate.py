@@ -22,6 +22,8 @@ sys.path.insert(0, str(ROOT / "bin"))
 import send_gate
 import send_group_intro
 import sms_approval
+from _dialpad_compat import WrapperError
+from nanp_area_code_timezones import timezones_for_e164
 
 CONFIG = {
     "shared_lines": {"office": "+14159065785", "sales": "+14155201316"},
@@ -139,6 +141,68 @@ class AllowlistTests(unittest.TestCase):
         with self.assertRaises(send_gate.SendGateError):
             send_gate.validate_config(bad)
 
+    def test_from_number_sharing_last10_with_approved_line_refused(self):
+        # normalize_phone_number-style last-10 matching would collide this
+        # non-Dialpad line with the office line; strict E.164 must not.
+        decision = _evaluate(from_number="+9994159065785")
+        self.assertFalse(decision.allowed)
+        self.assertIn("not an approved line", decision.reasons[0])
+
+    def test_bare_10_digit_national_form_allowed(self):
+        decision = _evaluate(from_number="4159065785")
+        self.assertTrue(decision.allowed)
+
+    def test_1_prefixed_national_form_allowed(self):
+        decision = _evaluate(from_number="14159065785")
+        self.assertTrue(decision.allowed)
+
+
+class MalformedConfigTests(unittest.TestCase):
+    def test_shared_lines_null_raises_send_gate_error(self):
+        bad = {
+            **CONFIG,
+            "callers": {"team-scott": {"shared_lines": None}},
+        }
+        with self.assertRaises(send_gate.SendGateError):
+            send_gate.validate_config(bad)
+
+    def test_shared_lines_non_string_element_raises_send_gate_error(self):
+        bad = {
+            **CONFIG,
+            "callers": {"team-scott": {"shared_lines": [["office"]]}},
+        }
+        with self.assertRaises(send_gate.SendGateError):
+            send_gate.validate_config(bad)
+
+    def test_extra_allowed_lines_null_raises_send_gate_error(self):
+        bad = {
+            **CONFIG,
+            "callers": {"x": {"shared_lines": ["office"], "extra_allowed_lines": None}},
+        }
+        with self.assertRaises(send_gate.SendGateError):
+            send_gate.validate_config(bad)
+
+    def test_acts_for_non_string_raises_send_gate_error(self):
+        bad = {
+            **CONFIG,
+            "callers": {"x": {"shared_lines": ["office"], "acts_for": ["scott"]}},
+        }
+        with self.assertRaises(send_gate.SendGateError):
+            send_gate.validate_config(bad)
+
+    def test_unexpected_config_load_error_refuses(self):
+        with patch.object(send_gate, "load_config", side_effect=TypeError("boom")), \
+                patch.dict("os.environ", {"DIALPAD_SEND_GATE_CONFIG": "/nonexistent/gate.json"}, clear=True):
+            decision = send_gate.evaluate_from_environment(
+                caller="team-scott",
+                from_number="+14159065785",
+                to_numbers=[PACIFIC_TO],
+                opt_out_sources=_sources(),
+            )
+        self.assertFalse(decision.allowed)
+        self.assertFalse(decision.retryable)
+        self.assertIn("config unavailable", decision.reasons[0])
+
 
 class OptOutUnionTests(unittest.TestCase):
     def test_dialpad_company_opt_out_blocks(self):
@@ -251,6 +315,60 @@ class OptOutUnionTests(unittest.TestCase):
             send_gate.fetch_company_opt_outs(company_id="1", api_key="k", opener=opener)
         self.assertEqual(len(calls), 2)
         self.assertIn("cursor", str(ctx.exception))
+
+    def _fetch_with_payload(self, payload):
+        class _Resp:
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return send_gate.fetch_company_opt_outs(
+            company_id="1",
+            api_key="k",
+            opener=lambda request, timeout=None: _Resp(),
+        )
+
+    def test_body_without_items_list_is_malformed(self):
+        with self.assertRaises(send_gate.OptOutSourceError):
+            self._fetch_with_payload({})
+
+    def test_items_null_without_cursor_is_empty(self):
+        self.assertEqual(self._fetch_with_payload({"items": None}), set())
+
+    def test_items_null_with_cursor_is_malformed(self):
+        with self.assertRaises(send_gate.OptOutSourceError):
+            self._fetch_with_payload({"items": None, "cursor": "next"})
+
+    def test_items_non_list_is_malformed(self):
+        with self.assertRaises(send_gate.OptOutSourceError):
+            self._fetch_with_payload({"items": "nope"})
+
+    def test_item_missing_opt_out_state_is_malformed(self):
+        with self.assertRaises(send_gate.OptOutSourceError):
+            self._fetch_with_payload({"items": [{"external_endpoint": "+13105550100"}]})
+
+    def test_item_missing_external_endpoint_is_malformed(self):
+        with self.assertRaises(send_gate.OptOutSourceError):
+            self._fetch_with_payload({"items": [{"opt_out_state": "opted_out"}]})
+
+    def test_non_opted_out_items_are_skipped(self):
+        result = self._fetch_with_payload(
+            {
+                "items": [
+                    {"external_endpoint": "+12125550100", "opt_out_state": "opted_in"},
+                    {"external_endpoint": "+13105550100", "opt_out_state": "opted_out"},
+                ]
+            }
+        )
+        self.assertEqual(result, {"3105550100"})
+
+    def test_explicit_empty_items_is_valid(self):
+        self.assertEqual(self._fetch_with_payload({"items": []}), set())
 
     def test_pagination_page_cap_refuses(self):
         counter = {"n": 0}
@@ -389,6 +507,68 @@ class GroupSendTests(unittest.TestCase):
         decision = _evaluate(to_numbers=[PACIFIC_TO, EASTERN_TO])
         self.assertTrue(decision.allowed)
 
+    def test_mixed_hard_and_time_refusal_is_not_retryable(self):
+        # Company opt-out on one recipient + outside-window on another: the
+        # refusal is not retryable and must not advertise a retry hint.
+        decision = _evaluate(
+            to_numbers=[PACIFIC_TO, EASTERN_TO],
+            opt_out_sources=_sources(company=lambda: {"3105550100"}),
+            now_utc=datetime(2026, 1, 15, 12, 31, tzinfo=timezone.utc),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertFalse(decision.retryable)
+        self.assertIsNone(decision.retry_after_seconds)
+        self.assertNotIn("retry_after_seconds", decision.public())
+
+
+class AreaCodeTableTests(unittest.TestCase):
+    def test_807_spans_eastern_and_central(self):
+        zones = {zone.key for zone in timezones_for_e164("+18075550100")}
+        self.assertEqual(zones, {"America/Toronto", "America/Winnipeg"})
+
+    def test_807_kenora_refused_before_0800_central(self):
+        # 13:31 UTC = 08:31 EST (Thunder Bay) but 07:31 CST (Kenora).
+        decision = _evaluate(
+            to_numbers=["+18075550100"],
+            now_utc=datetime(2026, 1, 15, 13, 31, tzinfo=timezone.utc),
+        )
+        self.assertFalse(decision.allowed)
+
+    def test_334_spans_central_and_eastern(self):
+        zones = {zone.key for zone in timezones_for_e164("+13345550100")}
+        self.assertEqual(zones, {"America/Chicago", "America/New_York"})
+
+    def test_334_phenix_city_refused_after_2100_eastern(self):
+        # 2026-01-16 02:31 UTC = 20:31 CST but 21:31 EST (Phenix City).
+        decision = _evaluate(
+            to_numbers=["+13345550100"],
+            now_utc=datetime(2026, 1, 16, 2, 31, tzinfo=timezone.utc),
+        )
+        self.assertFalse(decision.allowed)
+
+    def test_324_jacksonville_overlay_is_eastern_only(self):
+        zones = [zone.key for zone in timezones_for_e164("+13245550100")]
+        self.assertEqual(zones, ["America/New_York"])
+        # 13:31 UTC = 08:31 EST: inside the window; a phantom Central zone
+        # would refuse this at 07:31.
+        decision = _evaluate(
+            to_numbers=["+13245550100"],
+            now_utc=datetime(2026, 1, 15, 13, 31, tzinfo=timezone.utc),
+        )
+        self.assertTrue(decision.allowed)
+
+    def test_656_tampa_is_known_eastern(self):
+        zones = [zone.key for zone in timezones_for_e164("+16565550100")]
+        self.assertEqual(zones, ["America/New_York"])
+        decision = _evaluate(to_numbers=["+16565550100"], now_utc=GOOD_UTC)
+        self.assertTrue(decision.allowed)
+
+    def test_483_alabama_overlay_zones(self):
+        zones = {zone.key for zone in timezones_for_e164("+14835550100")}
+        self.assertEqual(zones, {"America/Chicago", "America/New_York"})
+        decision = _evaluate(to_numbers=["+14835550100"], now_utc=GOOD_UTC)
+        self.assertTrue(decision.allowed)
+
 
 class EnvSourceTests(unittest.TestCase):
     def test_missing_company_id_refuses(self):
@@ -438,6 +618,84 @@ class EnvSourceTests(unittest.TestCase):
         self.assertFalse(blocked.allowed)
         self.assertIn("local opt-out", blocked.reasons[0])
         self.assertTrue(allowed.allowed)
+
+
+class EmergencyOptOutSourceTests(unittest.TestCase):
+    """The gate's local source reads emergency markers strictly: an existing
+    but unreadable or malformed marker fails closed (unlike the best-effort
+    is_emergency_opted_out used elsewhere)."""
+
+    def setUp(self):
+        sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear()
+        self.addCleanup(sms_approval._EMERGENCY_OPT_OUT_MEMORY.clear)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = Path(self._tmp.name) / "approvals.db"
+        conn = sms_approval.init_db(path=self.db)
+        conn.close()
+        self.config_path = Path(self._tmp.name) / "send-gate.json"
+        self.config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+
+    def _env(self, marker):
+        return {
+            "DIALPAD_SEND_GATE_CONFIG": str(self.config_path),
+            "DIALPAD_COMPANY_ID": "1",
+            "DIALPAD_API_KEY": "k",
+            "DIALPAD_SMS_APPROVAL_DB": str(self.db),
+            "DIALPAD_SMS_APPROVAL_EMERGENCY_PATH": str(marker),
+        }
+
+    def _evaluate_env(self, env):
+        with patch.dict("os.environ", env, clear=False), \
+                patch.object(send_gate, "fetch_company_opt_outs", return_value=set()):
+            return send_gate.evaluate_from_environment(
+                caller="team-scott",
+                from_number="+14159065785",
+                to_numbers=[PACIFIC_TO],
+                now_utc=GOOD_UTC,
+                env=env,
+            )
+
+    def test_marker_path_is_a_directory_refuses(self):
+        marker = Path(self._tmp.name) / "emergency-dir"
+        marker.mkdir()
+        decision = self._evaluate_env(self._env(marker))
+        self.assertFalse(decision.allowed)
+        self.assertFalse(decision.retryable)
+        self.assertIn("opt-out source unavailable", decision.reasons[0])
+
+    def test_marker_corrupt_line_refuses(self):
+        marker = Path(self._tmp.name) / "emergency.jsonl"
+        marker.write_text(
+            json.dumps({"customer_number_normalized": "2125550100"}) + "\n"
+            + "{not json\n",
+            encoding="utf-8",
+        )
+        decision = self._evaluate_env(self._env(marker))
+        self.assertFalse(decision.allowed)
+        self.assertIn("opt-out source unavailable", decision.reasons[0])
+
+    def test_marker_opted_out_recipient_refuses(self):
+        marker = Path(self._tmp.name) / "emergency.jsonl"
+        marker.write_text(
+            json.dumps({"customer_number_normalized": "3105550100"}) + "\n",
+            encoding="utf-8",
+        )
+        decision = self._evaluate_env(self._env(marker))
+        self.assertFalse(decision.allowed)
+        self.assertIn("local opt-out", decision.reasons[0])
+
+    def test_missing_marker_is_fine(self):
+        marker = Path(self._tmp.name) / "does-not-exist.jsonl"
+        decision = self._evaluate_env(self._env(marker))
+        self.assertTrue(decision.allowed)
+
+    def test_missing_approval_db_refuses_every_send(self):
+        env = self._env(Path(self._tmp.name) / "absent-marker.jsonl")
+        env["DIALPAD_SMS_APPROVAL_DB"] = str(Path(self._tmp.name) / "does-not-exist.db")
+        decision = self._evaluate_env(env)
+        self.assertFalse(decision.allowed)
+        self.assertIn("opt-out", decision.reasons[0])
 
 
 class WrapperIntegrationTests(unittest.TestCase):
@@ -528,24 +786,32 @@ class WrapperIntegrationTests(unittest.TestCase):
 
     def test_dry_run_evaluates_gate_without_send_or_log_write(self):
         wrapper = self._load_wrapper()
+        ledger = Path(self._tmp.name) / "receipts.jsonl"
         with patch.object(wrapper, "require_generated_cli"), \
                 patch.object(wrapper, "require_api_key") as require_key, \
                 patch.object(wrapper, "run_generated_json") as run_json, \
-                patch.object(wrapper, "record_outbound_observation") as observe:
-            code, out, err = self._run_wrapper(wrapper, [
-                "bin/send_sms.py",
-                "--to", PACIFIC_TO,
-                "--from", "+14159065785",
-                "--caller", "team-scott",
-                "--message", "hi",
-                "--dry-run",
-                "--json",
-            ])
+                patch.object(wrapper, "record_outbound_observation") as observe, \
+                patch.object(wrapper, "append_sms_send_receipt") as receipt:
+            code, out, err = self._run_wrapper(
+                wrapper,
+                [
+                    "bin/send_sms.py",
+                    "--to", PACIFIC_TO,
+                    "--from", "+14159065785",
+                    "--caller", "team-scott",
+                    "--message", "hi",
+                    "--dry-run",
+                    "--json",
+                ],
+                env_extra={"DIALPAD_SMS_RECEIPT_LEDGER": str(ledger)},
+            )
 
         self.assertEqual(code, 0)
         require_key.assert_not_called()
         run_json.assert_not_called()
         observe.assert_not_called()
+        receipt.assert_not_called()
+        self.assertFalse(ledger.exists())
         parsed = json.loads(out)
         self.assertTrue(parsed["ok"])
         self.assertEqual(parsed["data"]["mode"], "dry_run")
@@ -611,6 +877,50 @@ class ScriptsSendSmsGateTests(unittest.TestCase):
         provider_send.assert_not_called()
         parsed = json.loads(stdout.getvalue())
         self.assertEqual(parsed["error"]["code"], "send_gate_refused")
+
+    def test_direct_script_dry_run_json_refusal_carries_error_code_and_report(self):
+        module = self._load_script_module()
+        env = {
+            "DIALPAD_SEND_GATE_CONFIG": self.config_path,
+            "DIALPAD_API_KEY": "k",
+        }
+        argv = [
+            "scripts/send_sms.py",
+            "--to", PACIFIC_TO,
+            "--from", "+14159065785",
+            "--caller", "unknown-caller",
+            "--message", "hi",
+            "--dry-run",
+            "--json",
+        ]
+        with patch.dict("os.environ", env, clear=False), \
+                patch.object(module, "send_sms") as provider_send, \
+                patch.object(sys, "argv", argv), \
+                self.assertRaises(SystemExit) as ctx, \
+                redirect_stdout(io.StringIO()) as stdout, \
+                redirect_stderr(io.StringIO()):
+            module.main()
+        self.assertEqual(ctx.exception.code, 2)
+        provider_send.assert_not_called()
+        parsed = json.loads(stdout.getvalue())
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["error"]["code"], "send_gate_refused")
+        self.assertEqual(parsed["mode"], "dry_run")
+        self.assertIn("send_gate", parsed)
+
+    def test_direct_script_from_is_required(self):
+        module = self._load_script_module()
+        argv = [
+            "scripts/send_sms.py",
+            "--to", PACIFIC_TO,
+            "--caller", "team-scott",
+            "--message", "hi",
+        ]
+        with patch.object(sys, "argv", argv), \
+                self.assertRaises(SystemExit) as ctx, \
+                redirect_stderr(io.StringIO()):
+            module.main()
+        self.assertEqual(ctx.exception.code, 2)
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -706,6 +1016,56 @@ class GroupIntroGateTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(run_json.call_count, 2)
+
+    def test_group_intro_records_each_confirmed_send_to_shared_log(self):
+        with patch.object(send_group_intro, "require_generated_cli"), \
+                patch.object(send_group_intro, "require_api_key"), \
+                patch.object(
+                    send_group_intro,
+                    "record_outbound_observation",
+                    return_value={"memory_sync": "disabled"},
+                ) as observe, \
+                patch.object(
+                    send_group_intro,
+                    "run_generated_json",
+                    side_effect=[
+                        {"id": "msg-p", "message_status": "pending"},
+                        {"id": "msg-r", "message_status": "pending"},
+                    ],
+                ) as run_json:
+            code, out, err = self._run_intro(self._argv("--caller", "team-scott", "--json"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(run_json.call_count, 2)
+        self.assertEqual(observe.call_count, 2)
+        calls = observe.call_args_list
+        self.assertEqual(calls[0].kwargs["to_numbers"], [PACIFIC_TO])
+        self.assertEqual(calls[1].kwargs["to_numbers"], [EASTERN_TO])
+        self.assertTrue(all(c.kwargs["from_number"] == "+14159065785" for c in calls))
+
+    def test_group_intro_partial_success_records_confirmed_leg_only(self):
+        with patch.object(send_group_intro, "require_generated_cli"), \
+                patch.object(send_group_intro, "require_api_key"), \
+                patch.object(
+                    send_group_intro,
+                    "record_outbound_observation",
+                    return_value={"memory_sync": "disabled"},
+                ) as observe, \
+                patch.object(
+                    send_group_intro,
+                    "run_generated_json",
+                    side_effect=[
+                        {"id": "msg-p", "message_status": "pending"},
+                        WrapperError("provider boom", code="upstream_error", retryable=True),
+                    ],
+                ):
+            code, out, err = self._run_intro(self._argv("--caller", "team-scott", "--json"))
+
+        self.assertEqual(code, 2)
+        self.assertEqual(observe.call_count, 1)
+        self.assertEqual(observe.call_args_list[0].kwargs["to_numbers"], [PACIFIC_TO])
+        parsed = json.loads(out)
+        self.assertEqual(parsed["error"]["code"], "partial_success")
 
     def test_group_intro_rejects_another_teammates_line(self):
         with patch.object(send_group_intro, "require_generated_cli"), \

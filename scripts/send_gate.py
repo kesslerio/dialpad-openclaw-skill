@@ -9,8 +9,8 @@ closed:
 2. Opt-out union: the Dialpad company opt-out list
    (``GET /api/v2/company/{id}/smsoptout?opt_out_state=opted_out`` with cursor
    pagination, company id from ``DIALPAD_COMPANY_ID``) UNION the local
-   ``sms_approval_opt_outs`` table plus the emergency opt-out markers handled
-   by ``sms_approval.is_opted_out``. An unreadable source refuses.
+   ``sms_approval_opt_outs`` table plus the emergency opt-out markers (read
+   strictly). An unreadable or malformed source refuses.
 3. Recipient-local send window 08:00 <= local time < 21:00, in EVERY timezone
    the recipient's NANP area code can cover (vendored table in
    ``nanp_area_code_timezones``; unknown area code or non-NANP refuses).
@@ -158,12 +158,17 @@ def validate_config(config: Any) -> dict[str, Any]:
     for caller_id, entry in callers.items():
         if not isinstance(entry, dict):
             raise SendGateError(f"send gate config: callers.{caller_id} must be an object")
-        for line_name in entry.get("shared_lines", []):
-            if line_name not in shared_lines:
+        lines = entry.get("shared_lines", [])
+        if not isinstance(lines, list):
+            raise SendGateError(f"send gate config: callers.{caller_id}.shared_lines must be a list")
+        for line_name in lines:
+            if not isinstance(line_name, str) or line_name not in shared_lines:
                 raise SendGateError(
                     f"send gate config: callers.{caller_id}.shared_lines names unknown line {line_name!r}"
                 )
         acts_for = entry.get("acts_for")
+        if acts_for is not None and not isinstance(acts_for, str):
+            raise SendGateError(f"send gate config: callers.{caller_id}.acts_for must be a teammate name")
         if acts_for is not None and acts_for not in teammates:
             raise SendGateError(
                 f"send gate config: callers.{caller_id}.acts_for names unknown teammate {acts_for!r}"
@@ -194,7 +199,20 @@ def load_config_from_env(env: Mapping[str, str] | None = None) -> dict[str, Any]
     return load_config(raw)
 
 
-def _normalized_allowed_lines(config: dict[str, Any], caller_entry: dict[str, Any]) -> set[str]:
+def _canonical_sender(number: Any) -> str:
+    """Strict sender form for the allowlist: exact match, except that a bare
+    10-digit or 11-digit 1-prefixed NANP national form reads as +1....
+    """
+    text = str(number or "").strip()
+    if text.isdigit():
+        if len(text) == 10:
+            return "+1" + text
+        if len(text) == 11 and text.startswith("1"):
+            return "+1" + text[1:]
+    return text
+
+
+def _allowed_lines(config: dict[str, Any], caller_entry: dict[str, Any]) -> set[str]:
     numbers: list[str] = []
     shared_lines = config.get("shared_lines") or {}
     for name in caller_entry.get("shared_lines") or []:
@@ -203,11 +221,7 @@ def _normalized_allowed_lines(config: dict[str, Any], caller_entry: dict[str, An
     if acts_for:
         numbers.append((config.get("teammates") or {}).get(acts_for, ""))
     numbers.extend(caller_entry.get("extra_allowed_lines") or [])
-    return {
-        normalized
-        for number in numbers
-        if (normalized := sms_approval.normalize_phone_number(number))
-    }
+    return {_canonical_sender(number) for number in numbers if number}
 
 
 # --------------------------------------------------------------------------
@@ -256,17 +270,28 @@ def fetch_company_opt_outs(
             raise OptOutSourceError(f"dialpad opt-out list unreachable: {exc}") from exc
         except (ValueError, UnicodeDecodeError) as exc:
             raise OptOutSourceError("dialpad opt-out list malformed body") from exc
-        if not isinstance(body, dict) or not isinstance(body.get("items") or [], list):
+        if not isinstance(body, dict) or "items" not in body:
             raise OptOutSourceError("dialpad opt-out list malformed body")
-        for item in body.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("opt_out_state") != "opted_out":
+        items = body["items"]
+        cursor = body.get("cursor") or None
+        if items is None:
+            if cursor is not None:
+                raise OptOutSourceError("dialpad opt-out list malformed body")
+            items = []
+        if not isinstance(items, list):
+            raise OptOutSourceError("dialpad opt-out list malformed body")
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or "opt_out_state" not in item
+                or "external_endpoint" not in item
+            ):
+                raise OptOutSourceError("dialpad opt-out list malformed body")
+            if item["opt_out_state"] != "opted_out":
                 continue
             normalized = sms_approval.normalize_phone_number(item.get("external_endpoint"))
             if normalized:
                 opted_out.add(normalized)
-        cursor = body.get("cursor") or None
         if cursor is None:
             return opted_out
         if cursor in seen_cursors:
@@ -324,12 +349,55 @@ def env_opt_out_sources(env: Mapping[str, str] | None = None) -> OptOutSources:
         conn_cache["conn"] = conn
         return conn
 
+    def _emergency_opted_out(normalized: str) -> bool:
+        """Strict read of the emergency opt-out markers.
+
+        Unlike sms_approval.is_emergency_opted_out (which other callers rely on
+        staying best-effort), a marker file that exists but is unreadable or
+        malformed raises OptOutSourceError so the send fails closed. A missing
+        marker file is fine.
+        """
+        if normalized in sms_approval._EMERGENCY_OPT_OUT_MEMORY:
+            return True
+        for path in sms_approval.emergency_opt_out_paths():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeError) as exc:
+                raise OptOutSourceError(
+                    f"emergency opt-out markers unreadable at {path}: {exc}"
+                ) from exc
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise OptOutSourceError(
+                        f"emergency opt-out marker malformed in {path}"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise OptOutSourceError(f"emergency opt-out marker malformed in {path}")
+                if payload.get("customer_number_normalized") == normalized:
+                    return True
+        return False
+
     def local_opt_out(number: str) -> bool:
+        normalized = sms_approval.normalize_phone_number(number)
+        if not normalized:
+            return False
+        if _emergency_opted_out(normalized):
+            return True
         conn = _approval_conn()
         try:
-            return sms_approval.is_opted_out(conn, number)
+            row = conn.execute(
+                "SELECT 1 FROM sms_approval_opt_outs WHERE customer_number_normalized = ?",
+                (normalized,),
+            ).fetchone()
         except sqlite3.Error as exc:
             raise OptOutSourceError(f"sms approval opt-out lookup failed: {exc}") from exc
+        return row is not None
 
     return OptOutSources(company_opt_outs=company_opt_outs, local_opt_out=local_opt_out)
 
@@ -390,9 +458,9 @@ def evaluate_send(
         )
     acting_for = entry.get("acts_for")
 
-    normalized_from = sms_approval.normalize_phone_number(from_number)
-    allowed_lines = _normalized_allowed_lines(config, entry)
-    if not normalized_from or normalized_from not in allowed_lines:
+    sender = _canonical_sender(from_number)
+    allowed_lines = _allowed_lines(config, entry)
+    if sender not in allowed_lines:
         return _refuse(
             [
                 f"send gate: from number {from_number or '<unset>'!r} is not an approved "
@@ -485,12 +553,13 @@ def evaluate_send(
             details=details,
         )
 
-    retry_after = _next_pass_seconds(now_utc, all_zones) if time_reasons else None
+    retryable = bool(time_reasons) and not hard_reasons
+    retry_after = _next_pass_seconds(now_utc, all_zones) if retryable else None
     return _refuse(
         reasons,
         caller=caller_id,
         acting_for=acting_for,
-        retryable=bool(time_reasons) and not hard_reasons,
+        retryable=retryable,
         retry_after_seconds=retry_after,
         details=details,
     )
@@ -515,6 +584,11 @@ def evaluate_from_environment(
         config = load_config_from_env(environ)
     except SendGateError as exc:
         return _refuse([f"send gate: {exc}"], caller=(caller or "").strip() or None)
+    except Exception as exc:  # noqa: BLE001 - any config failure fails closed.
+        return _refuse(
+            [f"send gate: config unavailable: {exc}"],
+            caller=(caller or "").strip() or None,
+        )
     sources = opt_out_sources or env_opt_out_sources(environ)
     return evaluate_send(
         caller=caller,

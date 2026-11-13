@@ -6117,7 +6117,8 @@ class DialpadWebhookHandler(BaseHTTPRequestHandler):
             }:
                 self.send_json_response(422, result)
             else:
-                self.send_json_response(500, result)
+                print(f"⚠️  delivery_status update failed: {result.get('error', 'unknown')}")
+                self.send_json_response(500, {"error": "internal error"})
             return
 
         timestamp = datetime.now().isoformat()

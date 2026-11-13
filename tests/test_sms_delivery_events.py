@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 import create_sms_webhook
 import sms_sqlite
 import webhook_server
+import webhook_sqlite
 from webhook_sqlite import classify_sms_webhook_event, handle_sms_webhook
 
 
@@ -293,6 +294,40 @@ class SmsDeliveryEventTests(unittest.TestCase):
         self.assertTrue(response["updated"])
         claim.assert_not_called()
         post_ack.assert_not_called()
+
+    def test_delivery_status_500_body_hides_exception_text(self) -> None:
+        class _BoomLog:
+            def update_message_delivery(self, _data):
+                raise RuntimeError(
+                    "sqlite3.OperationalError: no such table: messages (/private/sms.db)"
+                )
+
+        payload = {
+            "id": 12345,
+            "event_timestamp": 1_760_000_000_000,
+            "message_status": "delivered",
+        }
+        raw = json.dumps(payload).encode("utf-8")
+        handler = object.__new__(webhook_server.DialpadWebhookHandler)
+        handler.headers = {"Content-Length": str(len(raw))}
+        handler.rfile = io.BytesIO(raw)
+        handler.wfile = io.BytesIO()
+        handler.client_address = ("127.0.0.1", 12345)
+        status = {"code": None}
+        handler.send_response = lambda code: status.__setitem__("code", code)
+        handler.send_header = lambda *_args: None
+        handler.end_headers = lambda: None
+        handler.send_error = lambda code, *_args: status.__setitem__("code", code)
+
+        with patch.object(webhook_server, "verify_webhook_auth", return_value=(True, "test")), \
+                patch.object(webhook_sqlite, "InteractionLog", _BoomLog):
+            handler.handle_webhook()
+
+        self.assertEqual(status["code"], 500)
+        body = handler.wfile.getvalue().decode("utf-8")
+        self.assertEqual(json.loads(body), {"error": "internal error"})
+        self.assertNotIn("no such table", body)
+        self.assertNotIn("/private/sms.db", body)
 
     def test_store_endpoint_rejects_unauthenticated_receipt_mutation(self) -> None:
         now_ms = int(time.time() * 1000)

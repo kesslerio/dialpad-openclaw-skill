@@ -10,7 +10,7 @@ EnvironmentFile=%h/.config/systemd/user/secrets.conf
 EnvironmentFile=%h/projects/skills/work/dialpad/.env
 # Fail before Python starts if the private bearer boundary is missing.
 ExecStartPre=/bin/sh -c 'test -n "$DIALPAD_LOG_TOKEN"'
-# Keep this listener separate from dialpad-webhook.service on 0.0.0.0:8888.
+# Keep this listener separate from dialpad-webhook.service (DIALPAD_BIND_HOSTS, default 127.0.0.1:8888).
 Environment=DIALPAD_LOG_BIND=100.85.254.62
 Environment=DIALPAD_LOG_PORT=18887
 Environment=DIALPAD_SMS_DB=/home/art/niemand/logs/sms.db

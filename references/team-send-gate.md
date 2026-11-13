@@ -155,6 +155,119 @@ host that already serves the team knowledge brain; no new tunnel and no
 Shared-log reads go through the existing Interaction Log API with a
 read-scoped token.
 
+## Phase 3: team MCP connector (built on the host, edge pending)
+
+`scripts/team_mcp_server.py` is a stdlib-only MCP server (streamable HTTP,
+single `POST /mcp` JSON-RPC 2.0 endpoint, `application/json` responses — no
+SSE) bound to loopback next to the send API (`DIALPAD_TEAM_MCP_BIND`, default
+`127.0.0.1`; `DIALPAD_TEAM_MCP_PORT`, default `18890`; any other bind is
+refused). Each teammate's assistant connects to it like any other remote MCP
+connector. It implements `initialize` (negotiates `2025-06-18`/`2025-03-26`),
+`notifications/initialized` (202), `ping`, `tools/list`, and `tools/call`;
+`GET /mcp` and other methods return 405, batch bodies are rejected, and a
+non-empty `Origin` must be in `allowed_origins`. `GET /health` requires the
+same auth and returns only the mapped caller. The host Python carries no
+third-party packages, so JWT verification is implemented over stdlib
+`pow()`/`hmac` — no SDK, no `cryptography`, no `jwt`.
+
+Identity is resolved per request, never from request parameters:
+
+- `Cf-Access-Jwt-Assertion` present → verified as a Cloudflare Access JWT:
+  RS256 only, `kid` resolved against the team-domain JWKS
+  (`https://<team_domain>/cdn-cgi/access/certs`, cached with TTL, one
+  refetch per minute on unknown `kid`), RSASSA-PKCS1-v1_5/SHA-256 verified
+  by rebuilding the full EMSA block and comparing with `hmac.compare_digest`,
+  `iss`/`aud`/`exp`/`nbf`/`iat` checked (60 s leeway). The `email` claim maps
+  to a caller via `email_callers`; unknown email → 403. Any JWT failure is
+  401 and never falls back to bearer; a JWT header with `access` unset is
+  refused too.
+- Otherwise `Authorization: Bearer` resolves through the existing send-api
+  token map (`DIALPAD_SEND_API_TOKENS`, SHA-256 digests, fail-closed mtime
+  reload) when `allow_bearer_fallback` is true.
+- Only `team-*` callers with an `acts_for` line in the gate config are
+  mappable from the network — `operator` and bare shared-line callers can
+  never be.
+
+Config: `DIALPAD_TEAM_MCP_CONFIG` (JSON, mode 0600/0640 only, fail-closed,
+reloaded on mtime change) — see `references/team-mcp.example.json`:
+
+```json
+{"access": {"team_domain": "<team>.cloudflareaccess.com", "aud": "<aud tag>"},
+ "email_callers": {"name@example.com": "team-scott"},
+ "allow_bearer_fallback": true,
+ "allowed_origins": [],
+ "alerts": {"store": "~/.config/dialpad/team-alerts.json",
+            "allowed_url_hosts": ["example.com"],
+            "callers": {"team-scott": {"shared_lines": ["office"]}}}}
+```
+
+Allowed lines per caller come straight from the send-gate config
+(`send_gate.allowed_lines_for_caller`): the caller's shared lines plus its
+`acts_for` teammate line. The support line `+14159917155` is stripped from
+every set everywhere.
+
+Tools (each with `additionalProperties: false`; unknown args error):
+
+- `send_sms(to, message, from?, dry_run?)` — `from` defaults to the caller's
+  own `acts_for` line; the support line is refused as `to` or `from` before
+  anything runs. Sends go through the exact gated path the send API uses —
+  `send_api_server.execute_gated_send` → `bin/send_sms.py --message-stdin
+  --json` with `--caller <mapped>` and `DIALPAD_SEND_CALLER` scrubbed — so
+  opt-outs, send window, minute rule, and line allowlists are enforced
+  unchanged. Gate refusals and unknown outcomes surface as tool errors with
+  the same codes (`send_gate_refused`, `send_outcome_unknown`, …). Message
+  text never reaches argv or logs.
+- `list_conversations(limit?, since?)` — read-only SQLite on
+  `DIALPAD_SMS_DB`, grouped per (`our_line`, contact) with last activity,
+  direction, preview, and unread counts, restricted to the caller's allowed
+  lines.
+- `read_thread(contact, limit?, line?)` — messages with a contact on the
+  caller's allowed lines; `line` narrows to one allowed line and a
+  non-allowed line is an error, not an empty result.
+- `set_sms_alert_url(url, key)` — registers this caller's alert webhook:
+  HTTPS only (loopback HTTP for tests), host must match
+  `alerts.allowed_url_hosts` when configured, no IP literals or userinfo.
+  Stored mode 0600 in the alerts store; the key is never echoed. Empty `url`
+  clears the registration. The response lists which lines will alert.
+
+Inbound SMS alerts (`scripts/team_alerts.py`, wired in
+`scripts/webhook_server.py` next to the existing `ops_wake.notify_sms_event`)
+forward a minimal wake payload — event kind, own line, message id, hook URL —
+never message bodies or customer numbers; the receiving assistant calls
+`read_thread` for content. Forwarding reuses ops-wake's dedupe claim
+(`team-alert:<caller>:` namespace in its own dedupe DB), its minute/hour
+rate caps, and its daemon-thread handoff. An inbound SMS on line `L` forwards to each registered
+caller whose alert lines contain `L`, where alert lines default to the
+caller's own `acts_for` line and grow by `alerts.callers.<caller>.shared_lines`
+(each entry must already be in the caller's allowed set). The support line
+never forwards, another teammate's line never forwards, and stored URLs are
+re-validated at forward time. The webhook service needs the same
+`DIALPAD_TEAM_MCP_CONFIG` (and `DIALPAD_SEND_GATE_CONFIG`) in its
+environment; alert forwarding never raises and never delays the ACK.
+
+Deploy: `systemd/dialpad-team-mcp.service` (modeled on
+`dialpad-send-api.service`, same hardening, `UnsetEnvironment=DIALPAD_SEND_CALLER`)
+plus `systemd/dialpad-team-mcp.service.d/10-host.conf.example`. The webhook
+service's own drop-in must export `DIALPAD_TEAM_MCP_CONFIG` (and
+`DIALPAD_SEND_GATE_CONFIG`, already set for the gate) so inbound forwarding
+can load registrations.
+
+Edge (pending, set up by the Cloudflare account owner; nothing is created
+from this repo). Same existing team tunnel as Phase 2, separate Access app —
+not the team-brain app and not the send-api app, so no token is shared:
+
+1. Route `team-dialpad.shapescale.com` → `http://127.0.0.1:18890` on the
+   existing team tunnel.
+2. Create its own Access application for that hostname with **Managed OAuth**
+   (Rippling IdP) so teammates sign in with their Rippling identity;
+   Cloudflare puts the signed JWT in `Cf-Access-Jwt-Assertion`.
+3. Set the app's `aud` tag and the team domain in `access` in
+   `DIALPAD_TEAM_MCP_CONFIG`; map each teammate's IdP email to their
+   `team-*` caller in `email_callers`.
+4. Do not rely solely on cloudflared: the origin verifies the JWT itself,
+   so a request that somehow reaches the service without a valid Access
+   JWT is refused there.
+
 ## Owner actions
 
 The caller-to-line mapping is decided in `references/send-gate.example.json`
@@ -184,3 +297,14 @@ be sent by that teammate's own `team-*` caller.
 - [ ] Phase 2 edge: add the hostname route on the existing team tunnel,
       the Access app, and one service token per assistant (Cloudflare
       account owner).
+- [ ] Create `DIALPAD_TEAM_MCP_CONFIG` (mode 0600) from
+      `references/team-mcp.example.json` with the real team domain, AUD tag,
+      email map, and alert URL suffixes.
+- [ ] Install `systemd/dialpad-team-mcp.service` plus the host drop-in and
+      start the user unit.
+- [ ] Export `DIALPAD_TEAM_MCP_CONFIG` in the webhook service's drop-in so
+      inbound alert forwarding can load registrations.
+- [ ] Phase 3 edge: route `team-dialpad.shapescale.com` to
+      `http://127.0.0.1:18890` on the existing team tunnel and create a
+      separate Access app with Managed OAuth (Rippling IdP) — the origin
+      still verifies the JWT itself (Cloudflare account owner).

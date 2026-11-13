@@ -15,6 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import send_gate
 import sms_approval
 
 SEND_SMS_SPEC = importlib.util.spec_from_file_location(
@@ -41,6 +42,16 @@ class SmsApprovalTests(unittest.TestCase):
         self.addCleanup(self._restore_emergency_path)
         self.conn = sms_approval.init_db()
         self.addCleanup(self.conn.close)
+        # approve_draft now sends through the send gate; stub its single patch
+        # point (the same one the direct-send tests use) so send-path tests
+        # exercise the approval flow, not the gate.
+        self._send_gate_patch = patch.object(
+            send_gate,
+            "evaluate_from_environment",
+            return_value=send_gate.Decision(allowed=True),
+        )
+        self._send_gate_mock = self._send_gate_patch.start()
+        self.addCleanup(self._send_gate_patch.stop)
 
     def _restore_db_path(self):
         sms_approval.DB_PATH = self.original_db_path
@@ -107,6 +118,129 @@ class SmsApprovalTests(unittest.TestCase):
             sms_approval.STATUS_FAILED,
         )
         urlopen.assert_not_called()
+
+    def test_send_gate_refusal_makes_no_provider_call_and_keeps_draft_retryable(self):
+        draft = self._draft()
+        send_calls = []
+        self._send_gate_mock.return_value = send_gate.Decision(
+            allowed=False,
+            reasons=[
+                "send gate: from number '+14155550140' is not an approved "
+                "line for caller 'operator'"
+            ],
+        )
+
+        result = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *_args, **_kwargs: send_calls.append(True) or {"id": "sms-1"},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], "send_gate_refused")
+        self.assertEqual(result["code"], "send_gate_refused")
+        self.assertIn("not an approved line", result["reason"])
+        self.assertFalse(result["send_gate"]["allowed"])
+        self.assertEqual(send_calls, [])
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+
+    def test_send_gate_window_refusal_carries_retry_hint(self):
+        draft = self._draft()
+        self._send_gate_mock.return_value = send_gate.Decision(
+            allowed=False,
+            reasons=["recipient +15125550100 outside send window: 22:30 local (America/Chicago)"],
+            retryable=True,
+            retry_after_seconds=1234,
+        )
+
+        result = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *_args, **_kwargs: self.fail("send should not run"),
+        )
+
+        self.assertEqual(result["status"], "send_gate_refused")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["retry_after_seconds"], 1234)
+        self.assertTrue(result["send_gate"]["retryable"])
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
+
+    def test_send_gate_allow_sends_exactly_once_with_draft_lines(self):
+        draft = self._draft()
+        send_calls = []
+
+        result = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *args, **kwargs: send_calls.append((args, kwargs)) or {"id": "sms-1"},
+        )
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(send_calls), 1)
+        self._send_gate_mock.assert_called_once()
+        gate_kwargs = self._send_gate_mock.call_args.kwargs
+        self.assertEqual(gate_kwargs["from_number"], "+14155550140")
+        self.assertEqual(gate_kwargs["to_numbers"], ["+15125550100"])
+
+    def test_send_gate_evaluate_injection_keeps_send_func_seam(self):
+        draft = self._draft()
+        gate_calls = []
+        send_calls = []
+
+        result = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *args, **kwargs: send_calls.append(True) or {"id": "sms-1"},
+            send_gate_evaluate=lambda **kwargs: gate_calls.append(kwargs)
+            or send_gate.Decision(allowed=True),
+        )
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(
+            gate_calls,
+            [{"from_number": "+14155550140", "to_numbers": ["+15125550100"]}],
+        )
+        self.assertEqual(len(send_calls), 1)
+
+    def test_send_gate_refusal_on_risky_confirm_keeps_risk_pending(self):
+        draft = self._draft(
+            risk_state=sms_approval.RISK_RISKY,
+            risk_reason="customer asked for a real person",
+        )
+
+        first = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            send_func=lambda *_args, **_kwargs: self.fail("first step should not send"),
+        )
+        self.assertEqual(first["status"], "risky_confirmation_required")
+        self._send_gate_mock.assert_not_called()
+
+        self._send_gate_mock.return_value = send_gate.Decision(
+            allowed=False,
+            reasons=["send gate: from number '+14155550140' is not an approved line"],
+        )
+        second = sms_approval.approve_draft(
+            self.conn,
+            draft_id=draft["draft_id"],
+            actor_id="12345",
+            action=sms_approval.ACTION_CONFIRM_RISK,
+            send_func=lambda *_args, **_kwargs: self.fail("send should not run"),
+        )
+
+        self.assertEqual(second["status"], "send_gate_refused")
+        self.assertFalse(second["sent"])
+        stored = sms_approval.get_draft(self.conn, draft["draft_id"])
+        self.assertEqual(stored["status"], sms_approval.STATUS_RISK_PENDING)
+        self.assertTrue(stored["first_confirmed_at_ms"])
 
     def test_stale_draft_does_not_send(self):
         draft = self._draft()
@@ -847,6 +981,67 @@ class SmsApprovalTests(unittest.TestCase):
         self.assertEqual(approve_result.returncode, 2)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["message"], "blocked_actor")
+
+    def test_approve_draft_cli_gate_refusal_reports_send_gate_refused(self):
+        db_path = Path(self.temp_dir.name) / "cli-approvals.db"
+        env = {
+            **os.environ,
+            "DIALPAD_SMS_APPROVAL_DB": str(db_path),
+            "DIALPAD_SMS_APPROVAL_TOKEN": "test-token",
+        }
+        # No gate config in this environment: the approve path must refuse
+        # before any provider call and report send_gate_refused.
+        env.pop("DIALPAD_SEND_GATE_CONFIG", None)
+        env.pop("DIALPAD_SEND_CALLER", None)
+        create_result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "bin" / "create_sms_draft.py"),
+                "--thread-key",
+                "cli-thread",
+                "--to",
+                "+15125550100",
+                "--from",
+                "+14155550140",
+                "--message",
+                "Exact CLI draft.",
+                "--json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        draft_id = json.loads(create_result.stdout)["data"]["draft"]["draft_id"]
+
+        approve_result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "bin" / "approve_sms_draft.py"),
+                draft_id,
+                "--actor-id",
+                "12345",
+                "--approval-token",
+                "test-token",
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        payload = json.loads(approve_result.stdout)
+        self.assertEqual(approve_result.returncode, 2)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "send_gate_refused")
+
+        conn = sms_approval.init_db(path=db_path)
+        try:
+            stored = sms_approval.get_draft(conn, draft_id)
+        finally:
+            conn.close()
+        self.assertEqual(stored["status"], sms_approval.STATUS_PENDING)
 
 
 if __name__ == "__main__":

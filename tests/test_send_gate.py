@@ -570,6 +570,164 @@ class AreaCodeTableTests(unittest.TestCase):
         self.assertTrue(decision.allowed)
 
 
+class ShippedExampleConfigTests(unittest.TestCase):
+    """references/send-gate.example.json is the decided caller-to-line
+    mapping: it must load and validate as shipped."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = send_gate.load_config(ROOT / "references" / "send-gate.example.json")
+
+    def _eval(self, caller, from_number, now_utc=GOOD_UTC):
+        return send_gate.evaluate_send(
+            caller=caller,
+            from_number=from_number,
+            to_numbers=[PACIFIC_TO],
+            now_utc=now_utc,
+            opt_out_sources=_sources(),
+            config=self.config,
+        )
+
+    def test_example_config_loads_and_validates(self):
+        config = send_gate.load_config(ROOT / "references" / "send-gate.example.json")
+        self.assertEqual(config["shared_lines"]["office"], "+14159065785")
+        self.assertEqual(config["shared_lines"]["sales"], "+14155201316")
+        self.assertEqual(
+            set(config["callers"]),
+            {"team-scott", "team-lilla", "team-alexandre", "operator"},
+        )
+
+    def test_example_team_callers_use_shared_and_own_lines(self):
+        own_lines = {
+            "team-scott": "+14152230323",
+            "team-lilla": "+14158701945",
+            "team-alexandre": "+14153291662",
+        }
+        for caller, own_line in own_lines.items():
+            for line in (own_line, "+14159065785", "+14155201316"):
+                with self.subTest(caller=caller, line=line):
+                    self.assertTrue(self._eval(caller, line).allowed)
+
+    def test_example_team_callers_refuse_other_teammate_and_extra_lines(self):
+        own_lines = {
+            "team-scott": "+14152230323",
+            "team-lilla": "+14158701945",
+            "team-alexandre": "+14153291662",
+        }
+        for caller, own_line in own_lines.items():
+            refused = [line for line in own_lines.values() if line != own_line]
+            refused.append("+14153602954")
+            for line in refused:
+                with self.subTest(caller=caller, line=line):
+                    decision = self._eval(caller, line)
+                    self.assertFalse(decision.allowed)
+                    self.assertFalse(decision.retryable)
+
+    def test_example_operator_uses_shared_and_extra_lines(self):
+        for line in ("+14159065785", "+14155201316", "+14153602954"):
+            with self.subTest(line=line):
+                self.assertTrue(self._eval("operator", line).allowed)
+
+    def test_example_operator_refused_teammate_lines(self):
+        for line in ("+14152230323", "+14158701945", "+14153291662"):
+            with self.subTest(line=line):
+                self.assertFalse(self._eval("operator", line).allowed)
+
+    def test_example_operator_stays_time_restricted(self):
+        # The decided defaults omit time_restricted, so the window and minute
+        # rules apply to the operator caller too.
+        self.assertNotIn("time_restricted", self.config["callers"]["operator"])
+        # 2026-01-16 05:01 UTC = 21:01 Pacific: outside the window.
+        outside = self._eval(
+            "operator",
+            "+14159065785",
+            now_utc=datetime(2026, 1, 16, 5, 1, 0, tzinfo=timezone.utc),
+        )
+        self.assertFalse(outside.allowed)
+        self.assertTrue(outside.retryable)
+        # Minute :15 is blocked even inside the window.
+        at_15 = self._eval(
+            "operator",
+            "+14159065785",
+            now_utc=datetime(2026, 1, 15, 17, 15, 0, tzinfo=timezone.utc),
+        )
+        self.assertFalse(at_15.allowed)
+        self.assertTrue(at_15.retryable)
+        self.assertIn("minute", at_15.reasons[0])
+
+
+class ApprovalSendGateTests(unittest.TestCase):
+    """Approval-lane caller resolution and the evaluate_approved_send wrapper."""
+
+    def _config_file(self, config):
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        try:
+            json.dump(config, tmp)
+        finally:
+            tmp.close()
+        self.addCleanup(lambda: Path(tmp.name).unlink(missing_ok=True))
+        return tmp.name
+
+    def test_approval_caller_prefers_dialpad_send_caller(self):
+        env = {"DIALPAD_SEND_CALLER": " team-lilla "}
+        self.assertEqual(send_gate.approval_caller_from_env(env), "team-lilla")
+
+    def test_approval_caller_falls_back_to_operator_only_when_defined(self):
+        with_operator = self._config_file(CONFIG)
+        env = {"DIALPAD_SEND_GATE_CONFIG": with_operator}
+        self.assertEqual(send_gate.approval_caller_from_env(env), "operator")
+
+        no_operator = {
+            **CONFIG,
+            "callers": {"team-scott": CONFIG["callers"]["team-scott"]},
+        }
+        without_operator = self._config_file(no_operator)
+        env = {"DIALPAD_SEND_GATE_CONFIG": without_operator}
+        self.assertIsNone(send_gate.approval_caller_from_env(env))
+
+    def test_approval_caller_unset_without_config(self):
+        self.assertIsNone(send_gate.approval_caller_from_env({}))
+
+    def test_evaluate_approved_send_resolves_operator_fallback(self):
+        path = self._config_file(CONFIG)
+        env = {"DIALPAD_SEND_GATE_CONFIG": path}
+        decision = send_gate.evaluate_approved_send(
+            from_number="+14155550140",
+            to_numbers=[PACIFIC_TO],
+            now_utc=GOOD_UTC,
+            opt_out_sources=_sources(),
+            env=env,
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.caller, "operator")
+
+    def test_evaluate_approved_send_env_caller_wins(self):
+        path = self._config_file(CONFIG)
+        env = {"DIALPAD_SEND_GATE_CONFIG": path, "DIALPAD_SEND_CALLER": "team-scott"}
+        decision = send_gate.evaluate_approved_send(
+            from_number="+14152230323",
+            to_numbers=[PACIFIC_TO],
+            now_utc=GOOD_UTC,
+            opt_out_sources=_sources(),
+            env=env,
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.caller, "team-scott")
+
+    def test_evaluate_approved_send_refuses_unapproved_line(self):
+        path = self._config_file(CONFIG)
+        env = {"DIALPAD_SEND_GATE_CONFIG": path}
+        decision = send_gate.evaluate_approved_send(
+            from_number="+14158701945",
+            to_numbers=[PACIFIC_TO],
+            now_utc=GOOD_UTC,
+            opt_out_sources=_sources(),
+            env=env,
+        )
+        self.assertFalse(decision.allowed)
+        self.assertFalse(decision.retryable)
+
+
 class EnvSourceTests(unittest.TestCase):
     def test_missing_company_id_refuses(self):
         sources = send_gate.env_opt_out_sources({"DIALPAD_API_KEY": "k"})

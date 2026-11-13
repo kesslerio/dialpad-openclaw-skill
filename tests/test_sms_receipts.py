@@ -211,13 +211,18 @@ class SmsReceiptTests(unittest.TestCase):
             draft_text="Approved text",
         )
 
-        result = sms_approval.approve_draft(
-            conn,
-            draft_id=draft["draft_id"],
-            actor_id="12345",
-            actor_username="operator",
-            send_func=lambda *_args, **_kwargs: {"id": "approval-msg", "message_status": "pending"},
-        )
+        with patch.object(
+            send_gate,
+            "evaluate_from_environment",
+            return_value=send_gate.Decision(allowed=True),
+        ):
+            result = sms_approval.approve_draft(
+                conn,
+                draft_id=draft["draft_id"],
+                actor_id="12345",
+                actor_username="operator",
+                send_func=lambda *_args, **_kwargs: {"id": "approval-msg", "message_status": "pending"},
+            )
 
         self.assertTrue(result["sent"])
         receipts = self._read_receipts()
@@ -245,13 +250,18 @@ class SmsReceiptTests(unittest.TestCase):
             draft_text="Approved text",
         )
 
-        result = sms_approval.approve_draft(
-            conn,
-            draft_id=draft["draft_id"],
-            actor_id="12345",
-            actor_username="operator",
-            send_func=lambda *_args, **_kwargs: {"id": "approval-msg-2", "message_status": "pending"},
-        )
+        with patch.object(
+            send_gate,
+            "evaluate_from_environment",
+            return_value=send_gate.Decision(allowed=True),
+        ):
+            result = sms_approval.approve_draft(
+                conn,
+                draft_id=draft["draft_id"],
+                actor_id="12345",
+                actor_username="operator",
+                send_func=lambda *_args, **_kwargs: {"id": "approval-msg-2", "message_status": "pending"},
+            )
 
         self.assertTrue(result["sent"])
         self.assertEqual(result["receipt_ledger"], "append_failed")

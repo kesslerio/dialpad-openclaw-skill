@@ -73,6 +73,13 @@ def main() -> int:
             conn.close()
 
         if not result.get("ok"):
+            if result.get("status") == "send_gate_refused":
+                raise WrapperError(
+                    f"Send gate refused: {result.get('reason') or result.get('status')}",
+                    code="send_gate_refused",
+                    retryable=bool(result.get("retryable")),
+                    meta={"result": result},
+                )
             raise WrapperError(str(result.get("status") or "approval_failed"), code="validation_failed", retryable=False, meta={"result": result})
         if json_mode:
             emit_success(command, wrapper, result)

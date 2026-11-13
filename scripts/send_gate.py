@@ -598,3 +598,51 @@ def evaluate_from_environment(
         opt_out_sources=sources,
         config=config,
     )
+
+
+def approval_caller_from_env(env: Mapping[str, str] | None = None) -> str | None:
+    """Caller id for a person-approved send (approval tool, Telegram callback).
+
+    ``DIALPAD_SEND_CALLER`` in the service environment wins. When it is unset
+    the caller falls back to ``"operator"``, but only if the gate config
+    defines an ``"operator"`` caller — a config without one leaves the caller
+    unset so the send is refused as an unknown caller instead of silently
+    assuming a shared identity.
+    """
+    environ = os.environ if env is None else env
+    caller = (environ.get(CALLER_ENV) or "").strip()
+    if caller:
+        return caller
+    try:
+        config = load_config_from_env(environ)
+    except Exception:  # noqa: BLE001 - a config failure fails closed inside the evaluation.
+        return None
+    callers = config.get("callers") if isinstance(config, dict) else None
+    if isinstance(callers, dict) and "operator" in callers:
+        return "operator"
+    return None
+
+
+def evaluate_approved_send(
+    *,
+    from_number: str | None,
+    to_numbers: list[str],
+    now_utc: datetime | None = None,
+    opt_out_sources: OptOutSources | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Decision:
+    """Gate evaluation for a send a person approved (SMS approval drafts).
+
+    Runs the identical checks as the direct-send paths. The caller is
+    resolved by :func:`approval_caller_from_env`; the sender line and the
+    recipient come from the approved draft, not from new input.
+    """
+    environ = os.environ if env is None else env
+    return evaluate_from_environment(
+        caller=approval_caller_from_env(environ),
+        from_number=from_number,
+        to_numbers=to_numbers,
+        now_utc=now_utc,
+        opt_out_sources=opt_out_sources,
+        env=environ,
+    )

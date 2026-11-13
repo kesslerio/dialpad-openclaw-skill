@@ -232,7 +232,9 @@ Tools (each with `additionalProperties: false`; unknown args error):
 
 Inbound SMS alerts (`scripts/team_alerts.py`, wired in
 `scripts/webhook_server.py` next to the existing `ops_wake.notify_sms_event`)
-forward a minimal wake payload — event kind, own line, message id, hook URL —
+forward a minimal wake payload — `event`, `line`, `occurred_at`, the
+Dialpad `message_id`/`conversation_id`/`mms` flags, `sent_at`, and
+`suppressed_since_last` —
 never message bodies or customer numbers; the receiving assistant calls
 `read_thread` for content. Forwarding reuses ops-wake's dedupe claim
 (`team-alert:<caller>:` namespace in its own dedupe DB), its minute/hour

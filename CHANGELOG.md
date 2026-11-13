@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-12
+
+- fix(webhook): commit the hardening already running on the deploy host since Oct 29 so a redeploy can't drop it: `/store` accepts only loopback clients with no proxy headers and a matching `DIALPAD_STORE_TOKEN` (unset token disables `/store`); the server binds to `DIALPAD_BIND_HOSTS` (default `127.0.0.1`, extra hosts best-effort) instead of `0.0.0.0`; the hooks call no longer invents an `X-Forwarded-For` (only sent when `OPENCLAW_HOOKS_CLIENT_IP` is set); missed-call history lookups stay 15s behind local now; 500 responses no longer echo exception text.
+- test(webhook): cover the `/store` localhost + token gate — non-local clients, cloudflared proxy headers (`Cf-Connecting-Ip`, `Cf-Ray`, `X-Forwarded-For`, `Cdn-Loop`), unset and wrong `DIALPAD_STORE_TOKEN`, `X-Store-Token` and `Authorization: Bearer` paths, `::1`/`::ffff:127.0.0.1` loopback — plus the generic `{"error":"internal error"}` 500 body and `DIALPAD_BIND_HOSTS` parsing.
+- test(webhook): update the `/store` receipt-mutation regression to pass the new gate (local client + store token) so it still proves delivery-status mutation is refused with `delivery_status_requires_authenticated_webhook`.
+- fix(webhook): the `delivery_status` branch of `/webhook/dialpad` now returns the generic `{"error":"internal error"}` 500 body and logs the failure server-side instead of echoing `str(exc)`; README and `systemd/dialpad-log-api.service` now document `DIALPAD_BIND_HOSTS` (default `127.0.0.1`, Docker bridge gateway as an extra host for container reachability) and the `/store` loopback + `DIALPAD_STORE_TOKEN` contract.
+
 ## 2026-09-22
 
 - fix(send_sms): run the generated Dialpad CLI through a deterministic managed environment — the wrapper's own interpreter with `vendor/`, constructed from the pinned, hash-verified `requirements.txt` by `scripts/build_vendor.py` (the tree itself is untracked; see `docs/reference/vendor-build.md`) — instead of discovering an ambient `uv` on `PATH`, which the deployed gateway runtime does not carry. This closes the #89/#155 recurrence where the CLI failed with `ModuleNotFoundError: No module named 'click'` and every approved send needed the direct-API fallback.

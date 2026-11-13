@@ -135,8 +135,17 @@ export OPENCLAW_HOOKS_SMS_ENABLED="1"
 export OPENCLAW_HOOKS_CALL_ENABLED="1"
 export OPENCLAW_HOOKS_INCLUDE_SESSION_KEY="0" # 0 (default): server-derived; 1: legacy request-supplied
 
+# Optional webhook bind hosts, comma-separated (default: 127.0.0.1, loopback
+# only). Add the Docker bridge gateway (e.g. 172.17.0.1) as an extra host when a
+# container must reach the server, e.g. for the draft callback below.
+export DIALPAD_BIND_HOSTS="127.0.0.1"
+
+# Optional /store shared token; unset disables /store (see the /store note below)
+export DIALPAD_STORE_TOKEN="replace-with-a-long-random-token"
+
 # Optional merged-flow agent draft callback URL. The default is reachable from
-# the AlphaClaw/OpenClaw gateway container when the webhook binds 0.0.0.0:8888.
+# the AlphaClaw/OpenClaw gateway container when DIALPAD_BIND_HOSTS includes the
+# container's Docker bridge gateway address (e.g. 172.17.0.1).
 export DIALPAD_DRAFT_CALLBACK_URL="http://host.docker.internal:8888/internal/draft-callback"
 
 # Optional sales-line first-contact auto-replies (disabled by default)
@@ -206,7 +215,7 @@ creates provider configuration only; it does not send an SMS.
 Notes:
 
 - `/webhook/dialpad` handles SMS storage plus optional OpenClaw/Telegram fan-out
-- `/store` remains the legacy full-message plugin path; it rejects sparse delivery-status mutation because it is not the authenticated Dialpad webhook
+- `/store` remains the legacy full-message plugin path; it serves loopback clients only, rejects any request carrying proxy headers (`Cf-Connecting-Ip`, `Cf-Ray`, `X-Forwarded-For`, `Cdn-Loop`), and requires `X-Store-Token` or `Authorization: Bearer` matching `DIALPAD_STORE_TOKEN` — an unset token disables `/store`. It still rejects sparse delivery-status mutation because it is not the authenticated Dialpad webhook
 - `/webhook/telegram` handles Telegram inline approval button callbacks; it requires `X-Telegram-Bot-Api-Secret-Token` and the configured Telegram chat id
 - `/webhook/dialpad-call` handles missed-call Telegram alerts using the event timestamp when available, with dynamic Markdown escaping, compact `inboundContext` briefs, plus optional OpenClaw hook forwarding
 - `/webhook/dialpad-voicemail` sends Telegram alerts and can create first-contact sales-line SMS approval drafts, but does not send SMS directly

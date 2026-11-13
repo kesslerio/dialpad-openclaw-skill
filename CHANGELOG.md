@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-13
+
+- feat(send_api): add `scripts/send_api_server.py`, a loopback-only authenticated HTTP send service for shared team assistants — per-assistant bearer tokens map (SHA-256 digests in mode-0600 `DIALPAD_SEND_API_TOKENS`, reloaded with the gate config when either file's mtime changes, fail-closed) to send-gate caller ids and run the existing gated `bin/send_sms.py --message-stdin --json` path with `DIALPAD_SEND_CALLER` scrubbed from the child env; refuses sends to/from the support line before anything runs, accepts only +1 10-digit numbers, maps child envelopes to 200/400/422/502/504 (a timeout or unparseable real-send envelope is non-retryable `send_outcome_unknown`), and adds `scripts/send_api_tokens.py` (stdin-only `add`, `revoke`, `list`) plus `systemd/dialpad-send-api.service` and a host drop-in example. Cloudflare Access + tunnel edge stays pending for the account owner.
+- test(send_api): cover bearer auth, token-to-caller mapping, body validation, support-line refusal, dry-run argv, stdin message delivery, env scrubbing, gate-refusal envelopes, timeout/unparseable upstream handling, startup refusals, token-map revoke/corruption fail-closed, the real `bin/send_sms.py --dry-run` subprocess path, and the token CLI.
+
 ## 2026-11-12
 
 - fix(webhook): commit the hardening already running on the deploy host since Oct 29 so a redeploy can't drop it: `/store` accepts only loopback clients with no proxy headers and a matching `DIALPAD_STORE_TOKEN` (unset token disables `/store`); the server binds to `DIALPAD_BIND_HOSTS` (default `127.0.0.1`, extra hosts best-effort) instead of `0.0.0.0`; the hooks call no longer invents an `X-Forwarded-For` (only sent when `OPENCLAW_HOOKS_CLIENT_IP` is set); missed-call history lookups stay 15s behind local now; 500 responses no longer echo exception text.

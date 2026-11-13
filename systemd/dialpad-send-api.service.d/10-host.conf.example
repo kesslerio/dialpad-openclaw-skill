@@ -1,0 +1,18 @@
+# Example host overlay for dialpad-send-api.service.
+# Install as %h/.config/systemd/user/dialpad-send-api.service.d/10-host.conf
+# then `systemctl --user daemon-reload && systemctl --user restart dialpad-send-api`.
+
+[Service]
+# Reset the repo-template EnvironmentFile list and load the same credential
+# files the live webhook service uses on this host.
+EnvironmentFile=
+EnvironmentFile=%h/.config/op/work-agent.env
+EnvironmentFile=%h/.config/systemd/user/work-secrets.conf
+EnvironmentFile=%h/.config/systemd/user/work-runtime.conf
+EnvironmentFile=%h/.config/systemd/user/dialpad-runtime.conf
+Environment=DIALPAD_SEND_GATE_CONFIG=%h/.config/systemd/user/dialpad-send-gate.json
+Environment=DIALPAD_SEND_API_TOKENS=%h/.config/dialpad/send-api-tokens.json
+Environment=DIALPAD_COMPANY_ID=<company id>
+# Interpreter override example for a different python path on this host:
+ExecStart=
+ExecStart=/usr/bin/python3 %h/projects/skills/work/dialpad/scripts/send_api_server.py

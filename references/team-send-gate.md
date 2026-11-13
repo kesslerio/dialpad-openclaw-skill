@@ -1,4 +1,4 @@
-# Team Send Gate (Phase 1)
+# Team Send Gate
 
 Shared team assistants may send SMS only through the gated path enforced by
 `scripts/send_gate.py`, wired into `bin/send_sms.py`, `scripts/send_sms.py`,
@@ -94,15 +94,66 @@ Evaluates the full gate (both opt-out sources read) and prints the decision
 plus what would be sent; no `POST /sms`, no shared-log write. Non-zero exit on
 refusal.
 
-## Phase 2 (not built)
+## Phase 2: team send API (built on the host, edge pending)
 
-A small HTTP endpoint on the deploy host, bound to 127.0.0.1 and exposed only
-through a token-run cloudflared tunnel hostname behind Cloudflare Access (the
-team knowledge brain pattern). One Access service token per assistant plus an
-app-level bearer per assistant, each in 1Password and revocable alone; the
-origin verifies the Access JWT (`Cf-Access-Jwt-Assertion`, AUD check) and maps
-the token to a gate caller id. Shared-log reads go through the existing
-Interaction Log API with a read-scoped token.
+`scripts/send_api_server.py` is a loopback-only HTTP service on the deploy
+host (`DIALPAD_SEND_API_BIND`, default `127.0.0.1`; `DIALPAD_SEND_API_PORT`,
+default `18889`). Each assistant holds its own bearer token; the service
+hashes it with SHA-256 and maps the digest to a gate caller id from
+`DIALPAD_SEND_API_TOKENS` — a JSON map of `sha256(token) -> {caller, label}`
+stored mode 0600, never raw tokens. The caller id comes only from the map,
+never from the request. The service refuses any send to or from the support
+line `+14159917155` before running anything, then runs the gated
+`bin/send_sms.py --message-stdin --json` subprocess with
+`DIALPAD_SEND_CALLER` scrubbed from the child environment, so nobody but
+this service holds the Dialpad API key.
+
+- `POST /v1/sms/send` — body `{"to", "from", "message", "dry_run"}`; `to` and
+  `from` must be `+1` NANP numbers (400 `invalid_argument`, the same status
+  used when the child reports an `invalid_argument` error). `dry_run` maps
+  to `bin/send_sms.py --dry-run` (gate evaluated, no provider call). A gate
+  refusal returns 422 `send_gate_refused` with the reasons and
+  `retry_after_seconds` when present; other child errors return 502 with the
+  child's code and retryable flag. When the send outcome cannot be known —
+  a child timeout (504) or an unparseable child envelope on a real send
+  (502) — the service returns non-retryable `send_outcome_unknown` ("send
+  outcome unknown; check the thread before resending") so a blind retry
+  cannot double-send; unparseable output on a dry run stays 502
+  `upstream_error`. `GET /health` requires the bearer and returns the
+  mapped caller.
+- `scripts/send_api_tokens.py` — operator CLI: `add` reads one token from
+  stdin and stores only its digest; `revoke --label` and `list` (labels and
+  callers only). Writes are atomic at mode 0600. The service re-reads the
+  map on mtime change — and, when the gate config comes from
+  `DIALPAD_SEND_GATE_CONFIG`, re-reads that too — so a revocation or a new
+  caller takes effect without a restart and a corrupt map or config fails
+  closed.
+- `systemd/dialpad-send-api.service` is the user unit (modeled on
+  `dialpad-log-api.service`); `systemd/dialpad-send-api.service.d/10-host.conf.example`
+  shows the deploy-host drop-in loading the same credential files the live
+  webhook uses plus the gate-config and token-map paths.
+
+Edge (pending, set up by the Cloudflare account owner; nothing is created
+from this repo). Reuse the existing remotely managed tunnel on the deploy
+host that already serves the team knowledge brain; no new tunnel and no
+`cloudflared tunnel login`:
+
+1. Add a public hostname route on that tunnel (suggested
+   `team-dialpad.shapescale.com`) with service `http://127.0.0.1:18889`.
+   The running connector picks the route up from the dashboard; the host
+   side needs no change.
+2. Create a self-hosted Access application for that hostname only, with a
+   single Service Auth policy that allows only the per-assistant service
+   tokens. No identity-provider login, no bypass rule.
+3. Create one Access service token per assistant (one per `team-*`
+   caller), each with its own name and expiry, so one can be revoked
+   alone.
+4. On the route, turn on origin Access enforcement (Protect with Access,
+   using the application's AUD tag) so cloudflared itself rejects requests
+   without a valid Access JWT. The service does not parse JWTs.
+
+Shared-log reads go through the existing Interaction Log API with a
+read-scoped token.
 
 ## Owner actions
 
@@ -126,5 +177,10 @@ be sent by that teammate's own `team-*` caller.
 - [ ] Confirm the `DIALPAD_API_KEY` on the host is a company-admin key — the
       smsoptout endpoint requires one — and that the approval DB with
       `sms_approval_opt_outs` exists; otherwise every send is refused.
-- [ ] Phase 2: create the Access app + service tokens, the tunnel route, and
-      the app tokens.
+- [ ] Create the send-api token map (`DIALPAD_SEND_API_TOKENS`, mode 0600)
+      with `scripts/send_api_tokens.py add` — one token per `team-*` caller.
+- [ ] Install `systemd/dialpad-send-api.service` plus the host drop-in and
+      start the user unit.
+- [ ] Phase 2 edge: add the hostname route on the existing team tunnel,
+      the Access app, and one service token per assistant (Cloudflare
+      account owner).

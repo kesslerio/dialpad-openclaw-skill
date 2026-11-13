@@ -42,6 +42,11 @@ import ops_wake
 import send_api_server
 import send_gate
 
+try:
+    import fcntl
+except ImportError:  # non-POSIX fallback: the process lock still applies.
+    fcntl = None
+
 CONFIG_ENV = "DIALPAD_TEAM_MCP_CONFIG"
 MAX_URL_CHARS = 2048
 MAX_KEY_CHARS = 256
@@ -188,12 +193,17 @@ def validate_alert_url(url: Any, *, allowed_hosts: list[str]) -> str:
     return text
 
 
+_store_lock = threading.Lock()
+
+
 def load_alert_store(path: str | Path, *, strict: bool = False) -> dict[str, Any]:
     """``{caller: {url, key, updated_at}}``; missing reads as empty, and a
-    corrupt store reads as empty for forwarding but raises when strict
-    (registration writes must not silently clobber other callers)."""
+    corrupt or wrongly-moded store (it holds keys, so group/world-readable
+    is refused like the MCP config) reads as empty for forwarding but
+    raises when strict — registration writes must not silently clobber
+    other callers."""
     try:
-        raw = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        raw = read_private_json(path)
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as exc:
@@ -210,19 +220,33 @@ def load_alert_store(path: str | Path, *, strict: bool = False) -> dict[str, Any
 
 
 def set_alert_registration(store_path: str | Path, caller: str, url: str, key: str) -> None:
-    """Persist one caller's alert endpoint; an empty url clears it."""
+    """Persist one caller's alert endpoint; an empty url clears it.
+
+    The read-modify-write is serialized by an in-process lock plus an
+    ``flock`` on a sibling ``<store>.lock`` file, so concurrent
+    registrations — ThreadingHTTPServer workers here or a second writer
+    elsewhere — cannot lose each other. Readers always see a complete
+    file through the atomic mode-0600 replace, so they need no lock."""
     path = Path(store_path).expanduser()
-    entries = load_alert_store(path, strict=True)
-    if url:
-        entries[caller] = {
-            "url": url,
-            "key": key,
-            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
-    else:
-        entries.pop(caller, None)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_private_json(path, entries)
+    with _store_lock:
+        with open(path.with_name(path.name + ".lock"), "a", encoding="utf-8") as lock_handle:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                entries = load_alert_store(path, strict=True)
+                if url:
+                    entries[caller] = {
+                        "url": url,
+                        "key": key,
+                        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    }
+                else:
+                    entries.pop(caller, None)
+                write_private_json(path, entries)
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def _alerts_config(environ: Mapping[str, str]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:

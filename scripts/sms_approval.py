@@ -1026,6 +1026,7 @@ def approve_draft(
             },
             send_result=result,
             source="approval_lane",
+            extra=gate.receipt_context(),
         )
         conn.execute(
             """

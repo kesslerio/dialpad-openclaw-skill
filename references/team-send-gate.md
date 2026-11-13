@@ -76,9 +76,9 @@ from the environment alongside `DIALPAD_COMPANY_ID`.
   unset it falls back to `operator`, but only if the config defines an
   `operator` caller — a config without one leaves the caller unset and the
   send is refused. A refusal makes no provider call and leaves the draft in
-  its retryable pending state (never `failed`), reports `send_gate_refused`
-  with the reasons, and carries `retry_after_seconds` for window/minute
-  refusals.
+  its retryable `pending` or `risk_pending` state (never `failed`), reports
+  `send_gate_refused` with the reasons, and carries `retry_after_seconds`
+  for window/minute refusals.
 - **Not gated:** the raw `generated/dialpad` CLI only. Phase 2 closes it by
   keeping shared team assistants off the raw API key, so the gated endpoint
   is their only send path; direct key holders stay on the gated CLIs.
@@ -111,8 +111,12 @@ The caller-to-line mapping is decided in `references/send-gate.example.json`
 send from the `office` and `sales` shared lines plus only their own person's
 line via `acts_for`, and `operator` shares the two shared lines plus the
 approved extra line `+14153602954`, still time-restricted like every other
-caller. Person-approved sends (Telegram approval / draft approve) pass the
-gate as the `DIALPAD_SEND_CALLER` caller, or `operator` when it is unset.
+caller. Human-approved sends (Telegram approval / draft approve) pass the
+gate under one service-wide caller — `DIALPAD_SEND_CALLER` on the
+webhook/approval service, or `operator` when it is unset — so with the
+default mapping a draft whose sender is a teammate's own line is refused
+there (`operator` holds no teammate line); drafts from teammate lines must
+be sent by that teammate's own `team-*` caller.
 
 - [ ] Create the config on the host (`DIALPAD_SEND_GATE_CONFIG`) from the
       decided defaults in `references/send-gate.example.json`.

@@ -348,47 +348,59 @@ class SendApiRequestHandler(BaseHTTPRequestHandler):
                 to_tail=to_tail,
             )
             return
-        argv = [
-            sys.executable,
-            str(SEND_SMS_SCRIPT),
-            "--to",
-            to,
-            "--from",
-            from_number,
-            "--caller",
-            caller,
-            "--message-stdin",
-            "--json",
-        ]
-        if dry_run:
-            argv.append("--dry-run")
-        env = {key: value for key, value in self.server.environ.items() if key != send_gate.CALLER_ENV}
-        try:
-            proc = self.server.send_runner(argv, message=message, env=env, timeout=SEND_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            self._finish(
-                504,
-                command,
-                _error_payload(command, "send_outcome_unknown", OUTCOME_UNKNOWN_MESSAGE),
-                caller=caller,
-                route=route,
-                dry_run=dry_run,
-                to_tail=to_tail,
-            )
-            return
-        except Exception:  # noqa: BLE001 - a runner failure must not leak details upstream.
-            self._finish(
-                502,
-                command,
-                _error_payload(command, "upstream_error", "upstream send failed"),
-                caller=caller,
-                route=route,
-                dry_run=dry_run,
-                to_tail=to_tail,
-            )
-            return
-        status, response = _map_child_result(proc, command, dry_run=dry_run)
+        status, response = execute_gated_send(
+            to=to,
+            from_number=from_number,
+            message=message,
+            caller=caller,
+            dry_run=dry_run,
+            environ=self.server.environ,
+            send_runner=self.server.send_runner,
+            command=command,
+        )
         self._finish(status, command, response, caller=caller, route=route, dry_run=dry_run, to_tail=to_tail)
+
+
+def execute_gated_send(
+    *,
+    to: str,
+    from_number: str,
+    message: str,
+    caller: str,
+    dry_run: bool,
+    environ: Mapping[str, str],
+    send_runner: Any,
+    timeout: float = SEND_TIMEOUT_SECONDS,
+    command: str = "send_api.send",
+) -> tuple[int, dict[str, Any]]:
+    """Run the gated ``bin/send_sms.py`` subprocess for one mapped caller.
+
+    The message rides on stdin and ``DIALPAD_SEND_CALLER`` is scrubbed from
+    the child environment. Returns (status, service envelope); shared by the
+    send API and the team MCP server so both relay the same child codes.
+    """
+    argv = [
+        sys.executable,
+        str(SEND_SMS_SCRIPT),
+        "--to",
+        to,
+        "--from",
+        from_number,
+        "--caller",
+        caller,
+        "--message-stdin",
+        "--json",
+    ]
+    if dry_run:
+        argv.append("--dry-run")
+    env = {key: value for key, value in environ.items() if key != send_gate.CALLER_ENV}
+    try:
+        proc = send_runner(argv, message=message, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 504, _error_payload(command, "send_outcome_unknown", OUTCOME_UNKNOWN_MESSAGE)
+    except Exception:  # noqa: BLE001 - a runner failure must not leak details upstream.
+        return 502, _error_payload(command, "upstream_error", "upstream send failed")
+    return _map_child_result(proc, command, dry_run=dry_run)
 
 
 def _map_child_result(proc: subprocess.CompletedProcess, command: str, *, dry_run: bool) -> tuple[int, dict[str, Any]]:

@@ -1,0 +1,23 @@
+{
+  "access": {
+    "team_domain": "<team>.cloudflareaccess.com",
+    "aud": "<access app aud tag>"
+  },
+  "email_callers": {
+    "scott@example.com": "team-scott",
+    "lilla@example.com": "team-lilla",
+    "alexandre@example.com": "team-alexandre"
+  },
+  "allow_bearer_fallback": true,
+  "allowed_origins": [],
+  "alerts": {
+    "store": "~/.config/dialpad/team-alerts.json",
+    "dedupe_db": "~/.config/dialpad/team-alerts.dedupe.db",
+    "allowed_url_hosts": ["hooks.example.com"],
+    "callers": {
+      "team-scott": {"shared_lines": ["office"]},
+      "team-lilla": {"shared_lines": []},
+      "team-alexandre": {"shared_lines": []}
+    }
+  }
+}

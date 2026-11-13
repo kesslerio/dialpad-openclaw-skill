@@ -224,6 +224,16 @@ def _allowed_lines(config: dict[str, Any], caller_entry: dict[str, Any]) -> set[
     return {_canonical_sender(number) for number in numbers if number}
 
 
+def allowed_lines_for_caller(config: dict[str, Any], caller: str | None) -> set[str]:
+    """Every line a caller may act on: its shared lines, its ``acts_for``
+    teammate line, and any ``extra_allowed_lines``. Empty for unknown callers."""
+    callers = config.get("callers") if isinstance(config, dict) else None
+    entry = (callers or {}).get(caller or "", None)
+    if not isinstance(entry, dict):
+        return set()
+    return _allowed_lines(config, entry)
+
+
 # --------------------------------------------------------------------------
 # Opt-out sources
 # --------------------------------------------------------------------------
